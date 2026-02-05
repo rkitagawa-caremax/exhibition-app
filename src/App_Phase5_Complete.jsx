@@ -1,0 +1,5753 @@
+import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
+import {
+  Calendar, MapPin, Users, Target, LayoutDashboard,
+  FileText, Plus, CheckSquare, Upload, Building2,
+  AlertCircle, Save, ArrowLeft, Briefcase, PenTool,
+  Search, Mail, X, QrCode, Wallet, MessageCircle,
+  Send, ScanLine, TrendingUp, Trash2, Link as LinkIcon,
+  DollarSign, RefreshCw, Clock, Map, Database, CheckCircle,
+  GripVertical, UserX, UserCheck, List, Edit3, Flag,
+  AlertTriangle, ExternalLink, Copy, Check, FileSpreadsheet,
+  UserPlus, Settings, Download, Eye, Folder, PackageCheck,
+  Camera, Loader, Ghost, BedDouble, CalendarDays, Menu,
+  ChevronDown, ChevronUp, ChevronRight, RefreshCcw, Trash, GitBranch, Mic, Truck, Layout, User, Info, LogOut, Maximize,
+  Box, BookOpen, Star, LayoutGrid, Grid, Image, Radio, ArrowRight
+} from 'lucide-react';
+import ExcelJS from 'exceljs';
+import { saveAs } from 'file-saver';
+import { initializeApp } from "firebase/app";
+import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
+import { getFirestore, collection, updateDoc, doc, deleteDoc, onSnapshot, setDoc, query, limit, orderBy, writeBatch, getDocs } from "firebase/firestore";
+// QRコード用ライブラリ
+import { QRCodeCanvas } from 'qrcode.react';
+import { Scanner } from '@yudiel/react-qr-scanner';
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, Legend } from 'recharts';
+
+// ============================================================================
+// 1. 定数・ヘルパー関数・初期データ
+// ============================================================================
+
+const PREFECTURES = [
+  { region: "北海道・東北", prefs: ["北海道", "青森", "岩手", "宮城", "秋田", "山形", "福島"] },
+  { region: "関東", prefs: ["東京", "神奈川", "埼玉", "千葉", "茨城", "栃木", "群馬"] },
+  { region: "中部", prefs: ["愛知", "静岡", "岐阜", "三重", "山梨", "長野", "新潟", "富山", "石川", "福井"] },
+  { region: "近畿", prefs: ["大阪", "兵庫", "京都", "滋賀", "奈良", "和歌山"] },
+  { region: "中国・四国", prefs: ["広島", "岡山", "鳥取", "島根", "山口", "香川", "徳島", "愛媛", "高知"] },
+  { region: "九州・沖縄", prefs: ["福岡", "佐賀", "長崎", "熊本", "大分", "宮崎", "鹿児島", "沖縄"] },
+];
+
+const EQUIPMENT_OPTIONS = ["長机", "椅子", "プロジェクター", "マイク", "マイクスタンド", "スクリーン", "演台", "パーテーション"];
+const MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1hnZdkquaybY-bBSAevnW2BOLn83OdITzNvt-hmZkmVI/edit?gid=0#gid=0";
+const INITIAL_INTERNAL_SUPPLIES = [
+  "メジャー", "テープ", "消毒液", "音楽用CD", "ダンボール", "ヤマト佐川送り状",
+  "ラミネート看板", "介援隊袋", "横断幕", "延長ケーブル",
+  "自社用レイアウト用紙", "お客様用レイアウト用紙", "介援隊カタログ", "展示会案内チラシ　50枚ほど"
+].map((name, i) => ({ id: `is-${i}`, name, count: 1, checked: false }));
+
+// ▼ メーカーリスト初期値（CSV取込前提のため空配列）
+const FIXED_MAKERS_LIST = [];
+
+// ▼ 完全版タスクリスト（以前の内容を維持）
+const INITIAL_TASKS = [
+  { id: 's1', category: 'sales', phase: 'prep', title: '展示会日時・エリアの決定', status: 'done', assignee: '', dueDate: '', desc: '役員会議にて決定' },
+  { id: 's2', category: 'sales', phase: 'prep', title: '展示会場選び', status: 'done', assignee: '', dueDate: '', desc: '' },
+  { id: 's3', category: 'sales', phase: 'prep', title: '展示会場申請', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's4', category: 'sales', phase: 'prep', title: 'メーカー選定（予備リストを編集）', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's5', category: 'sales', phase: 'prep', title: '講演会企画の計画', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's6', category: 'sales', phase: 'prep', title: '電気設備会社手配', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's7', category: 'sales', phase: 'prep', title: '展示会必要品の手配（リストを参照）', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's8', category: 'sales', phase: 'prep', title: '集荷手配（ヤマト・佐川）', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's9', category: 'sales', phase: 'prep', title: 'バイトの手配と打ち合わせ', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's10', category: 'sales', phase: 'prep', title: '展示会場最終打ち合わせ', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's11', category: 'sales', phase: 'prep', title: '当日のデモンストレーション', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's12', category: 'sales', phase: 'prep', title: '得意先集客', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's13', category: 'sales', phase: 'prep', title: 'エンド（施設など）集客', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's14', category: 'sales', phase: 'prep', title: '当日の展示会運営', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's15', category: 'sales', phase: 'prep', title: '当日の講演会運営', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's16', category: 'sales', phase: 'prep', title: 'ホテル予約', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's17', category: 'sales', phase: 'prep', title: '弁当手配', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's18', category: 'sales', phase: 'prep', title: '打ち上げ会場予約', status: 'pending', assignee: '', dueDate: '', desc: '予算一人5000円以内' },
+  { id: 's20', category: 'sales', phase: 'post', title: '備品整理', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 's21', category: 'sales', phase: 'post', title: '領収書等を企画へ送付', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 'p1', category: 'planning', phase: 'prep', title: '展示会企画概要作成', status: 'done', assignee: '', dueDate: '', desc: '詳細省略' },
+  { id: 'p2', category: 'planning', phase: 'prep', title: 'メーカー選定（希望リスト編集）', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 'p3', category: 'planning', phase: 'prep', title: 'メーカー招待', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 'p4', category: 'planning', phase: 'prep', title: 'メーカー問い合わせ対応', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 'p5', category: 'planning', phase: 'prep', title: '案内チラシ作成', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 'p6', category: 'planning', phase: 'prep', title: '講演会企画の手配実行', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 'p7', category: 'planning', phase: 'prep', title: '展示会場レイアウト作成', status: 'pending', assignee: '', dueDate: '', desc: 'メーカー用・来場者用・自社用' },
+  { id: 'p8', category: 'planning', phase: 'prep', title: 'メーカー招待（催促）', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 'p9', category: 'planning', phase: 'prep', title: 'メーカー招待（第2弾）', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 'p10', category: 'planning', phase: 'prep', title: '（仮）収支報告書作成', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 'p11', category: 'planning', phase: 'prep', title: 'メーカーへチラシ配布を依頼', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 'p12', category: 'planning', phase: 'prep', title: '備品確保・貸借申請', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 'p13', category: 'planning', phase: 'prep', title: 'メーカーパネルラミネート作成', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 'p14', category: 'planning', phase: 'prep', title: '出展確定メーカーに確定メールを送信', status: 'pending', assignee: '', dueDate: '', desc: 'レイアウト添付・チラシ添付・搬入時間変更・フォーム記載の案内文' },
+  { id: 'p15', category: 'planning', phase: 'prep', title: '当日の工程表作成', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 'p16', category: 'planning', phase: 'prep', title: 'メーカー請求書作成（送付依頼）', status: 'pending', assignee: '', dueDate: '', desc: '澤田さんに出展メーカーへ送ってもらう' },
+  { id: 'p18', category: 'planning', phase: 'post', title: '入金確認（振り込み・現金集金）', status: 'pending', assignee: '経理', dueDate: '', desc: '' },
+  { id: 'p19', category: 'planning', phase: 'post', title: '展示会使用経費のデータをもらう', status: 'pending', assignee: '', dueDate: '', desc: '' },
+  { id: 'p20', category: 'planning', phase: 'post', title: '収支報告書（決定版）', status: 'pending', assignee: '', dueDate: '', desc: '' },
+];
+
+const DEFAULT_FORM_CONFIG = {
+  section1: {
+    title: '（今回の展示会のタイトル） 出展申込みフォーム',
+    description: `拝啓　貴社ますますご清栄のこととお喜び申し上げます。
+日頃は格別のお引き立てを賜り厚く御礼申しあげます。
+早速ではございますが、下記の要領で福祉用具展示会を開催する運びとなりました。
+つきましては御社ご出展をお願い致したく、ご案内申し上げます。
+ご検討の程、宜しくお願い申し上げます。敬具
+
+出展を希望されない場合も、お手数ですが、その旨お答えいただきますようお願い申し上げます。
+
+【展示会概要】
+開催日時：（開催日時、曜日なども添えて）
+会場：（今回の展示会の会場名称）
+住所：（今回の展示会の住所）
+電話：（今回の展示会場の電話番号）
+アクセス： 今回の展示会場のGoogleマップのURL
+
+搬入方法：（フリー入力スペース　日時と時間を指定可能）
+※事前に荷物の発送を希望される方：（フリー入力スペース）の時間帯でよろしくお願い致します。
+
+【宛先】（今回の展示会場の住所）
+（今回の展示会の会場名称）
+介援隊ブース〇〇ブース　(御社名を記載お願い致します)
+※当日送付は（フリー入力スペース）時以降になります。
+
+出展費用：1コマ（2.5ｍ×2.5ｍ）　30,000円(税込)　昼食付(1社2名様分まで)
+出展費用につきましては下記アンケートより希望方法をご指定ください。
+※2コマ以上をご希望の場合はスペースに限りがございますので、
+ご希望に添えない場合がございます。予めご了承下さい。
+
+【申込期日】（日時入力）　厳守
+
+出展メーカー数：100社ほどを予定しております。
+来場者：福祉用具販売・貸与事業所様、
+一部施設スタッフ・ケアマネ様、介護施設。病院関係者様など
+
+当日は午前9：15分頃より簡単な朝礼を行いますので、時間までに準備集合をお願いいたします。
+
+展示会終了後の集荷については、ヤマト、佐川急便を手配予定です。
+
+お問い合わせは、当社営業企画部(06-6150-7333)までお願い致します。`,
+    items: [
+      { id: 'companyName', label: '貴社名', type: 'text', help: '法人格は略さずに記入ください。前後にスペースは不要です。例：株式会社ケアマックスコーポレーション' },
+      { id: 'companyNameKana', label: '貴社名フリガナ', type: 'text', help: 'フリガナに法人格は不要です。全角カタカナでお願いします。例：ケアマックスコーポレーション' },
+      { id: 'repName', label: 'お名前', type: 'text', help: '出展(回答)される方、代表者1名を明記ください　例：介援　太郎' },
+      { id: 'phone', label: '携帯番号', type: 'text', help: '半角　ハイフン含めて明記ください　例：080-0000-0000' },
+      { id: 'email', label: 'メールアドレス', type: 'email', help: '' },
+      { id: 'status', label: '出展の可否について', type: 'radio', options: ['出展を申し込む', '出展を申し込まない'] }
+    ]
+  },
+  section2: {
+    title: '出展詳細入力',
+    description: '出展に必要な詳細情報をご記入ください。',
+    items: [
+      { id: 'moveInDate', label: '搬入日時', type: 'radio', options: ['前日搬入', '当日搬入'] },
+      { id: 'boothCount', label: '希望コマ数', type: 'radio', options: ['1コマ', '2コマ', 'その他要相談'] },
+      { id: 'staffCount', label: '参加人数', type: 'select', options: ['1', '2', '3', '4', '5'] },
+      { id: 'lunchCount', label: '昼食について', type: 'radio', options: ['1', '2'] },
+      { id: 'itemsDesk', label: '長机', type: 'select', options: ['0', '1', '2', '3'] },
+      { id: 'itemsChair', label: '椅子', type: 'select', options: ['0', '1', '2', '3', '4', '5', '6'] },
+      { id: 'itemsPower', label: '電源', type: 'radio', options: ['不要', '必要'] },
+      { id: 'powerDetail', label: '★電源を使用する機器について', type: 'text', help: '上記質問で電源必要と答えられた方は、配線に必要ですので、何に電源を使用するのか具体的に記入ください。', condition: { targetId: 'itemsPower', operator: 'eq', value: '必要' }, required: true },
+      { id: 'transport', label: '搬出時に会場から運送便を使う場合', type: 'radio', options: ['ヤマト', '佐川', '使用しない'] },
+      { id: 'packages', label: '出荷個口数', type: 'select', options: ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'], condition: { targetId: 'transport', operator: 'neq', value: '使用しない' } },
+      { id: 'payment', label: '出展費用支払方法', type: 'radio', options: ['仕入れより相殺', '振り込み'] },
+      { id: 'note', label: '特記事項入力欄', type: 'textarea', help: '' },
+      { id: 'billIssue', label: '出展日請求書の発行', type: 'radio', options: ['必要', '不要'] },
+      { id: 'products', label: '展示会予定品', type: 'textarea', help: '商品名を記入' }
+    ]
+  },
+  section3: {
+    title: '受付いたしました（不参加）',
+    description: `ご検討いただきありがとうございました。
+もしよろしければ、今回不参加の理由をお知らせください。
+
+今後の参考とさせていただきます。
+何卒宜しくお願い致します。
+ケアマックスコーポレーション　展示会事務局`,
+    items: [
+      { id: 'declineReason', label: '不参加理由', type: 'textarea', help: '回答無しでもOK' }
+    ]
+  },
+  mail: {
+    subject: '（展示会タイトル）　【出展のご案内】',
+    body: `ご担当者　様
+
+いつも大変お世話になっております。
+ケアマックスコーポレーションでございます。
+この度、（開催日時）に、介援隊の展示会を開催する運びとなりましたのでご案内申し上げます。
+つきましては、下記URLよりご参加の可否に関わらずご回答いただけますと幸甚に存じます。
+ご多用のところ誠に恐れ入りますが、何卒よろしくお願い申し上げます。
+
+{url}
+
+よろしくお願いいたします。`
+  }
+};
+
+const DEFAULT_VISITOR_FORM_CONFIG = {
+  title: '来場者事前登録',
+  description: '当日のスムーズな入場のため、事前登録にご協力をお願いいたします。登録完了後、入場用QRコードが発行されます。',
+  items: [
+    { id: 'type', label: '★受付区分', type: 'select', options: ['販売店', '介護・看護従事者様(看護師・介護士・ケアマネ等)', 'メーカー・製造業', '一般・個人'], required: true },
+    { id: 'companyName', label: '★会社名・法人名', type: 'text', help: '個人の場合は「個人」とご明記ください (例：株式会社ケアマックスコーポレーション)', required: true },
+    { id: 'repName', label: '★代表者名', type: 'text', help: '', required: true },
+    { id: 'phone', label: '★電話番号', type: 'text', help: 'ハイフンなしでも可', required: true },
+    { id: 'email', label: '★メールアドレス', type: 'email', help: 'QRコード送付用', required: true },
+    { id: 'invitedBy', label: '★招待企業様名', type: 'text', help: '招待状をお持ちの場合、企業名をご記入ください（任意）', required: false }
+  ]
+};
+
+const downloadCSV = (data, filename) => {
+  if (!data || !data.length) return;
+  const headers = Object.keys(data[0]);
+  const csvContent = [
+    headers.join(','),
+    ...data.map(row => headers.map(header => {
+      const val = row[header] ? String(row[header]).replace(/"/g, '""') : '';
+      return `"${val}"`;
+    }).join(','))
+  ].join('\n');
+
+  const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.setAttribute('download', filename);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+};
+
+const parseCSV = (file) => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target.result;
+      const lines = text.split(/\r\n|\n/).filter(line => line.trim());
+      const data = lines.map((line, index) => {
+        const [code, companyName] = line.split(',').map(s => s.trim().replace(/^"|"$/g, ''));
+        if (!code || !companyName) return null;
+        return {
+          id: Date.now() + index,
+          code,
+          companyName,
+          status: 'listed',
+          note: 'CSV取込',
+          accessToken: crypto.randomUUID() // 自動生成
+        };
+      }).filter(item => item !== null);
+      resolve(data);
+    };
+    reader.onerror = (e) => reject(e);
+    reader.readAsText(file);
+  });
+};
+
+const extractNum = (val) => {
+  if (typeof val === 'number') return val;
+  if (!val) return 0;
+  const halfVal = val.toString().replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0));
+  const match = halfVal.match(/\d+/);
+  return match ? parseInt(match[0], 10) : 0;
+};
+// ============================================================================
+// 2. 共通小コンポーネント & フォーム編集モーダル
+// ============================================================================
+
+function DetailItem({ label, value }) {
+  return (
+    <div>
+      <label className="block text-xs font-bold text-slate-400 mb-1">{label}</label>
+      <div className="font-medium text-slate-800 break-words">{value || '-'}</div>
+    </div>
+  );
+}
+
+// 機能強化版フォームエディタ (ラベル、補足、選択肢の編集に対応)
+function FormEditorModal({ config, onSave, onClose }) {
+  const [localConfig, setLocalConfig] = useState(config);
+  const [activeTab, setActiveTab] = useState('section1');
+  const [expandedItems, setExpandedItems] = useState({});
+
+  const toggleItem = (id) => {
+    setExpandedItems(prev => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const updateSection = (k, v) => setLocalConfig({ ...localConfig, [activeTab]: { ...localConfig[activeTab], [k]: v } });
+
+  const updateItem = (id, field, value) => {
+    const updatedItems = localConfig[activeTab].items.map(i => {
+      if (i.id === id) {
+        if (field === 'options') return { ...i, options: value.split(',').map(s => s.trim()) };
+        return { ...i, [field]: value };
+      }
+      return i;
+    });
+    updateSection('items', updatedItems);
+  };
+
+  const addOption = (itemId) => {
+    const updatedItems = localConfig[activeTab].items.map(i => {
+      if (i.id === itemId) return { ...i, options: [...(i.options || []), '新しい選択肢'] };
+      return i;
+    });
+    updateSection('items', updatedItems);
+  };
+
+  const removeOption = (itemId, index) => {
+    const updatedItems = localConfig[activeTab].items.map(i => {
+      if (i.id === itemId) {
+        const newOpts = [...(i.options || [])];
+        newOpts.splice(index, 1);
+        return { ...i, options: newOpts };
+      }
+      return i;
+    });
+    updateSection('items', updatedItems);
+  };
+
+  const updateOptionText = (itemId, index, val) => {
+    const updatedItems = localConfig[activeTab].items.map(i => {
+      if (i.id === itemId) {
+        const newOpts = [...(i.options || [])];
+        newOpts[index] = val;
+        return { ...i, options: newOpts };
+      }
+      return i;
+    });
+    updateSection('items', updatedItems);
+  };
+
+  const addItem = () => {
+    const newItem = {
+      id: `custom_${Date.now()}`,
+      label: '新しい質問',
+      type: 'text',
+      help: '',
+      required: false,
+      options: ['選択肢1', '選択肢2']
+    };
+    const updatedItems = [...(localConfig[activeTab].items || []), newItem];
+    updateSection('items', updatedItems);
+    setExpandedItems(prev => ({ ...prev, [newItem.id]: true }));
+  };
+
+  const deleteItem = (id) => {
+    if (window.confirm('この質問を削除してもよろしいですか？')) {
+      const updatedItems = localConfig[activeTab].items.filter(i => i.id !== id);
+      updateSection('items', updatedItems);
+    }
+  };
+
+  const updateCondition = (itemId, field, value) => {
+    const updatedItems = localConfig[activeTab].items.map(i => {
+      if (i.id === itemId) {
+        // If toggling condition off (value === null/false), remove it
+        if (field === 'enabled' && !value) {
+          const { condition, ...rest } = i;
+          return rest;
+        }
+        // If toggling on, add default
+        if (field === 'enabled' && value) {
+          return { ...i, condition: { targetId: '', operator: 'eq', value: '' } };
+        }
+        // Updating fields inside condition object
+        return { ...i, condition: { ...(i.condition || { targetId: '', operator: 'eq', value: '' }), [field]: value } };
+      }
+      return i;
+    });
+    updateSection('items', updatedItems);
+  };
+
+  // Helper to get options from other items for condition setting
+  const getOtherItems = (currentItemId) => {
+    return localConfig[activeTab].items.filter(i => i.id !== currentItemId && (i.type === 'radio' || i.type === 'select'));
+  };
+
+  const getOptionsForTarget = (targetId) => {
+    const target = localConfig[activeTab].items.find(i => i.id === targetId);
+    return target ? target.options || [] : [];
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-[70] flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl w-full max-w-4xl h-[90vh] flex flex-col shadow-2xl">
+        <div className="p-6 border-b flex justify-between">
+          <h3 className="font-bold text-lg">招待フォーム設定</h3>
+          <button onClick={onClose}><X /></button>
+        </div>
+        <div className="flex border-b bg-slate-50">
+          <button onClick={() => setActiveTab('section1')} className={`px-6 py-3 font-bold text-sm ${activeTab === 'section1' ? 'bg-white border-t-2 border-t-blue-500 text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}>基本情報</button>
+          <button onClick={() => setActiveTab('section2')} className={`px-6 py-3 font-bold text-sm ${activeTab === 'section2' ? 'bg-white border-t-2 border-t-blue-500 text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}>詳細情報</button>
+          <button onClick={() => setActiveTab('section3')} className={`px-6 py-3 font-bold text-sm ${activeTab === 'section3' ? 'bg-white border-t-2 border-t-blue-500 text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}>完了画面</button>
+        </div>
+        <div className="p-8 overflow-y-auto flex-1 space-y-6 bg-slate-50/50">
+          <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-1">セクションタイトル</label>
+              <input className="w-full border p-2 rounded focus:ring-2 focus:ring-blue-500 outline-none font-bold" value={localConfig[activeTab]?.title} onChange={e => updateSection('title', e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-1">説明文・案内文</label>
+              <textarea className="w-full border p-2 rounded h-32 text-sm focus:ring-2 focus:ring-blue-500 outline-none" value={localConfig[activeTab]?.description} onChange={e => updateSection('description', e.target.value)} />
+            </div>
+          </div>
+
+          {localConfig[activeTab]?.items && (
+            <div>
+              <h4 className="font-bold text-slate-700 mb-4 flex items-center gap-2"><List size={18} /> 質問項目設定</h4>
+              <div className="space-y-3">
+                {localConfig[activeTab].items.map(item => (
+                  <div key={item.id} className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+                    <div
+                      className="p-4 flex items-center justify-between cursor-pointer hover:bg-slate-50 transition-colors"
+                      onClick={() => toggleItem(item.id)}
+                    >
+                      <div className="flex items-center gap-3">
+                        <span className={`text-xs font-bold px-2 py-1 rounded border ${item.type === 'radio' ? 'bg-blue-50 text-blue-600 border-blue-200' : 'bg-slate-100 text-slate-500 border-slate-200'}`}>{item.type === 'text' ? 'テキスト' : item.type === 'radio' ? 'ラジオボタン' : item.type === 'select' ? 'プルダウン' : item.type === 'checkbox' ? 'チェックボックス' : item.type === 'textarea' ? '長文' : item.type}</span>
+                        <span className="font-bold text-slate-700">{item.label}</span>
+                        {item.required && <span className="text-xs bg-red-100 text-red-600 px-1.5 py-0.5 rounded font-bold">必須</span>}
+                        {item.condition && <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-bold flex items-center gap-1"><GitBranch size={10} /> 分岐あり</span>}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button onClick={(e) => { e.stopPropagation(); deleteItem(item.id); }} className="p-2 text-slate-300 hover:text-red-500 rounded hover:bg-red-50 transition-colors"><Trash2 size={16} /></button>
+                        {expandedItems[item.id] ? <ChevronUp size={16} className="text-slate-400" /> : <ChevronDown size={16} className="text-slate-400" />}
+                      </div>
+                    </div>
+
+                    {expandedItems[item.id] && (
+                      <div className="p-4 bg-slate-50 border-t border-slate-100 grid grid-cols-1 md:grid-cols-2 gap-4 animate-fade-in">
+                        <div className="md:col-span-2">
+                          <label className="block text-xs font-bold text-slate-400 mb-1">質問ラベル</label>
+                          <input className="w-full border p-2 rounded text-sm" value={item.label} onChange={e => updateItem(item.id, 'label', e.target.value)} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-400 mb-1">回答タイプ</label>
+                          <select className="w-full border p-2 rounded text-sm bg-white" value={item.type} onChange={e => updateItem(item.id, 'type', e.target.value)}>
+                            <option value="text">テキスト入力 (1行)</option>
+                            <option value="textarea">テキスト入力 (複数行)</option>
+                            <option value="radio">ラジオボタン (1つ選択)</option>
+                            <option value="checkbox">チェックボックス (複数選択)</option>
+                            <option value="select">プルダウン (1つ選択)</option>
+                            <option value="email">メールアドレス</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-400 mb-1">必須設定</label>
+                          <div className="flex items-center gap-2 mt-2">
+                            <input type="checkbox" checked={item.required || false} onChange={e => updateItem(item.id, 'required', e.target.checked)} className="w-4 h-4 text-blue-600 rounded" />
+                            <span className="text-sm font-bold text-slate-700">必須にする</span>
+                          </div>
+                        </div>
+                        <div className="md:col-span-2">
+                          <label className="block text-xs font-bold text-slate-400 mb-1">補足説明 (Help Text)</label>
+                          <input className="w-full border p-2 rounded text-sm" value={item.help || ''} onChange={e => updateItem(item.id, 'help', e.target.value)} />
+                        </div>
+                        {(item.type === 'select' || item.type === 'radio' || item.type === 'checkbox') && (
+                          <div className="md:col-span-2 bg-white p-4 rounded border border-slate-200">
+                            <label className="block text-xs font-bold text-slate-400 mb-2">選択肢設定</label>
+                            <div className="space-y-2">
+                              {(item.options || []).map((opt, idx) => (
+                                <div key={idx} className="flex gap-2">
+                                  <input
+                                    className="flex-1 border p-2 rounded text-sm"
+                                    value={opt}
+                                    onChange={e => updateOptionText(item.id, idx, e.target.value)}
+                                  />
+                                  <button
+                                    onClick={() => removeOption(item.id, idx)}
+                                    className="bg-red-50 text-red-500 p-2 rounded hover:bg-red-100"
+                                    title="削除"
+                                  >
+                                    <Trash2 size={16} />
+                                  </button>
+                                </div>
+                              ))}
+                              <button
+                                onClick={() => addOption(item.id)}
+                                className="w-full py-2 border-2 border-dashed border-slate-300 rounded text-slate-400 text-sm font-bold hover:bg-slate-50 hover:border-slate-400 flex items-center justify-center gap-2 transition-colors"
+                              >
+                                <Plus size={16} /> 選択肢を追加
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Conditional Logic UI */}
+                        <div className="md:col-span-2 bg-amber-50 p-4 rounded border border-amber-200 mt-2">
+                          <div className="flex items-center justify-between mb-2">
+                            <label className="text-xs font-bold text-amber-800 flex items-center gap-2"><GitBranch size={14} /> 表示条件設定 (条件付きで表示)</label>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={!!item.condition}
+                                onChange={e => updateCondition(item.id, 'enabled', e.target.checked)}
+                                className="w-4 h-4 text-amber-600 rounded"
+                              />
+                              <span className="text-xs font-bold text-amber-700">条件を有効にする</span>
+                            </div>
+                          </div>
+
+                          {item.condition && (
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 animate-fade-in">
+                              <div>
+                                <label className="block text-[10px] font-bold text-amber-600 mb-1">この質問の回答が...</label>
+                                <select
+                                  className="w-full border p-2 rounded text-xs bg-white"
+                                  value={item.condition.targetId}
+                                  onChange={e => updateCondition(item.id, 'targetId', e.target.value)}
+                                >
+                                  <option value="">(質問を選択)</option>
+                                  {getOtherItems(item.id).map(opt => (
+                                    <option key={opt.id} value={opt.id}>{opt.label.length > 15 ? opt.label.substring(0, 15) + '...' : opt.label}</option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-[10px] font-bold text-amber-600 mb-1">条件 (一致/不一致)</label>
+                                <select
+                                  className="w-full border p-2 rounded text-xs bg-white"
+                                  value={item.condition.operator}
+                                  onChange={e => updateCondition(item.id, 'operator', e.target.value)}
+                                >
+                                  <option value="eq">と等しい時 (Equals)</option>
+                                  <option value="neq">と異なる時 (Not Equals)</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-[10px] font-bold text-amber-600 mb-1">対象の値</label>
+                                {item.condition.targetId && (getOptionsForTarget(item.condition.targetId).length > 0) ? (
+                                  <select
+                                    className="w-full border p-2 rounded text-xs bg-white"
+                                    value={item.condition.value}
+                                    onChange={e => updateCondition(item.id, 'value', e.target.value)}
+                                  >
+                                    <option value="">(値を選択)</option>
+                                    {getOptionsForTarget(item.condition.targetId).map(val => (
+                                      <option key={val} value={val}>{val}</option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <input
+                                    className="w-full border p-2 rounded text-xs"
+                                    placeholder="値を入力"
+                                    value={item.condition.value}
+                                    onChange={e => updateCondition(item.id, 'value', e.target.value)}
+                                  />
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <button
+                  onClick={addItem}
+                  className="w-full py-3 bg-blue-50 border-2 border-blue-200 border-dashed rounded-xl text-blue-600 font-bold hover:bg-blue-100 hover:border-blue-300 transition-colors flex items-center justify-center gap-2"
+                >
+                  <Plus size={20} /> 新しい質問を追加
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="p-4 border-t flex justify-end gap-2 bg-white">
+          <button onClick={onClose} className="px-6 py-2 bg-slate-100 text-slate-600 rounded-lg font-bold hover:bg-slate-200">キャンセル</button>
+          <button onClick={() => onSave(localConfig)} className="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-lg">設定を保存</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function VisitorFormEditor({ config, onSave }) {
+  const [localConfig, setLocalConfig] = useState(JSON.parse(JSON.stringify(config)));
+  const [newItemName, setNewItemName] = useState('');
+  const updateField = (key, val) => setLocalConfig({ ...localConfig, [key]: val });
+  const updateItem = (id, key, val) => {
+    const newItems = localConfig.items.map(item => item.id === id ? { ...item, [key]: val } : item);
+    setLocalConfig({ ...localConfig, items: newItems });
+  };
+  const deleteItem = (id) => { if (window.confirm('削除しますか？')) setLocalConfig({ ...localConfig, items: localConfig.items.filter(i => i.id !== id) }); };
+  const addItem = () => { if (!newItemName) return; setLocalConfig({ ...localConfig, items: [...localConfig.items, { id: `custom-${Date.now()}`, label: newItemName, type: 'text', help: '', required: false }] }); setNewItemName(''); };
+
+  return (
+    <div className="animate-fade-in max-w-3xl mx-auto">
+      <div className="flex justify-between items-center mb-6"><h2 className="text-2xl font-bold text-slate-800">登録フォーム編集</h2><button onClick={() => onSave(localConfig)} className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-blue-700 flex items-center gap-2"><Save size={18} /> 保存する</button></div>
+      <div className="bg-white border border-slate-200 rounded-xl p-6 mb-6 shadow-sm"><div className="space-y-4"><div><label className="block text-sm font-bold text-slate-500 mb-1">フォームタイトル</label><input className="w-full border p-2 rounded" value={localConfig.title} onChange={e => updateField('title', e.target.value)} /></div><div><label className="block text-sm font-bold text-slate-500 mb-1">説明文</label><textarea className="w-full border p-2 rounded h-24" value={localConfig.description} onChange={e => updateField('description', e.target.value)} /></div></div></div>
+      <div className="bg-slate-50 border border-slate-200 rounded-xl p-6"><h3 className="font-bold text-slate-700 border-b pb-2 mb-4">質問項目</h3><div className="space-y-3">{localConfig.items.map((item, idx) => (<div key={item.id} className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm group"><div className="flex justify-between items-start mb-2"><span className="text-xs font-bold text-slate-400">項目 {idx + 1} ({item.type})</span><button onClick={() => deleteItem(item.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={16} /></button></div><div className="grid grid-cols-1 md:grid-cols-2 gap-4"><div><label className="block text-xs font-bold mb-1">質問ラベル</label><input className="w-full border p-2 rounded text-sm" value={item.label} onChange={e => updateItem(item.id, 'label', e.target.value)} /></div><div><label className="block text-xs font-bold mb-1">補足説明</label><input className="w-full border p-2 rounded text-sm" value={item.help || ''} onChange={e => updateItem(item.id, 'help', e.target.value)} /></div></div><div className="mt-2 flex items-center gap-2"><label className="flex items-center gap-1 text-sm cursor-pointer"><input type="checkbox" checked={item.required} onChange={e => updateItem(item.id, 'required', e.target.checked)} /> 必須項目</label>{item.type === 'select' && (<div className="flex-1 ml-4"><label className="block text-xs font-bold mb-1">選択肢 (カンマ区切り)</label><input className="w-full border p-1 rounded text-xs" value={item.options ? item.options.join(',') : ''} onChange={e => updateItem(item.id, 'options', e.target.value.split(','))} /></div>)}</div></div>))}</div><div className="mt-6 flex gap-2"><input className="flex-1 border p-2 rounded" placeholder="新しい質問タイトル..." value={newItemName} onChange={e => setNewItemName(e.target.value)} /><button onClick={addItem} className="bg-slate-700 text-white px-4 py-2 rounded font-bold text-sm">新規追加</button></div></div>
+    </div>
+  );
+}
+
+function SimulatedPublicVisitorForm({ config, onClose, onSubmit }) {
+  const [formData, setFormData] = useState({});
+  const [submittedData, setSubmittedData] = useState(null);
+
+  const handleChange = (id, val) => { setFormData({ ...formData, [id]: val }); };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    // Simulate ID generation
+    const newId = crypto.randomUUID();
+    const finalData = { ...formData, id: newId, status: 'registered' };
+
+    onSubmit(finalData);
+    setSubmittedData(finalData);
+  };
+
+  if (submittedData) {
+    return (
+      <div className="fixed inset-0 bg-slate-900/90 z-[90] flex items-center justify-center p-4">
+        <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden animate-slide-up relative p-8 text-center">
+          <button onClick={onClose} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><X /></button>
+          <div className="mb-4 text-green-500 flex justify-center"><CheckCircle size={64} /></div>
+          <h2 className="text-2xl font-bold text-slate-800 mb-2">登録完了</h2>
+          <p className="text-slate-500 mb-6">ご来場ありがとうございます。<br />以下のQRコードを受付にご提示ください。</p>
+          <div className="bg-white p-4 rounded-xl border-2 border-slate-100 inline-block mb-6 shadow-sm">
+            {/* QR Code Canvas */}
+            <QRCodeCanvas
+              value={JSON.stringify({ id: submittedData.id, type: 'visitor', name: submittedData.repName })}
+              size={200}
+              level={"H"}
+              includeMargin={true}
+            />
+          </div>
+          <p className="text-xs text-slate-400 mb-4 font-mono">ID: {submittedData.id.slice(0, 8)}...</p>
+          <button onClick={() => {
+            // 画像として保存するロジックなどもここに追加可能
+            const canvas = document.querySelector('canvas');
+            if (canvas) {
+              const url = canvas.toDataURL("image/png");
+              const link = document.createElement('a');
+              link.download = `visitor_qr_${submittedData.id}.png`;
+              link.href = url;
+              link.click();
+            }
+          }} className="mb-2 w-full border border-blue-200 text-blue-600 font-bold py-2 rounded-lg hover:bg-blue-50 text-sm flex items-center justify-center gap-2"><Download size={16} /> QR画像を保存</button>
+          <button onClick={onClose} className="w-full bg-slate-800 text-white font-bold py-3 rounded-lg hover:bg-slate-700 transition-colors">閉じる</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/90 z-[90] flex items-center justify-center p-4 overflow-y-auto">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg my-8 overflow-hidden animate-slide-up relative">
+        <button onClick={onClose} className="absolute top-4 right-4 text-white hover:text-blue-200 bg-black/20 rounded-full p-1"><X size={20} /></button>
+        <div className="bg-blue-600 p-8 text-white"><h2 className="text-2xl font-bold mb-2">{config.title}</h2><p className="text-blue-100 text-sm">{config.description}</p></div>
+        <form onSubmit={handleSubmit} className="p-8 space-y-6 max-h-[70vh] overflow-y-auto">
+          {config.items && config.items.map(item => (<div key={item.id}><label className="block text-sm font-bold text-slate-700 mb-1">{item.label} {item.required && <span className="text-red-500">*</span>}</label>{item.type === 'select' ? (<select required={item.required} className="w-full border border-slate-300 p-3 rounded-lg bg-white outline-none focus:ring-2 focus:ring-blue-400" onChange={e => handleChange(item.id, e.target.value)}><option value="">選択してください</option>{item.options.map(opt => <option key={opt} value={opt}>{opt}</option>)}</select>) : (<input type={item.type} required={item.required} className="w-full border border-slate-300 p-3 rounded-lg outline-none focus:ring-2 focus:ring-blue-400" placeholder={item.help} onChange={e => handleChange(item.id, e.target.value)} />)}{item.help && item.type !== 'text' && <p className="text-xs text-slate-400 mt-1">{item.help}</p>}</div>))}
+          <div className="pt-4"><button type="submit" className="w-full bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg hover:bg-blue-700 transition-all flex items-center justify-center gap-2"><QrCode size={20} /> 登録して入場QRを発行</button></div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+
+
+// Icon helper
+const TryIcon = ({ size }) => <div className="w-4 h-4 rounded-full border-2 border-current flex items-center justify-center font-bold text-[10px]">?</div>;
+
+const EditableBudgetRow = ({ item, isEditing, editData, setEditData, onSave, onCancel, onDelete, onStartEdit }) => {
+  if (isEditing) {
+    return (
+      <div className="flex gap-2 p-2 bg-yellow-50 rounded border border-yellow-200 animate-fade-in">
+        <input className="flex-1 border p-1 rounded text-xs" value={editData.item} onChange={e => setEditData({ ...editData, item: e.target.value })} autoFocus />
+        <input type="number" className="w-24 border p-1 rounded text-xs" value={editData.amount} onChange={e => setEditData({ ...editData, amount: parseInt(e.target.value) || 0 })} />
+        <input className="flex-1 border p-1 rounded text-xs" value={editData.note} onChange={e => setEditData({ ...editData, note: e.target.value })} />
+        <button onClick={onSave} className="text-green-600 hover:text-green-800"><Check size={16} /></button>
+        <button onClick={onCancel} className="text-slate-400 hover:text-slate-600"><X size={16} /></button>
+      </div>
+    );
+  }
+  return (
+    <div className="flex justify-between p-3 bg-white rounded border border-slate-100 hover:shadow-sm transition-all group">
+      <span className="flex items-center gap-2">{item.item} <span className="text-xs text-slate-400">({item.note})</span></span>
+      <div className="flex items-center gap-3">
+        <span className="font-bold">¥{item.amount.toLocaleString()}</span>
+        <button onClick={() => onStartEdit(item)} className="text-slate-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity"><Edit3 size={14} /></button>
+        <button onClick={() => onDelete(item.id)} className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><X size={14} /></button>
+      </div>
+    </div>
+  );
+};
+
+function TabBudget({ exhibition, updateMainData }) {
+  const { venueDetails, otherBudgets, makers, targetProfit, lectures } = exhibition;
+  const equipmentTotal = (venueDetails?.equipment || []).reduce((sum, item) => sum + (item.count * item.price), 0);
+  const boothIncome = (makers || []).filter(m => m.status === 'confirmed').reduce((sum, m) => sum + (extractNum(m.boothCount) * 30000), 0);
+
+  // 講演会費用
+  const lectureList = lectures || [];
+  const lectureFees = lectureList.reduce((sum, l) => sum + Number(l.fee || 0), 0);
+  const lectureTotalFees = lectureFees;
+
+  const [newItem, setNewItem] = useState({ type: 'expense', item: '', amount: 0, note: '' });
+  const [editingId, setEditingId] = useState(null);
+  const [editingItemData, setEditingItemData] = useState(null);
+
+  const handleAddItem = () => {
+    if (!newItem.item) {
+      alert("項目名を入力してください");
+      return;
+    }
+    const updatedBudgets = [...(otherBudgets || []), { ...newItem, id: Date.now() }];
+    updateMainData('otherBudgets', updatedBudgets);
+    setNewItem({ type: 'expense', item: '', amount: 0, note: '' });
+  };
+
+  const removeItem = (id) => {
+    if (window.confirm('削除しますか？')) {
+      const updatedBudgets = otherBudgets.filter(b => b.id !== id);
+      updateMainData('otherBudgets', updatedBudgets);
+    }
+  };
+
+  const startEdit = (item) => {
+    setEditingId(item.id);
+    setEditingItemData({ ...item });
+  };
+
+  const saveEdit = () => {
+    const updatedBudgets = otherBudgets.map(b => b.id === editingId ? editingItemData : b);
+    updateMainData('otherBudgets', updatedBudgets);
+    setEditingId(null);
+  };
+
+  const incomes = (otherBudgets || []).filter(b => b.type === 'income');
+  const expenses = (otherBudgets || []).filter(b => b.type === 'expense');
+  const totalIncome = boothIncome + incomes.reduce((sum, i) => sum + i.amount, 0);
+  const totalExpense = (venueDetails.cost || 0) + equipmentTotal + lectureTotalFees + expenses.reduce((sum, i) => sum + i.amount, 0);
+
+  // Robust Excel Download without Template Dependency
+  const handleExcelDownload = async () => {
+    try {
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('収支報告書');
+
+      // Styles
+      worksheet.columns = [
+        { header: '', key: 'A', width: 5 },
+        { header: '', key: 'B', width: 10 }, // Cat
+        { header: '', key: 'C', width: 15 }, // Date?
+        { header: '', key: 'D', width: 30 }, // Item
+        { header: '', key: 'E', width: 10 },
+        { header: '', key: 'F', width: 10 },
+        { header: '', key: 'G', width: 15 }, // Amount
+        { header: '', key: 'H', width: 5 },
+        { header: '', key: 'I', width: 20 }, // Note
+      ];
+
+      // Title
+      worksheet.mergeCells('B2:I3');
+      const titleCell = worksheet.getCell('B2');
+      titleCell.value = '収支報告書';
+      titleCell.font = { size: 18, bold: true, name: 'Meiryo UI' };
+      titleCell.alignment = { vertical: 'middle', horizontal: 'center' };
+
+      // Project Info
+      worksheet.mergeCells('B5:E5');
+      worksheet.getCell('B5').value = exhibition.title || '（プロジェクト名）';
+      worksheet.getCell('B5').font = { size: 14, bold: true, name: 'Meiryo UI' };
+
+      const dateStr = (exhibition.dates && exhibition.dates.length > 0) ? exhibition.dates[0] : '';
+      worksheet.getCell('G5').value = `開催日: ${dateStr}`;
+
+      // Header Row
+      const headerRowIdx = 7;
+      const headers = ['区分', '日付', '項目', '', '', '金額', '', '備考'];
+      const headerCells = ['B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'];
+      headerCells.forEach((col, i) => {
+        const cell = worksheet.getCell(`${col}${headerRowIdx}`);
+        cell.value = headers[i];
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEEEEEE' } };
+        cell.border = { bottom: { style: 'thin' } };
+        cell.font = { bold: true };
+      });
+
+      let currentRow = 8;
+
+      // Helper to add row
+      const addRow = (cat, item, amount, note) => {
+        const row = worksheet.getRow(currentRow);
+        row.getCell(2).value = cat;
+        row.getCell(4).value = item;
+        row.getCell(7).value = amount;
+        row.getCell(7).numFmt = '#,##0';
+        row.getCell(9).value = note;
+        row.getCell(2).border = { bottom: { style: 'dotted', color: { argb: 'FFCCCCCC' } } };
+        currentRow++;
+      };
+
+      // Incomes
+      addRow('収入', '出展費用', boothIncome, '自動計算');
+      incomes.forEach(i => addRow('収入', i.item, i.amount, i.note));
+
+      // Expenses
+      addRow('支出', '会場利用料', venueDetails.cost || 0, '管理画面連動');
+      addRow('支出', '備品費', equipmentTotal, '備品リスト連動');
+      if (lectureTotalFees > 0) addRow('支出', '講演会費用', lectureTotalFees, '講演会連動');
+      expenses.forEach(i => addRow('支出', i.item, i.amount, i.note));
+
+      // Total Line
+      currentRow++;
+      worksheet.getRow(currentRow).getCell(4).value = '最終収支';
+      worksheet.getRow(currentRow).getCell(4).font = { bold: true };
+      worksheet.getRow(currentRow).getCell(7).value = totalIncome - totalExpense;
+      worksheet.getRow(currentRow).getCell(7).font = { bold: true, color: { argb: (totalIncome - totalExpense) >= 0 ? 'FF0000FF' : 'FFFF0000' } };
+      worksheet.getRow(currentRow).getCell(7).numFmt = '"¥"#,##0';
+
+      // Write Buffer
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `収支報告書_${exhibition.title || 'project'}.xlsx`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+
+    } catch (e) {
+      console.error(e);
+      alert('Excel出力エラー: ' + e.message);
+    }
+  };
+
+
+  return (
+    <div className="p-8 animate-fade-in">
+      <div className="bg-slate-800 text-white p-6 rounded-xl mb-8 flex justify-between items-center shadow-lg">
+        <div>
+          <p className="text-sm text-slate-400 mb-1">最終収支</p>
+          <p className={`text-4xl font-bold ${totalIncome - totalExpense >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>¥{(totalIncome - totalExpense).toLocaleString()}</p>
+        </div>
+        <div className="text-right">
+          <p className="text-sm text-slate-400 mb-1">目標利益</p>
+          <p className="text-xl font-bold">¥{(targetProfit || 0).toLocaleString()}</p>
+        </div>
+      </div>
+
+      <div className="flex justify-between items-end mb-6">
+        <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2"><Wallet className="text-blue-500" /> 収支管理</h3>
+        <div className="flex gap-2">
+          <button onClick={handleExcelDownload} className="bg-green-600 text-white px-4 py-2 rounded font-bold hover:bg-green-700 flex items-center gap-2 text-sm transition-colors shadow-md">
+            <FileSpreadsheet size={16} /> Excel出力
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+        {/* Income Section */}
+        <div className="bg-blue-50/50 border border-blue-100 rounded-xl overflow-hidden shadow-sm">
+          <div className="bg-blue-100 p-4 flex justify-between items-center">
+            <h4 className="font-bold text-blue-900 flex items-center gap-2"><TrendingUp size={18} /> 収入の部</h4>
+            <span className="text-xl font-bold text-blue-700">¥{totalIncome.toLocaleString()}</span>
+          </div>
+          <div className="p-4 space-y-2">
+            <div className="flex justify-between p-3 bg-white rounded border border-blue-100">
+              <span className="font-bold text-slate-700">出展費用 (確定メーカー分)</span>
+              <span className="font-bold">¥{boothIncome.toLocaleString()}</span>
+            </div>
+            {incomes.map(i => (
+              <EditableBudgetRow key={i.id} item={i} isEditing={editingId === i.id} editData={editingItemData} setEditData={setEditingItemData} onSave={saveEdit} onCancel={() => setEditingId(null)} onDelete={removeItem} onStartEdit={startEdit} />
+            ))}
+          </div>
+        </div>
+
+        {/* Expense Section */}
+        <div className="bg-red-50/50 border border-red-100 rounded-xl overflow-hidden shadow-sm">
+          <div className="bg-red-100 p-4 flex justify-between items-center">
+            <h4 className="font-bold text-red-900 flex items-center gap-2"><TrendingUp size={18} className="rotate-180" /> 支出の部</h4>
+            <span className="text-xl font-bold text-red-700">¥{totalExpense.toLocaleString()}</span>
+          </div>
+          <div className="p-4 space-y-2">
+            <div className="flex justify-between p-3 bg-white rounded border border-red-100">
+              <span className="font-bold text-slate-700">会場利用料</span>
+              <span className="font-bold">¥{(venueDetails.cost || 0).toLocaleString()}</span>
+            </div>
+            <div className="flex justify-between p-3 bg-white rounded border border-red-100">
+              <span className="font-bold text-slate-700">備品・レイアウト費</span>
+              <span className="font-bold">¥{equipmentTotal.toLocaleString()}</span>
+            </div>
+            {lectureTotalFees > 0 && (
+              <div className="flex justify-between p-3 bg-purple-50 rounded border border-purple-200">
+                <span className="flex items-center gap-2 text-purple-800 font-bold"><Mic size={14} className="text-purple-500" /> 講演会費用</span>
+                <span className="font-bold text-purple-700">¥{lectureTotalFees.toLocaleString()}</span>
+              </div>
+            )}
+            {expenses.map(i => (
+              <EditableBudgetRow key={i.id} item={i} isEditing={editingId === i.id} editData={editingItemData} setEditData={setEditingItemData} onSave={saveEdit} onCancel={() => setEditingId(null)} onDelete={removeItem} onStartEdit={startEdit} />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Add Item Form */}
+      <div className="bg-slate-100 p-5 rounded-xl flex flex-wrap gap-4 items-end border border-slate-200 shadow-inner">
+        <div>
+          <label className="text-xs font-bold text-slate-500 mb-1 block">区分</label>
+          <select value={newItem.type} onChange={e => setNewItem({ ...newItem, type: e.target.value })} className="p-2 border border-slate-300 rounded text-sm w-32 focus:ring-2 focus:ring-blue-500 outline-none">
+            <option value="income">収入 (+)</option>
+            <option value="expense">支出 (-)</option>
+          </select>
+        </div>
+        <div className="flex-1">
+          <label className="text-xs font-bold text-slate-500 mb-1 block">項目名</label>
+          <input type="text" value={newItem.item} onChange={e => setNewItem({ ...newItem, item: e.target.value })} className="w-full p-2 border border-slate-300 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none" placeholder="例: 協賛金 / 打ち上げ代" />
+        </div>
+        <div className="w-32">
+          <label className="text-xs font-bold text-slate-500 mb-1 block">金額</label>
+          <input type="number" value={newItem.amount === 0 ? '' : newItem.amount} onChange={e => setNewItem({ ...newItem, amount: parseInt(e.target.value) || 0 })} className="w-full p-2 border border-slate-300 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none" placeholder="0" />
+        </div>
+        <div className="flex-1">
+          <label className="text-xs font-bold text-slate-500 mb-1 block">備考</label>
+          <input type="text" value={newItem.note} onChange={e => setNewItem({ ...newItem, note: e.target.value })} className="w-full p-2 border border-slate-300 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none" placeholder="詳細メモ" />
+        </div>
+        <button onClick={handleAddItem} className="bg-slate-800 text-white px-6 py-2 rounded-lg font-bold hover:bg-slate-700 text-sm h-[38px] shadow-lg transform transition-transform active:scale-95">追加</button>
+      </div>
+    </div>
+  );
+}
+
+// LectureFormModal: 講演フォームモーダル（外部コンポーネントでスクロール問題を防止）
+function LectureFormModal({ data, updateField, onSave, onCancel, title, staffList = [] }) {
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto shadow-2xl">
+        <div className="bg-purple-50 p-6 border-b flex justify-between items-center sticky top-0 z-10">
+          <h3 className="text-xl font-bold text-purple-800 flex items-center gap-2"><Mic size={20} /> {title}</h3>
+          <button onClick={onCancel} className="text-slate-400 hover:text-slate-600"><X size={24} /></button>
+        </div>
+        <div className="p-6 space-y-6">
+          {/* 講師情報 */}
+          <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+            <h4 className="font-bold text-slate-700 mb-4 flex items-center gap-2"><Users size={16} /> 講師情報</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1">講師名 *</label>
+                <input className="w-full border p-2 rounded" value={data.speakerName || ''} onChange={e => updateField('speakerName', e.target.value)} placeholder="山田 太郎" />
+              </div>
+              <div>
+                <div><label className="block text-sm font-bold mb-1">写真 (選択)</label><input type="file" accept="image/*" onChange={(e) => { const file = e.target.files[0]; if (file) { if (file.size > 800 * 1024) { alert("ファイルサイズが大きすぎます (800KB以下にしてください)"); return; } const reader = new FileReader(); reader.onloadend = () => { updateField('speakerPhoto', reader.result); }; reader.readAsDataURL(file); } }} className="w-full text-sm border p-2 rounded" />{data.speakerPhoto && <div className="mt-2"><img src={data.speakerPhoto} alt="Preview" className="w-20 h-20 object-cover rounded-full border border-slate-200" /><button onClick={() => updateField('speakerPhoto', '')} className="text-xs text-red-500 mt-1 hover:underline">削除</button></div>}</div>
+                <div><label className="block text-sm font-bold mb-1">または画像URL</label><input className="w-full border p-2 rounded" value={data.speakerPhoto || ''} onChange={e => updateField('speakerPhoto', e.target.value)} placeholder="https://..." /></div>
+              </div>
+            </div>
+          </div>
+
+          {/* 講演内容 */}
+          <div className="bg-purple-50 p-4 rounded-xl border border-purple-200">
+            <h4 className="font-bold text-purple-700 mb-4 flex items-center gap-2"><FileText size={16} /> 講演内容</h4>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1">テーマ *</label>
+                <input className="w-full border p-2 rounded" value={data.theme || ''} onChange={e => updateField('theme', e.target.value)} placeholder="○○について" />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1">講演内容概略</label>
+                <textarea className="w-full border p-2 rounded h-24" value={data.summary || ''} onChange={e => updateField('summary', e.target.value)} placeholder="講演の概要を入力..." />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1">チラシ用文言</label>
+                <textarea className="w-full border p-2 rounded h-16" value={data.flyerText || ''} onChange={e => updateField('flyerText', e.target.value)} placeholder="チラシに掲載する文言" />
+              </div>
+            </div>
+          </div>
+
+          {/* 開催情報 */}
+          <div className="bg-blue-50 p-4 rounded-xl border border-blue-200">
+            <h4 className="font-bold text-blue-700 mb-4 flex items-center gap-2"><Clock size={16} /> 開催情報</h4>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1">開始時間</label>
+                <input type="time" className="w-full border p-2 rounded" value={data.time || ''} onChange={e => updateField('time', e.target.value)} />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1">講演時間(分)</label>
+                <input type="number" className="w-full border p-2 rounded" value={data.duration || ''} onChange={e => updateField('duration', e.target.value)} placeholder="60" />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1">会場 / 場所</label>
+                <input className="w-full border p-2 rounded" value={data.location || ''} onChange={e => updateField('location', e.target.value)} placeholder="セミナールームA" />
+              </div>
+            </div>
+          </div>
+
+          {/* 費用 */}
+          <div className="bg-green-50 p-4 rounded-xl border border-green-200">
+            <h4 className="font-bold text-green-700 mb-4 flex items-center gap-2"><Wallet size={16} /> 費用</h4>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1">講演費 (円)</label>
+                <input type="number" className="w-full border p-2 rounded" value={data.speakerFee || 0} onChange={e => updateField('speakerFee', parseInt(e.target.value) || 0)} />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1">交通費 (円)</label>
+                <input type="number" className="w-full border p-2 rounded" value={data.transportFee || 0} onChange={e => updateField('transportFee', parseInt(e.target.value) || 0)} />
+              </div>
+            </div>
+          </div>
+
+          {/* 準備・担当 */}
+          <div className="bg-amber-50 p-4 rounded-xl border border-amber-200">
+            <h4 className="font-bold text-amber-700 mb-4 flex items-center gap-2"><Briefcase size={16} /> 準備・担当</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1">担当者</label>
+                {staffList.length > 0 ? (
+                  <select className="w-full border p-2 rounded" value={data.person || ''} onChange={e => updateField('person', e.target.value)}>
+                    <option value="">選択してください</option>
+                    {staffList.map((s, i) => <option key={i} value={s}>{s}</option>)}
+                  </select>
+                ) : (
+                  <input className="w-full border p-2 rounded" value={data.person || ''} onChange={e => updateField('person', e.target.value)} placeholder="担当者名" />
+                )}
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1">資料格納場所URL</label>
+                <input className="w-full border p-2 rounded" value={data.materialsUrl || ''} onChange={e => updateField('materialsUrl', e.target.value)} placeholder="https://drive.google.com/..." />
+              </div>
+            </div>
+            <div className="mt-4">
+              <label className="block text-xs font-bold text-slate-500 mb-1">準備するもの</label>
+              <textarea className="w-full border p-2 rounded h-16" value={data.preparation || ''} onChange={e => updateField('preparation', e.target.value)} placeholder="マイク、プロジェクター、..." />
+            </div>
+          </div>
+        </div>
+        <div className="p-6 border-t flex justify-end gap-2 sticky bottom-0 bg-white">
+          <button onClick={onCancel} className="px-6 py-2 text-slate-500 font-bold hover:bg-slate-100 rounded-lg">キャンセル</button>
+          <button onClick={onSave} className="px-6 py-2 bg-purple-600 text-white font-bold rounded-lg hover:bg-purple-700 shadow-lg">保存</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// TabSchedule: スケジュール管理 (Drag & Drop)
+function TabSchedule({ scheduleData, updateMainData, staff, dates, preDates }) {
+  const [activeSchedule, setActiveSchedule] = useState(scheduleData || { dayBefore: [], eventDay: [] });
+  const [zoomLevel, setZoomLevel] = useState(1); // 1=Normal(60px/h), 2=Large(120px/h), 0.5=Small(30px/h)
+  const [dragItem, setDragItem] = useState(null);
+  const [isEditOpen, setIsEditOpen] = useState(false);
+  const [editingItem, setEditingItem] = useState(null);
+  const [targetType, setTargetType] = useState('eventDay');
+
+  // Constants
+  const START_HOUR = 6;
+  const END_HOUR = 22;
+  const HOURS_COUNT = END_HOUR - START_HOUR;
+  const BASE_HOUR_HEIGHT = 80;
+
+  const hourHeight = BASE_HOUR_HEIGHT * zoomLevel;
+  const totalHeight = hourHeight * HOURS_COUNT;
+
+  useEffect(() => {
+    if (scheduleData) setActiveSchedule(scheduleData);
+  }, [scheduleData]);
+
+  // Helpers
+  const timeToMinutes = (timeStr) => {
+    if (!timeStr) return 0;
+    const [h, m] = timeStr.split(':').map(Number);
+    return h * 60 + m;
+  };
+
+  const minutesToTime = (totalMinutes) => {
+    const h = Math.floor(totalMinutes / 60);
+    const m = totalMinutes % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  };
+
+  const getTopPosition = (timeStr) => {
+    const minutes = timeToMinutes(timeStr);
+    const startMinutes = START_HOUR * 60;
+    const offsetMinutes = Math.max(0, minutes - startMinutes);
+    return (offsetMinutes / 60) * hourHeight;
+  };
+
+  const getTimeFromY = (y) => {
+    const hoursFromStart = y / hourHeight;
+    const totalMinutes = (START_HOUR * 60) + (hoursFromStart * 60);
+    // Snap to 15 min
+    const snappedMinutes = Math.round(totalMinutes / 15) * 15;
+    return minutesToTime(snappedMinutes);
+  };
+
+  // Drag & Drop
+  const handleDragStart = (e, item, source) => {
+    setDragItem({ item, source });
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+  };
+
+  const handleDrop = (e, destType) => {
+    e.preventDefault();
+    if (!dragItem) return;
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const relativeY = e.clientY - rect.top + e.currentTarget.scrollTop;
+
+    // Calculate new time based on drop position
+    const newTime = getTimeFromY(relativeY);
+
+    const [h] = newTime.split(':').map(Number);
+    if (h < START_HOUR || h >= END_HOUR) {
+      // Clamp to range?
+      // For now, allow but it might render weirdly if out of bounds
+    }
+
+    const { item, source } = dragItem;
+    const newSourceList = activeSchedule[source].filter(i => i.id !== item.id);
+    const newItem = { ...item, type: destType, time: newTime };
+    const newDestList = (source === destType ? newSourceList : [...(activeSchedule[destType] || [])]);
+    newDestList.push(newItem);
+
+    newDestList.sort((a, b) => timeToMinutes(a.time) - timeToMinutes(b.time));
+
+    const newSchedule = { ...activeSchedule, [source]: newSourceList, [destType]: newDestList };
+    setActiveSchedule(newSchedule);
+    updateMainData('schedule', newSchedule);
+    setDragItem(null);
+  };
+
+  // CRUD
+  const saveItem = () => {
+    if (!editingItem.title) return;
+    let [h] = editingItem.time.split(':').map(Number);
+    if (h < START_HOUR) editingItem.time = `${String(START_HOUR).padStart(2, '0')}:00`;
+
+    const list = activeSchedule[targetType] || [];
+    const exists = list.find(i => i.id === editingItem.id);
+    let updatedList = exists
+      ? list.map(i => i.id === editingItem.id ? editingItem : i)
+      : [...list, editingItem];
+
+    updatedList.sort((a, b) => timeToMinutes(a.time) - timeToMinutes(b.time));
+    const newSchedule = { ...activeSchedule, [targetType]: updatedList };
+
+    setActiveSchedule(newSchedule);
+    updateMainData('schedule', newSchedule);
+    setIsEditOpen(false);
+  };
+
+  const deleteItem = () => {
+    if (!editingItem) return;
+    if (!confirm('削除しますか？')) return;
+    const list = activeSchedule[targetType].filter(i => i.id !== editingItem.id);
+    const newSchedule = { ...activeSchedule, [targetType]: list };
+    setActiveSchedule(newSchedule);
+    updateMainData('schedule', newSchedule);
+    setIsEditOpen(false);
+  };
+
+
+  const TimelineColumn = ({ title, type, items, dateLabel, colorClass }) => {
+    return (
+      <div className={`flex-1 min-w-[350px] bg-white rounded-xl border border-slate-200 flex flex-col h-full overflow-hidden shadow-sm`}>
+        {/* Header */}
+        <div className={`p-3 border-b-2 flex justify-between items-center ${colorClass}`}>
+          <div>
+            <h4 className="font-bold text-slate-700">{title}</h4>
+            <p className="text-xs text-slate-500 font-bold">{dateLabel}</p>
+          </div>
+          <button onClick={() => { setTargetType(type); setEditingItem({ id: crypto.randomUUID(), time: '09:00', title: '', assignee: '' }); setIsEditOpen(true); }} className="bg-slate-100 hover:bg-slate-200 text-slate-600 p-2 rounded-lg">
+            <Plus size={16} />
+          </button>
+        </div>
+
+        {/* Timeline Body */}
+        <div
+          className="flex-1 overflow-y-auto relative bg-slate-50 scrollbar-thin select-none"
+          onDragOver={handleDragOver}
+          onDrop={(e) => handleDrop(e, type)}
+        >
+          <div style={{ height: totalHeight, position: 'relative' }}>
+            {/* Grid Lines */}
+            {Array.from({ length: HOURS_COUNT }).map((_, i) => {
+              const hour = START_HOUR + i;
+              return (
+                <div key={hour} style={{ height: hourHeight, top: i * hourHeight }} className="absolute w-full border-b border-slate-200 box-border">
+                  <span className="absolute -top-3 left-1 text-xs font-bold text-slate-400 select-none">{hour}:00</span>
+                  <div className="absolute w-full border-b border-slate-100/50" style={{ top: '25%' }}></div>
+                  <div className="absolute w-full border-b border-slate-100" style={{ top: '50%' }}></div>
+                  <div className="absolute w-full border-b border-slate-100/50" style={{ top: '75%' }}></div>
+                </div>
+              );
+            })}
+
+            {/* Items */}
+            {items?.map(item => {
+              const top = getTopPosition(item.time);
+              const height = (45 / 60) * hourHeight;
+
+              return (
+                <div
+                  key={item.id}
+                  draggable
+                  onDragStart={(e) => handleDragStart(e, item, type)}
+                  onClick={(e) => { e.stopPropagation(); setTargetType(type); setEditingItem(item); setIsEditOpen(true); }}
+                  style={{ top, height: Math.max(height, 30) }}
+                  className="absolute left-10 right-2 rounded-lg bg-blue-100 border border-blue-300 shadow-sm p-1 px-2 cursor-pointer hover:bg-blue-200 hover:shadow-md transition-all z-10 overflow-hidden"
+                >
+                  <div className="flex justify-between items-start">
+                    <span className="font-bold text-xs text-blue-800">{item.time}</span>
+                  </div>
+                  <div className="font-bold text-sm text-slate-800 leading-tight truncate">{item.title}</div>
+                  {item.assignee && <div className="text-[10px] text-slate-500 truncate flex items-center gap-1"><Users size={10} /> {item.assignee}</div>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="p-6 h-[calc(100vh-200px)] flex flex-col animate-fade-in">
+      <div className="flex justify-between items-center mb-4 shrink-0">
+        <h2 className="text-xl font-bold flex items-center gap-2 text-slate-800"><Calendar className="text-blue-600" /> スケジュール (6:00 - 22:00)</h2>
+        <div className="flex items-center gap-4">
+
+          <div className="flex bg-slate-100 rounded-lg p-1 border">
+            <button onClick={() => setZoomLevel(0.6)} className={`px-3 py-1 text-xs font-bold rounded ${zoomLevel === 0.6 ? 'bg-white shadow text-blue-600' : 'text-slate-500'}`}>縮小</button>
+            <button onClick={() => setZoomLevel(1)} className={`px-3 py-1 text-xs font-bold rounded ${zoomLevel === 1 ? 'bg-white shadow text-blue-600' : 'text-slate-500'}`}>標準</button>
+            <button onClick={() => setZoomLevel(1.5)} className={`px-3 py-1 text-xs font-bold rounded ${zoomLevel === 1.5 ? 'bg-white shadow text-blue-600' : 'text-slate-500'}`}>拡大</button>
+          </div>
+          <div className="text-xs text-slate-500 flex items-center gap-2">
+            <span className="bg-slate-100 text-blue-600 px-2 py-1 rounded font-bold border">15分単位</span>
+            <span>ドラッグで時間移動</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex-1 flex gap-4 overflow-hidden">
+        <TimelineColumn
+          title="前日搬入 / 準備"
+          type="dayBefore"
+          items={activeSchedule.dayBefore}
+          dateLabel={preDates?.join(', ')}
+          colorClass="border-amber-400 text-amber-700 bg-amber-50"
+        />
+        <TimelineColumn
+          title="開催当日"
+          type="eventDay"
+          items={activeSchedule.eventDay}
+          dateLabel={dates?.join(', ')}
+          colorClass="border-blue-500 text-blue-700 bg-blue-50"
+        />
+      </div>
+
+      {isEditOpen && editingItem && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={(e) => { if (e.target === e.currentTarget) setIsEditOpen(false); }}>
+          <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm animate-slide-up">
+            <h3 className="font-bold text-lg mb-4 text-slate-800 border-b pb-2">スケジュール詳細</h3>
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1">開始時間</label>
+                  <input type="time" value={editingItem.time} onChange={e => setEditingItem({ ...editingItem, time: e.target.value })} className="w-full border p-2 rounded bg-slate-50 font-mono" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1">担当者</label>
+                  <input list="staff-list" type="text" value={editingItem.assignee} onChange={e => setEditingItem({ ...editingItem, assignee: e.target.value })} className="w-full border p-2 rounded" />
+                  <datalist id="staff-list">{staff?.split(',').map(s => <option key={s} value={s} />)}</datalist>
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1">内容</label>
+                <input type="text" value={editingItem.title} onChange={e => setEditingItem({ ...editingItem, title: e.target.value })} className="w-full border p-2 rounded font-bold" autoFocus />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1">詳細メモ</label>
+                <textarea rows="3" value={editingItem.desc} onChange={e => setEditingItem({ ...editingItem, desc: e.target.value })} className="w-full border p-2 rounded" />
+              </div>
+              <div className="flex justify-between pt-4 mt-2 border-t">
+                <button onClick={deleteItem} className="text-red-500 hover:bg-red-50 px-3 py-2 rounded text-sm flex items-center gap-1"><Trash2 size={16} /> 削除</button>
+                <button onClick={saveItem} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-bold shadow-lg">保存</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// TabEquipment: 会場レイアウト作成ツール & 備品管理
+function TabEquipment({ exhibition, details, setDetails }) {
+  const [layoutItems, setLayoutItems] = useState(details.layout || []);
+  const [selectedId, setSelectedId] = useState(null);
+  const [dragInfo, setDragInfo] = useState(null);
+  const [activeMode, setActiveMode] = useState('layout'); // layout, list
+  const [showAutoLayoutModal, setShowAutoLayoutModal] = useState(false);
+
+  // Canvas
+  const CANVAS_W = 1000;
+  const CANVAS_H = 800;
+
+  useEffect(() => {
+    if (details.layout) setLayoutItems(details.layout);
+  }, [details.layout]);
+
+  const updateLayout = (newItems) => {
+    setLayoutItems(newItems);
+    setDetails({ ...details, layout: newItems });
+  };
+
+  // ------------------------------------------------------------------
+  // Layout Logic
+  // ------------------------------------------------------------------
+  const addElement = (type) => {
+    const defaultSizes = {
+      'booth': { w: 100, h: 100, label: '小間', color: 'bg-white border-2 border-slate-800' },
+      'table': { w: 60, h: 30, label: '長机', color: 'bg-amber-100 border border-amber-600' },
+      'chair': { w: 20, h: 20, label: '椅子', color: 'bg-slate-200 rounded-full border border-slate-400' },
+      'text': { w: 120, h: 40, label: 'テキスト', color: 'bg-transparent border-none text-slate-800 font-bold' },
+      'dimension': { w: 100, h: 20, label: '1000mm', color: 'bg-slate-800/10 border-b-2 border-slate-800' }
+    };
+    const def = defaultSizes[type] || defaultSizes['text'];
+    const newItem = {
+      id: crypto.randomUUID(),
+      type,
+      x: 50 + (layoutItems.length * 10) % 200,
+      y: 50 + (layoutItems.length * 10) % 200,
+      w: def.w, h: def.h,
+      label: def.label,
+      bg: def.color,
+      rotation: 0
+    };
+    updateLayout([...layoutItems, newItem]);
+  };
+
+  const deleteSelected = () => {
+    if (!selectedId) return;
+    updateLayout(layoutItems.filter(i => i.id !== selectedId));
+    setSelectedId(null);
+  };
+
+  const handleMouseDown = (e, id) => {
+    e.stopPropagation();
+    setSelectedId(id);
+    const item = layoutItems.find(i => i.id === id);
+    if (!item) return;
+    setDragInfo({ id, startX: e.clientX, startY: e.clientY, itemX: item.x, itemY: item.y });
+  };
+
+  const handleMouseMove = (e) => {
+    if (!dragInfo) return;
+    const dx = e.clientX - dragInfo.startX;
+    const dy = e.clientY - dragInfo.startY;
+    let newX = Math.round((dragInfo.itemX + dx) / 10) * 10;
+    let newY = Math.round((dragInfo.itemY + dy) / 10) * 10;
+    newX = Math.max(0, Math.min(newX, CANVAS_W - 20));
+    newY = Math.max(0, Math.min(newY, CANVAS_H - 20));
+    const updated = layoutItems.map(i => i.id === dragInfo.id ? { ...i, x: newX, y: newY } : i);
+    setLayoutItems(updated);
+  };
+
+  const handleMouseUp = () => {
+    if (dragInfo) {
+      updateLayout(layoutItems);
+      setDragInfo(null);
+    }
+  };
+
+  const updateItemProp = (id, key, val) => {
+    const updated = layoutItems.map(i => i.id === id ? { ...i, [key]: val } : i);
+    updateLayout(updated);
+  };
+
+  // ------------------------------------------------------------------
+  // Auto Layout Logic
+  // ------------------------------------------------------------------
+  const runAutoLayout = (cols = 6) => {
+    const makers = exhibition?.makers?.filter(m => m.status === 'confirmed') || [];
+    if (makers.length === 0) {
+      alert('「参加確定」のメーカーがいません。まずはメーカー管理でステータスを更新してください。');
+      return;
+    }
+
+    const startX = 50;
+    const startY = 50;
+    const boothSize = 100;
+    const gap = 20;
+    const newItems = [];
+
+    makers.forEach((m, idx) => {
+      const col = idx % cols;
+      const row = Math.floor(idx / cols);
+      newItems.push({
+        id: crypto.randomUUID(),
+        type: 'booth',
+        x: startX + col * (boothSize + gap),
+        y: startY + row * (boothSize + gap),
+        w: boothSize, h: boothSize,
+        label: m.companyName || 'ブース',
+        bg: 'bg-white border-2 border-slate-800',
+        makerId: m.id
+      });
+      // 付属備品（例：椅子1、机1）
+      newItems.push({
+        id: crypto.randomUUID(), type: 'table',
+        x: startX + col * (boothSize + gap) + 10, y: startY + row * (boothSize + gap) + 10,
+        w: 60, h: 30, label: '', bg: 'bg-amber-100 border border-amber-600'
+      });
+    });
+
+    if (window.confirm('現在のレイアウトをクリアして自動配置を実行しますか？')) {
+      updateLayout(newItems);
+      setShowAutoLayoutModal(false);
+    }
+  };
+
+  // ------------------------------------------------------------------
+  // Equipment List Logic
+  // ------------------------------------------------------------------
+  const countEquipment = () => {
+    const counts = { 'booth': 0, 'table': 0, 'chair': 0 };
+    layoutItems.forEach(i => {
+      if (counts[i.type] !== undefined) counts[i.type]++;
+    });
+    return counts;
+  };
+  const currentCounts = countEquipment();
+
+  const handleInternalSupplyToggle = (idx) => {
+    const supplies = details.internalSupplies || INITIAL_INTERNAL_SUPPLIES;
+    const updated = [...supplies];
+    updated[idx] = { ...updated[idx], checked: !updated[idx].checked };
+    setDetails({ ...details, internalSupplies: updated });
+  };
+
+  return (
+    <div className="flex flex-col h-full animate-fade-in">
+      {/* Toolbar / Header */}
+      <div className="p-4 bg-white border-b border-slate-200 flex justify-between items-center shrink-0">
+        <div className="flex gap-4">
+          <button onClick={() => setActiveMode('layout')} className={`px-4 py-2 rounded-lg font-bold flex items-center gap-2 ${activeMode === 'layout' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-50'}`}>
+            <LayoutDashboard size={18} /> レイアウト作成
+          </button>
+          <button onClick={() => setActiveMode('list')} className={`px-4 py-2 rounded-lg font-bold flex items-center gap-2 ${activeMode === 'list' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-50'}`}>
+            <List size={18} /> 備品リスト
+          </button>
+        </div>
+
+        {activeMode === 'layout' && (
+          <div className="flex gap-2">
+            <button onClick={() => setShowAutoLayoutModal(true)} className="px-3 py-2 bg-purple-100 text-purple-700 rounded-lg text-xs font-bold flex items-center gap-1 hover:bg-purple-200">
+              <RefreshCw size={14} /> 自動配置
+            </button>
+            <div className="w-px bg-slate-200 mx-2"></div>
+            <button onClick={() => addElement('booth')} className="px-3 py-2 bg-slate-100 rounded text-xs font-bold hover:bg-slate-200 flex gap-1"><Plus size={12} /> 小間</button>
+            <button onClick={() => addElement('text')} className="px-3 py-2 bg-slate-100 rounded text-xs font-bold hover:bg-slate-200 flex gap-1"><Plus size={12} /> 文字</button>
+            <button onClick={() => addElement('dimension')} className="px-3 py-2 bg-slate-100 rounded text-xs font-bold hover:bg-slate-200 flex gap-1"><Plus size={12} /> 寸法線</button>
+            <div className="w-px bg-slate-200 mx-2"></div>
+            <button onClick={deleteSelected} disabled={!selectedId} className="px-3 py-2 bg-red-50 text-red-500 rounded text-xs font-bold hover:bg-red-100 disabled:opacity-50">削除</button>
+          </div>
+        )}
+      </div>
+
+      {/* Content Area */}
+      <div className="flex-1 overflow-hidden relative bg-slate-100">
+
+        {/* VIEW: LAYOUT */}
+        {activeMode === 'layout' && (
+          <div className="w-full h-full overflow-auto p-8 flex justify-center" onMouseMove={handleMouseMove} onMouseUp={handleMouseUp}>
+            <div
+              className="bg-white shadow-2xl relative select-none shrink-0"
+              style={{ width: CANVAS_W, height: CANVAS_H, backgroundImage: 'radial-gradient(#cbd5e1 1px, transparent 1px)', backgroundSize: '20px 20px' }}
+              onClick={() => setSelectedId(null)}
+            >
+              {/* Grid items */}
+              {layoutItems.map(item => (
+                <div
+                  key={item.id}
+                  onMouseDown={(e) => handleMouseDown(e, item.id)}
+                  className={`absolute flex items-center justify-center cursor-move transition-shadow group ${item.bg} ${selectedId === item.id ? 'ring-2 ring-blue-500 shadow-xl z-20' : 'shadow-sm z-10'}`}
+                  style={{
+                    left: item.x, top: item.y, width: item.w, height: item.h,
+                    transform: `rotate(${item.rotation || 0}deg)`
+                  }}
+                >
+                  {/* Label */}
+                  {item.type === 'dimension' ? (
+                    <div className="w-full flex items-center justify-between px-1 relative">
+                      <div className="h-2 w-px bg-slate-800"></div>
+                      <input
+                        className="bg-transparent text-[10px] text-center w-full outline-none font-mono"
+                        value={item.label}
+                        onChange={(e) => updateItemProp(item.id, 'label', e.target.value)}
+                        onMouseDown={e => e.stopPropagation()}
+                      />
+                      <div className="h-2 w-px bg-slate-800"></div>
+                    </div>
+                  ) : (
+                    <span className="text-xs text-center p-1 pointer-events-none overflow-hidden select-none">{item.label}</span>
+                  )}
+
+                  {/* Resizer handles (Simple visual) */}
+                  {selectedId === item.id && (
+                    <>
+                      <div className="absolute top-0 left-0 w-2 h-2 bg-blue-500 rounded-full -translate-x-1 -translate-y-1"></div>
+                      <div className="absolute bottom-0 right-0 w-2 h-2 bg-blue-500 rounded-full translate-x-1 translate-y-1"></div>
+                      {item.type !== 'text' && (
+                        <div className="absolute -top-6 left-1/2 -translate-x-1/2 bg-white px-2 py-1 rounded shadow text-[10px] whitespace-nowrap">
+                          x:{item.x}, y:{item.y}, w:{item.w}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              ))}
+              <div className="absolute bottom-2 right-2 text-xs text-slate-300 pointer-events-none">
+                Canvas: {CANVAS_W}x{CANVAS_H}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* VIEW: LIST */}
+        {activeMode === 'list' && (
+          <div className="h-full overflow-y-auto p-6 max-w-4xl mx-auto space-y-6">
+            {/* 1. Layout Count */}
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+              <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><Layout size={20} /> レイアウト上の集計</h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="bg-slate-50 p-4 rounded-lg text-center border border-slate-100">
+                  <span className="block text-xs text-slate-400">小間数 (ブース)</span>
+                  <span className="text-2xl font-bold text-slate-800">{currentCounts['booth'] || 0}</span>
+                </div>
+                <div className="bg-slate-50 p-4 rounded-lg text-center border border-slate-100">
+                  <span className="block text-xs text-slate-400">長机</span>
+                  <span className="text-2xl font-bold text-slate-800">{currentCounts['table'] || 0}</span>
+                </div>
+                <div className="bg-slate-50 p-4 rounded-lg text-center border border-slate-100">
+                  <span className="block text-xs text-slate-400">椅子</span>
+                  <span className="text-2xl font-bold text-slate-800">{currentCounts['chair'] || 0}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* 2. Internal Supplies */}
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+              <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><PackageCheck size={20} /> 必要備品チェックリスト (社内用)</h3>
+              <p className="text-xs text-slate-400 mb-4">※当日持参する備品の確認用です。</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {(details.internalSupplies || INITIAL_INTERNAL_SUPPLIES).map((item, idx) => (
+                  <div key={idx} className={`p-3 rounded-lg border flex items-center gap-3 cursor-pointer transition-colors ${item.checked ? 'bg-green-50 border-green-200' : 'bg-white border-slate-200 hover:bg-slate-50'}`} onClick={() => handleInternalSupplyToggle(idx)}>
+                    <div className={`w-5 h-5 rounded border flex items-center justify-center ${item.checked ? 'bg-green-500 border-green-500 text-white' : 'bg-white border-slate-300'}`}>
+                      {item.checked && <Check size={14} />}
+                    </div>
+                    <span className={`text-sm font-bold ${item.checked ? 'text-green-800 line-through opacity-70' : 'text-slate-700'}`}>{item.name}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* 3. Rental Equipment (from Venue) */}
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="font-bold text-lg flex items-center gap-2"><Truck size={20} /> 外部手配・レンタル備品</h3>
+                <button onClick={() => alert('備品項目の編集は現在開発者によって制限されています')} className="text-xs text-blue-600 hover:underline">項目を編集</button>
+              </div>
+              <table className="w-full text-sm text-left">
+                <thead className="bg-slate-50 text-slate-500">
+                  <tr>
+                    <th className="p-3">品名</th>
+                    <th className="p-3">単価 (目安)</th>
+                    <th className="p-3">数量</th>
+                    <th className="p-3">小計</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {(details.equipment || []).length === 0 && <tr><td colSpan="4" className="p-8 text-center text-slate-400">登録された備品はありません</td></tr>}
+                  {(details.equipment || []).map((eq, i) => (
+                    <tr key={i}>
+                      <td className="p-3 font-bold">{eq.name}</td>
+                      <td className="p-3 font-mono text-slate-500">¥{Number(eq.price).toLocaleString()}</td>
+                      <td className="p-3 font-bold">{eq.count}</td>
+                      <td className="p-3 font-bold text-slate-800">¥{(eq.price * eq.count).toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot className="border-t border-slate-200 bg-slate-50">
+                  <tr>
+                    <td colSpan="3" className="p-3 text-right font-bold text-slate-600">合計見積目安</td>
+                    <td className="p-3 font-bold text-lg text-blue-600">
+                      ¥{((details.equipment || []).reduce((sum, e) => sum + (e.price * e.count), 0)).toLocaleString()}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+
+          </div>
+        )}
+      </div>
+
+      {/* Auto Layout Modal */}
+      {showAutoLayoutModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl p-6 max-w-sm w-full animate-slide-up">
+            <h3 className="font-bold text-lg mb-4">自動配置設定</h3>
+            <p className="text-sm text-slate-600 mb-6">参加確定済みのメーカーをグリッド状に配置します。列数を指定してください。</p>
+            <div className="flex gap-2 justify-center mb-6">
+              {[4, 5, 6, 8].map(cols => (
+                <button key={cols} onClick={() => runAutoLayout(cols)} className="px-4 py-2 bg-slate-100 hover:bg-blue-100 hover:text-blue-600 rounded-lg font-bold border border-slate-200">
+                  {cols}列
+                </button>
+              ))}
+            </div>
+            <button onClick={() => setShowAutoLayoutModal(false)} className="w-full py-2 text-slate-400 hover:bg-slate-50 rounded-lg text-sm">キャンセル</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TabFiles() {
+  const DRIVE_LINK = "https://drive.google.com/drive/folders/1-2kpoKvlPNgTdMUPzCIGjqXm4gkQM3Gx?usp=drive_link";
+  return (
+    <div className="p-8 text-center">
+      <div className="bg-blue-50 border border-blue-100 p-12 rounded-3xl flex flex-col items-center justify-center">
+        <Folder size={80} className="text-blue-400 mb-6" />
+        <h3 className="text-2xl font-bold text-blue-900 mb-2">資料管理センター</h3>
+        <p className="text-blue-600 mb-8">案内チラシやその他参考資料は、以下のGoogle Driveフォルダで一元管理されています。</p>
+        <a href={DRIVE_LINK} target="_blank" rel="noreferrer" className="bg-blue-600 text-white px-8 py-4 rounded-full font-bold text-lg shadow-xl hover:bg-blue-700 transition-transform transform hover:scale-105 flex items-center gap-3">
+          <ExternalLink size={24} /> Google Driveフォルダを開く
+        </a>
+      </div>
+    </div>
+  );
+}
+// ============================================================================
+function TabMakers({ exhibition, setMakers, updateMainData, masterMakers }) {
+  const { makers, formUrlMaker, formConfig } = exhibition;
+  const [subTab, setSubTab] = useState('all');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [isMailConfigOpen, setIsMailConfigOpen] = useState(false);
+  const [isFormEditorOpen, setIsFormEditorOpen] = useState(false);
+  const [isResponseDemoOpen, setIsResponseDemoOpen] = useState(false);
+  const [editingNoteId, setEditingNoteId] = useState(null);
+  const [noteEditValue, setNoteEditValue] = useState('');
+  const [simpleAddCode, setSimpleAddCode] = useState('');
+  const [simpleAddName, setSimpleAddName] = useState('');
+  const [selectedMaker, setSelectedMaker] = useState(null);
+
+  const [isCopied, setIsCopied] = useState(false);
+  const [isEditMakerOpen, setIsEditMakerOpen] = useState(false);
+  const [editingMakerData, setEditingMakerData] = useState(null);
+
+  // New: Fixed List Selection State
+  const [isFixedListModalOpen, setIsFixedListModalOpen] = useState(false);
+  const [selectedFixedMakers, setSelectedFixedMakers] = useState([]);
+
+  // Config Sort
+  const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
+  const handleSort = (key) => {
+    setSortConfig(prev => ({
+      key,
+      direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc'
+    }));
+  };
+
+  const [shortMakerUrl, setShortMakerUrl] = useState('');
+  const [isMakerUrlShortening, setIsMakerUrlShortening] = useState(false);
+  const shortenMakerUrl = async () => {
+    if (!formUrlMaker) return;
+    setIsMakerUrlShortening(true);
+    try {
+      const response = await fetch(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(formUrlMaker)}`);
+      if (response.ok) {
+        const shortened = await response.text();
+        setShortMakerUrl(shortened);
+        navigator.clipboard.writeText(shortened);
+        alert('短縮URLをクリップボードにコピーしました！');
+      } else {
+        alert('URL短縮に失敗しました');
+      }
+    } catch (e) {
+      alert('URL短縮エラー: ' + e.message);
+    }
+    setIsMakerUrlShortening(false);
+  };
+
+  const fileInputRef = useRef(null);
+  const makerList = makers || [];
+
+  useEffect(() => {
+    if (makerList.length > 0) {
+      const missingTokens = makerList.some(m => !m.accessToken);
+      if (missingTokens) {
+        const updated = makerList.map(m => m.accessToken ? m : { ...m, accessToken: crypto.randomUUID() });
+        updateMainData('makers', updated);
+      }
+    }
+  }, [makerList.length]);
+
+  const normalizeCompanyName = (name) => {
+    if (!name) return '';
+    return name.replace(/株式会社|㈱|有限会社|㈲|合同会社|合資会社|\s+/g, '').trim().toLowerCase();
+  };
+
+  const respondedNormalizedNames = makerList
+    .filter(m => m.status === 'confirmed' || m.status === 'declined')
+    .map(m => normalizeCompanyName(m.companyName));
+
+  const potentiallyUnanswered = makerList.filter(m => {
+    if (m.source === 'web_response') return false;
+    if (m.status === 'confirmed' || m.status === 'declined') return false;
+    const normalizedName = normalizeCompanyName(m.companyName);
+    return !respondedNormalizedNames.includes(normalizedName);
+  });
+
+  const filteredMakers = makerList.filter(m => {
+    const term = searchTerm.toLowerCase();
+    const match = (m.companyName?.toLowerCase().includes(term)) || (m.code?.toLowerCase().includes(term)) || (m.repName?.toLowerCase().includes(term));
+    if (subTab === 'confirmed') return m.status === 'confirmed' && match;
+    if (subTab === 'declined') return m.status === 'declined' && match;
+    if (subTab === 'unanswered') return potentiallyUnanswered.some(u => (u.id || u.code) === (m.id || m.code)) && match;
+    if (subTab === 'all') return m.source !== 'web_response' && match;
+    return match;
+  });
+
+  const sortedMakers = [...filteredMakers].sort((a, b) => {
+    if (!sortConfig.key) return 0;
+    const aVal = a[sortConfig.key] ?? '';
+    const bVal = b[sortConfig.key] ?? '';
+    const numA = typeof aVal === 'number' ? aVal : parseInt(aVal) || 0;
+    const numB = typeof bVal === 'number' ? numB : parseInt(bVal) || 0;
+
+    if (!isNaN(numA) && !isNaN(numB) && sortConfig.key !== 'companyName' && sortConfig.key !== 'repName') {
+      return sortConfig.direction === 'asc' ? numA - numB : numB - numA;
+    }
+    return sortConfig.direction === 'asc'
+      ? String(aVal).localeCompare(String(bVal), 'ja')
+      : String(bVal).localeCompare(String(aVal), 'ja');
+  });
+
+  const calculateTotals = () => {
+    const confirmed = makerList.filter(m => m.status === 'confirmed');
+    return {
+      booth: confirmed.reduce((sum, m) => sum + extractNum(m.boothCount), 0),
+      staff: confirmed.reduce((sum, m) => sum + extractNum(m.staffCount), 0),
+      lunch: confirmed.reduce((sum, m) => sum + extractNum(m.lunchCount), 0),
+      desk: confirmed.reduce((sum, m) => sum + extractNum(m.itemsDesk), 0),
+      chair: confirmed.reduce((sum, m) => sum + extractNum(m.itemsChair), 0),
+      power: confirmed.filter(m => m.itemsPower === '必要').length
+    };
+  };
+  const totals = calculateTotals();
+
+  const invitedMakers = makerList.filter(m => m.source !== 'web_response');
+  const stats = {
+    total: invitedMakers.length,
+    confirmed: makerList.filter(m => m.status === 'confirmed').length,
+    declined: makerList.filter(m => m.status === 'declined').length,
+    pending: invitedMakers.filter(m => m.status === 'listed').length,
+    unanswered: potentiallyUnanswered.length
+  };
+
+  // Fixed List Integration
+  const handleAddFromFixedList = () => {
+    if (selectedFixedMakers.length === 0) return;
+    const newMakers = selectedFixedMakers.map(m => ({
+      id: crypto.randomUUID(),
+      code: m.code,
+      companyName: m.companyName,
+      industry: m.category,
+      repName: m.repName,
+      email: m.email,
+      phone: m.phone,
+      status: 'listed',
+      source: 'fixed_list',
+      accessToken: crypto.randomUUID(),
+      invitedAt: new Date().toISOString()
+    }));
+    updateMainData('makers', [...makerList, ...newMakers]);
+    setIsFixedListModalOpen(false);
+    setSelectedFixedMakers([]);
+  };
+
+  // CSV Export
+  const handleExportCsv = () => {
+    // Determine export data based on current Tab
+    const exportData = sortedMakers.map(m => ({
+      'コード': m.code,
+      '企業名': m.companyName,
+      '担当者名': m.repName,
+      'Email': m.email,
+      '電話番号': m.phone,
+      'ステータス': m.status === 'confirmed' ? '参加' : m.status === 'declined' ? '辞退' : '未回答',
+      'ブース数': m.boothCount || 0,
+      'スタッフ数': m.staffCount || 0,
+      '弁当数': m.lunchCount || 0,
+      '電源': m.itemsPower || '-',
+      '登録日時': m.registeredAt ? new Date(m.registeredAt).toLocaleString() : '-'
+    }));
+
+    // Create CSV content (shift-jis simulation via simple string for now, preferably utf-8 with BOM)
+    const headers = Object.keys(exportData[0]).join(',');
+    const rows = exportData.map(row => Object.values(row).map(v => `"${v}"`).join(',')).join('\n');
+    const csvContent = "\uFEFF" + headers + '\n' + rows; // Add BOM
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `makers_export_${subTab}_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleSimpleAdd = () => {
+    if (!simpleAddCode || !simpleAddName) return;
+    const newMaker = { id: Date.now(), code: simpleAddCode, companyName: simpleAddName, status: 'listed', note: '手動追加', accessToken: crypto.randomUUID() };
+    updateMainData('makers', [...makerList, newMaker]);
+    setSimpleAddCode(''); setSimpleAddName('');
+  };
+
+  const handleCSVUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const data = await parseCSV(file);
+      if (data && data.length > 0) {
+        if (window.confirm(`${data.length}件のメーカーデータを追加しますか？\n（既存のリストに追加されます）`)) {
+          updateMainData('makers', [...makerList, ...data]);
+          alert('インポートが完了しました');
+        }
+      } else {
+        alert('有効なデータが見つかりませんでした。');
+      }
+    } catch (err) {
+      alert('CSV読み込みエラー: ' + err.message);
+    }
+    e.target.value = '';
+  };
+
+  const handleClearAllMakers = () => {
+    if (window.confirm("【警告】\n全てのメーカーリストを削除します。\n回答済みのデータも消えますが本当によろしいですか？")) {
+      updateMainData('makers', []);
+    }
+  }
+
+  const exportMakersCSV = () => { const data = makerList.map(m => ({ Code: m.code, Company: m.companyName, Note: m.note })); downloadCSV(data, 'makers_list.csv'); };
+
+  const exportConfirmedCSV = () => {
+    const baseUrl = window.location.origin + window.location.pathname;
+    const confirmed = makerList.filter(m => m.status === 'confirmed');
+
+    if (confirmed.length === 0) {
+      alert('出力対象のメーカーがありません');
+      return;
+    }
+
+    // Build data with only non-empty fields
+    const allFieldsMapping = {
+      '会社名': 'companyName', '担当者名': 'repName', '電話番号': 'phone', 'メールアドレス': 'email',
+      '希望コマ数': 'boothCount', '参加人数': 'staffCount', '昼食数': 'lunchCount',
+      '長机': 'itemsDesk', '椅子': 'itemsChair', '電源': 'itemsPower', '電源詳細': 'powerDetail',
+      '運送便': 'transport', '出荷個口数': 'packages', '支払方法': 'payment',
+      '搬入日時': 'moveInDate', '備考': 'note', '展示予定品': 'products'
+    };
+
+    // Find which fields have at least one non-empty value
+    const usedFields = {};
+    for (const [label, key] of Object.entries(allFieldsMapping)) {
+      if (confirmed.some(m => m[key] !== undefined && m[key] !== null && m[key] !== '')) {
+        usedFields[label] = key;
+      }
+    }
+
+    // Always include Dashboard URL
+    const data = confirmed.map(m => {
+      const row = {};
+      for (const [label, key] of Object.entries(usedFields)) {
+        row[label] = m[key] || '';
+      }
+      row['Dashboard URL'] = m.accessToken ? `${baseUrl}?mode=dashboard&id=${exhibition.id}&key=${m.accessToken}` : '';
+      return row;
+    });
+
+    downloadCSV(data, 'confirmed_makers_detail.csv');
+  };
+
+  const saveNote = (id) => {
+    const updated = makerList.map(m => (m.id || m.code) === id ? { ...m, note: noteEditValue } : m);
+    updateMainData('makers', updated);
+    setEditingNoteId(null);
+  };
+  const startEditNote = (m) => { setEditingNoteId(m.id || m.code); setNoteEditValue(m.note || ''); };
+  const updateMailConfig = (key, val) => { const newConfig = { ...formConfig, mail: { ...formConfig.mail, [key]: val } }; updateMainData('formConfig', newConfig); };
+  const handleConfigUpdate = (newConfig) => { updateMainData('formConfig', newConfig); setIsFormEditorOpen(false); };
+  const handleFormResponse = (formData) => {
+    // デモ回答をリストに追加
+    const isConfirmed = formData.status === 'confirmed' || formData.status === '出展を申し込む';
+    const newMaker = {
+      id: crypto.randomUUID(),
+      ...formData,
+      code: 'DEMO-' + Date.now().toString().slice(-4),
+      status: isConfirmed ? 'confirmed' : 'declined',
+      note: 'デモ回答'
+    };
+    updateMainData('makers', [...(makers || []), newMaker]);
+    setIsResponseDemoOpen(false);
+    alert('デモ回答をリストに追加しました');
+  };
+
+  const deleteMaker = (id) => {
+    if (window.confirm("このメーカーを削除しますか？")) {
+      const updated = makerList.filter(m => (m.id || m.code) !== id);
+      updateMainData('makers', updated);
+    }
+  };
+
+  const startEditMaker = (maker) => {
+    setEditingMakerData({ ...maker });
+    setIsEditMakerOpen(true);
+  };
+
+  const saveEditMaker = () => {
+    if (!editingMakerData) return;
+    const updated = makerList.map(m =>
+      ((m.id || m.code) === (editingMakerData.id || editingMakerData.code))
+        ? editingMakerData
+        : m
+    );
+    updateMainData('makers', updated);
+    setIsEditMakerOpen(false);
+  };
+
+  // URLリフレッシュ機能
+  const refreshMakerUrl = () => {
+    if (!window.confirm('招待フォームのURLを更新します。\n古いURLは無効になりますがよろしいですか？')) return;
+    const baseUrl = window.location.origin + window.location.pathname;
+    const newUrl = `${baseUrl}?mode=maker_register&id=${exhibition.id}`;
+    updateMainData('formUrlMaker', newUrl);
+    alert('URLを更新しました！');
+  };
+
+  return (
+    <div className="p-8 space-y-8 animate-fade-in relative min-h-screen pb-40">
+      <div className="flex justify-between items-center mb-6">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2"><Send className="text-blue-500" /> 招待メーカー管理</h2>
+          <p className="text-slate-500 text-sm mt-1">招待リストの管理、回答状況の確認、CSV入出力ができます。</p>
+        </div>
+        <div className="flex gap-3">
+          <button onClick={() => setIsFixedListModalOpen(true)} className="bg-slate-800 text-white px-4 py-2 rounded-lg hover:bg-slate-700 flex items-center gap-2 font-bold shadow-lg transition-all hover:translate-y-[-2px]">
+            <Database size={18} /> 固定リストから追加
+          </button>
+          <button onClick={() => fileInputRef.current?.click()} className="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg hover:bg-slate-50 flex items-center gap-2 font-bold shadow-sm transition-all hover:translate-y-[-2px]">
+            <Upload size={18} /> CSV読込
+          </button>
+          <input type="file" ref={fileInputRef} className="hidden" accept=".csv" onChange={handleCSVUpload} />
+          <button onClick={handleExportCsv} className="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 flex items-center gap-2 font-bold shadow-lg transition-all hover:translate-y-[-2px]">
+            <Download size={18} /> CSV出力
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-slate-900 text-slate-300 rounded-xl p-5 mb-6">
+        <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="flex-1 w-full">
+            <h4 className="font-bold text-white mb-1 flex items-center gap-2"><Database size={18} /> オリジナル招待フォーム</h4>
+            <p className="text-xs text-slate-400">このURLをメーカーに送信してください。</p>
+            <div className="mt-2 flex gap-2">
+              <input type="text" value={formUrlMaker} readOnly className="bg-slate-800 text-blue-300 text-xs px-3 py-2 rounded border border-slate-700 w-full" />
+              <button className={`px-3 py-2 rounded text-xs flex items-center gap-1 shrink-0 transition-colors ${isCopied ? 'bg-green-600 text-white' : 'bg-slate-700 hover:bg-slate-600 text-white'}`} onClick={() => { navigator.clipboard.writeText(formUrlMaker); setIsCopied(true); setTimeout(() => setIsCopied(false), 2000); }}>{isCopied ? <Check size={14} /> : <Copy size={14} />} {isCopied ? 'コピー完了' : 'コピー'}</button>
+              <button onClick={refreshMakerUrl} className="bg-amber-600 hover:bg-amber-500 text-white px-3 py-2 rounded text-xs flex items-center gap-1 shrink-0" title="URLを更新"><RefreshCcw size={14} /> 更新</button>
+            </div>
+          </div>
+          <div className="flex gap-2 w-full md:w-auto">
+            <button onClick={() => setIsFormEditorOpen(true)} className="flex-1 md:flex-none bg-slate-700 hover:bg-slate-600 text-white px-4 py-3 rounded-lg font-bold flex items-center justify-center gap-2 transition-all"><Settings size={18} /> フォーム編集</button>
+            <button onClick={() => setIsResponseDemoOpen(true)} className="flex-1 md:flex-none bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white px-6 py-3 rounded-lg font-bold flex items-center justify-center gap-2 shadow-lg transform hover:scale-105 transition-all"><ExternalLink size={18} /> 回答画面 (デモ)</button>
+          </div>
+        </div>
+      </div>
+
+      {/* Stats Cards */}
+      <div className="grid grid-cols-5 gap-4">
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col items-center justify-center">
+          <span className="text-xs font-bold text-slate-400">招待総数</span>
+          <span className="text-2xl font-bold text-slate-800">{stats.total}</span>
+        </div>
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col items-center justify-center border-b-4 border-b-blue-500">
+          <span className="text-xs font-bold text-blue-500">参加確定</span>
+          <span className="text-2xl font-bold text-blue-600">{stats.confirmed}</span>
+        </div>
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col items-center justify-center border-b-4 border-b-slate-400">
+          <span className="text-xs font-bold text-slate-400">未回答(リスト)</span>
+          <span className="text-2xl font-bold text-slate-600">{stats.pending}</span>
+        </div>
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col items-center justify-center border-b-4 border-b-red-400">
+          <span className="text-xs font-bold text-red-400">未回答の可能性</span>
+          <span className="text-2xl font-bold text-red-600">{stats.unanswered}</span>
+        </div>
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col items-center justify-center border-b-4 border-b-slate-300">
+          <span className="text-xs font-bold text-slate-400">辞退</span>
+          <span className="text-2xl font-bold text-slate-500">{stats.declined}</span>
+        </div>
+      </div>
+      {/* 詳細集計（確定済みのみ） */}
+      {subTab === 'confirmed' && (
+        <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm animate-slide-up">
+          <h4 className="font-bold text-lg mb-4 text-slate-700">必要な備品・リソース合計</h4>
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
+            <div className="bg-slate-50 p-4 rounded-lg text-center"><div className="text-xs text-slate-500 mb-1">小間数計</div><div className="text-2xl font-bold text-slate-800">{totals.booth}</div></div>
+            <div className="bg-slate-50 p-4 rounded-lg text-center"><div className="text-xs text-slate-500 mb-1">スタッフ証</div><div className="text-2xl font-bold text-slate-800">{totals.staff}</div></div>
+            <div className="bg-slate-50 p-4 rounded-lg text-center"><div className="text-xs text-slate-500 mb-1">弁当数</div><div className="text-2xl font-bold text-slate-800">{totals.lunch}</div></div>
+            <div className="bg-slate-50 p-4 rounded-lg text-center"><div className="text-xs text-slate-500 mb-1">長机</div><div className="text-2xl font-bold text-slate-800">{totals.desk}</div></div>
+            <div className="bg-slate-50 p-4 rounded-lg text-center"><div className="text-xs text-slate-500 mb-1">椅子</div><div className="text-2xl font-bold text-slate-800">{totals.chair}</div></div>
+            <div className="bg-slate-50 p-4 rounded-lg text-center"><div className="text-xs text-slate-500 mb-1">電源利用</div><div className="text-2xl font-bold text-slate-800">{totals.power}<span className="text-xs font-normal ml-1">社</span></div></div>
+          </div>
+        </div>
+      )}
+
+      {/* Maker List Table & Filters */}
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+        {/* Tabs */}
+        <div className="flex border-b border-slate-200 overflow-x-auto">
+          {[
+            { id: 'all', label: '招待済み', count: stats.total },
+            { id: 'confirmed', label: '参加確定', count: stats.confirmed },
+            { id: 'declined', label: '辞退', count: stats.declined },
+            { id: 'unanswered', label: '未回答', count: stats.unanswered }
+          ].map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setSubTab(tab.id)}
+              className={`px-6 py-4 text-sm font-bold flex items-center gap-2 border-b-2 transition-colors whitespace-nowrap ${subTab === tab.id ? 'border-blue-600 text-blue-600 bg-blue-50' : 'border-transparent text-slate-500 hover:bg-slate-50'}`}
+            >
+              {tab.label}
+              <span className={`px-2 py-0.5 rounded-full text-xs ${subTab === tab.id ? 'bg-blue-200 text-blue-700' : 'bg-slate-200 text-slate-600'}`}>{tab.count}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* Table */}
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm min-w-[800px]">
+            <thead className="bg-slate-50 text-slate-500 font-bold border-b">
+              <tr>
+                <th className="p-4 w-32 cursor-pointer hover:bg-slate-100" onClick={() => handleSort('status')}>ステータス</th>
+                <th className="p-4 w-24 cursor-pointer hover:bg-slate-100" onClick={() => handleSort('code')}>コード</th>
+                <th className="p-4 cursor-pointer hover:bg-slate-100" onClick={() => handleSort('companyName')}>企業名</th>
+                <th className="p-4 w-40 cursor-pointer hover:bg-slate-100" onClick={() => handleSort('repName')}>担当者</th>
+                <th className="p-4">Email / Info</th>
+                <th className="p-4 w-48 text-right">アクション</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {sortedMakers.map(maker => (
+                <tr key={maker.id} className="hover:bg-slate-50 transition-colors">
+                  <td className="p-4">
+                    <span className={`px-3 py-1 rounded-full text-xs font-bold inline-block flex items-center gap-1 w-fit
+                      ${maker.status === 'confirmed' ? 'bg-green-100 text-green-700' :
+                        maker.status === 'declined' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500'}`}>
+                      {maker.status === 'confirmed' && <CheckCircle size={12} />}
+                      {maker.status === 'declined' && <X size={12} />}
+                      {maker.status === 'confirmed' ? '参加' : maker.status === 'declined' ? '辞退' : '未回答'}
+                    </span>
+                  </td>
+                  <td className="p-4 text-slate-500 font-mono">{maker.code}</td>
+                  <td className="p-4 font-bold text-slate-700">{maker.companyName}</td>
+                  <td className="p-4 text-slate-600">{maker.repName}</td>
+                  <td className="p-4 text-slate-600">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-xs">{maker.email}</span>
+                      <span className="text-xs text-slate-400">{maker.phone}</span>
+                    </div>
+                  </td>
+                  <td className="p-4 text-right">
+                    <div className="flex justify-end gap-2">
+                      <button onClick={() => {
+                        const url = `${formUrlMaker}?id=${exhibition.id}&maker_id=${maker.id}&token=${maker.accessToken}`;
+                        navigator.clipboard.writeText(url);
+                        alert('招待用URLをコピーしました');
+                      }} className="p-2 hover:bg-blue-50 text-blue-600 rounded bg-white border border-slate-200 transition-colors" title="招待URLコピー">
+                        <LinkIcon size={16} />
+                      </button>
+                      <button onClick={() => {
+                        setEditingMakerData(maker);
+                        setIsEditMakerOpen(true);
+                      }} className="p-2 hover:bg-slate-100 text-slate-600 rounded bg-white border border-slate-200 transition-colors" title="編集">
+                        <Edit3 size={16} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {sortedMakers.length === 0 && (
+                <tr>
+                  <td colSpan="6" className="p-12 text-center text-slate-400">
+                    該当するメーカーが見つかりません
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Fixed List Modal */}
+      {isFixedListModalOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 animate-fade-in">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col">
+            <div className="p-6 border-b flex justify-between items-center bg-slate-50 rounded-t-xl">
+              <h3 className="font-bold text-xl text-slate-800">マスターリストから追加</h3>
+              <button onClick={() => setIsFixedListModalOpen(false)}><X className="text-slate-400 hover:text-slate-600" /></button>
+            </div>
+            <div className="p-6 overflow-y-auto flex-1">
+              <div className="mb-4 bg-blue-50 p-4 rounded text-blue-800 text-sm flex items-start gap-2">
+                <Info size={16} className="mt-0.5" />
+                <div>
+                  <p className="font-bold">追加したいメーカーを選択してください。</p>
+                  <p className="text-xs opacity-80 mt-1">※既に招待済みのメーカーはリストに表示されません。</p>
+                </div>
+              </div>
+              <table className="w-full text-left text-sm border rounded-lg overflow-hidden">
+                <thead className="bg-slate-100 text-slate-600 font-bold sticky top-0">
+                  <tr>
+                    <th className="p-3 w-10 bg-slate-100"><input type="checkbox"
+                      onChange={(e) => {
+                        const available = masterMakers.filter(m => !makerList.some(invited => invited.code === m.code || invited.companyName === m.companyName));
+                        if (e.target.checked) setSelectedFixedMakers(available);
+                        else setSelectedFixedMakers([]);
+                      }}
+                      checked={selectedFixedMakers.length > 0 && selectedFixedMakers.length === masterMakers.filter(m => !makerList.some(invited => invited.code === m.code || invited.companyName === m.companyName)).length}
+                    /></th>
+                    <th className="p-3 bg-slate-100">コード</th>
+                    <th className="p-3 bg-slate-100">企業名</th>
+                    <th className="p-3 bg-slate-100">業界</th>
+                    <th className="p-3 bg-slate-100">担当者</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {masterMakers
+                    .filter(m => !makerList.some(invited => invited.code === m.code || invited.companyName === m.companyName))
+                    .map(m => (
+                      <tr key={m.id} className={`hover:bg-blue-50 cursor-pointer transition-colors ${selectedFixedMakers.some(s => s.id === m.id) ? 'bg-blue-50' : ''}`}
+                        onClick={() => {
+                          if (selectedFixedMakers.some(s => s.id === m.id)) {
+                            setSelectedFixedMakers(selectedFixedMakers.filter(s => s.id !== m.id));
+                          } else {
+                            setSelectedFixedMakers([...selectedFixedMakers, m]);
+                          }
+                        }}
+                      >
+                        <td className="p-3" onClick={e => e.stopPropagation()}>
+                          <input type="checkbox"
+                            checked={selectedFixedMakers.some(s => s.id === m.id)}
+                            onChange={() => { }}
+                          />
+                        </td>
+                        <td className="p-3 font-mono text-slate-500">{m.code}</td>
+                        <td className="p-3 font-bold">{m.companyName}</td>
+                        <td className="p-3 text-slate-600">{m.category}</td>
+                        <td className="p-3 text-slate-600">{m.repName}</td>
+                      </tr>
+                    ))}
+                  {masterMakers.filter(m => !makerList.some(invited => invited.code === m.code || invited.companyName === m.companyName)).length === 0 &&
+                    <tr><td colSpan="5" className="p-8 text-center text-slate-400">追加可能なマスターデータがありません</td></tr>}
+                </tbody>
+              </table>
+            </div>
+            <div className="p-6 border-t bg-slate-50 rounded-b-xl flex justify-between items-center">
+              <div className="font-bold text-slate-600">{selectedFixedMakers.length} <span className="text-xs font-normal">件選択中</span></div>
+              <div className="flex gap-3">
+                <button onClick={() => setIsFixedListModalOpen(false)} className="px-5 py-2.5 rounded-lg border border-slate-300 text-slate-600 font-bold hover:bg-slate-100">キャンセル</button>
+                <button onClick={handleAddFromFixedList} disabled={selectedFixedMakers.length === 0} className="px-5 py-2.5 rounded-lg bg-blue-600 text-white font-bold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-blue-200 transition-all transform active:scale-95">
+                  選択したメーカーを追加
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Maker Modal */}
+      {isEditMakerOpen && editingMakerData && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 animate-fade-in">
+          <div className="bg-white p-8 rounded-xl max-w-lg w-full shadow-2xl">
+            <h3 className="font-bold text-xl mb-6">メーカー情報編集</h3>
+            <div className="space-y-4">
+              <div><label className="block text-xs font-bold text-slate-500 mb-1">企業名</label>
+                <input className="w-full border rounded p-2" value={editingMakerData.companyName} onChange={e => setEditingMakerData({ ...editingMakerData, companyName: e.target.value })} /></div>
+              <div><label className="block text-xs font-bold text-slate-500 mb-1">担当者名</label>
+                <input className="w-full border rounded p-2" value={editingMakerData.repName} onChange={e => setEditingMakerData({ ...editingMakerData, repName: e.target.value })} /></div>
+              <div><label className="block text-xs font-bold text-slate-500 mb-1">Email</label>
+                <input className="w-full border rounded p-2" value={editingMakerData.email} onChange={e => setEditingMakerData({ ...editingMakerData, email: e.target.value })} /></div>
+            </div>
+            <div className="mt-8 flex justify-end gap-3">
+              <button onClick={() => setIsEditMakerOpen(false)} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded">キャンセル</button>
+              <button onClick={() => {
+                updateMainData('makers', makers.map(m => m.id === editingMakerData.id ? editingMakerData : m));
+                setIsEditMakerOpen(false);
+              }} className="px-6 py-2 bg-blue-600 text-white font-bold rounded hover:bg-blue-700">保存</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+// TabEntrance: QRスキャン実装 (修正版: 連打防止・URL表示)
+function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, updateMainData, initialMode }) {
+  const { formUrlVisitor, visitorFormConfig } = exhibition;
+  const [mode, setMode] = useState(initialMode || 'dashboard');
+  const [showSimulatedPublicForm, setShowSimulatedPublicForm] = useState(false);
+  const [lastScannedVisitor, setLastScannedVisitor] = useState(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [shortUrl, setShortUrl] = useState('');
+  const [isShortening, setIsShortening] = useState(false);
+  const [isCopied, setIsCopied] = useState(false); // isCopied state for TabEntrance
+  const [isScanning, setIsScanning] = useState(true); // Scanner state for TabEntrance
+
+  // 連続読み取り防止用のRef
+  const lastScanTime = useRef(0);
+
+  // Scanner handler for TabEntrance
+  const handleScan = (result) => {
+    if (!result || result.length === 0 || !isScanning) return;
+    const rawValue = result[0]?.rawValue;
+    if (rawValue) {
+      handleRealScan(rawValue);
+    }
+  };
+
+  // URL短縮機能 (is.gd - 直接リダイレクト、英語ページ表示なし)
+  const shortenUrl = async () => {
+    if (!formUrlVisitor) return;
+    setIsShortening(true);
+    try {
+      // is.gd API (無料・認証不要・直接リダイレクト)
+      const response = await fetch(`https://is.gd/create.php?format=simple&url=${encodeURIComponent(formUrlVisitor)}`);
+      if (response.ok) {
+        const shortened = await response.text();
+        setShortUrl(shortened);
+        navigator.clipboard.writeText(shortened);
+        alert('短縮URLをクリップボードにコピーしました！\nQRコードに使用できます。');
+      } else {
+        alert('URL短縮に失敗しました');
+      }
+    } catch (e) {
+      alert('URL短縮エラー: ' + e.message);
+    }
+    setIsShortening(false);
+  };
+
+  // URLリフレッシュ機能
+  const refreshVisitorUrl = () => {
+    if (!window.confirm('来場者登録フォームのURLを更新します。\n古いURLは無効になりますがよろしいですか？')) return;
+    const baseUrl = window.location.origin + window.location.pathname;
+    const newUrl = `${baseUrl}?mode=visitor_register&id=${exhibition.id}`;
+    updateMainData('formUrlVisitor', newUrl);
+    setShortUrl(''); // 短縮URLもクリア
+    alert('URLを更新しました！');
+  };
+
+  // Copy function for TabEntrance
+  const copyVisitorFormUrl = () => {
+    const urlToCopy = shortUrl || formUrlVisitor;
+    if (!urlToCopy) return;
+    navigator.clipboard.writeText(urlToCopy);
+    setIsCopied(true);
+    setTimeout(() => setIsCopied(false), 2000);
+  };
+
+  useEffect(() => {
+    if (initialMode) setMode(initialMode);
+  }, [initialMode]);
+
+  const handleConfigSave = (newConfig) => {
+    updateMainData('visitorFormConfig', newConfig);
+    setMode('dashboard');
+  };
+
+  // 実機スキャン用ハンドラ (react-qr-scanner用) - 修正版
+  const handleRealScan = (dataString) => {
+    if (!dataString) return;
+
+    // クールダウン処理（2秒間は再スキャンしない）
+    const now = Date.now();
+    if (now - lastScanTime.current < 2000) return;
+    lastScanTime.current = now;
+
+    try {
+      const data = JSON.parse(dataString);
+
+      // データ形式チェック
+      if (!data.id) return;
+
+      const exists = visitors.find(v => v.id === data.id);
+
+      if (exists) {
+        if (exists.status !== 'checked-in') {
+          const updated = visitors.map(v => v.id === data.id ? { ...v, status: 'checked-in' } : v);
+          updateMainData('visitors', updated);
+          updateVisitorCount(exhibition.id, exhibition.currentVisitors + 1);
+          setLastScannedVisitor({ ...exists, status: 'checked-in', isNew: false });
+        } else {
+          setLastScannedVisitor({ ...exists, msg: '既に入場済みです' });
+        }
+      } else {
+        alert("未登録のQRコードです");
+      }
+    } catch (e) {
+      console.log('Invalid QR Data', e);
+    }
+  };
+
+  const handlePublicRegister = (data) => {
+    // data already contains ID and status from the form component
+    updateMainData('visitors', [...visitors, data]);
+    // Do NOT close the modal, let it show the QR code
+  };
+
+  const filteredVisitors = visitors.filter(v =>
+    (v.companyName || '').includes(searchTerm) || (v.repName || '').includes(searchTerm)
+  );
+
+  return (
+    <div className="flex flex-col md:flex-row h-[800px]">
+      <div className="w-full md:w-64 bg-slate-50 border-r border-slate-200 p-4 flex flex-row md:flex-col gap-2 overflow-x-auto">
+        <h3 className="font-bold text-slate-500 mb-2 px-2 hidden md:block">Entrance Menu</h3>
+        <button onClick={() => setMode('dashboard')} className={`flex-1 md:flex-none text-left px-4 py-3 rounded-lg font-bold flex items-center justify-center md:justify-start gap-2 whitespace-nowrap ${mode === 'dashboard' ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-100 text-slate-600'}`}><List size={18} /> <span className="hidden md:inline">来場者リスト</span><span className="md:hidden">リスト</span></button>
+        <button onClick={() => setMode('scanner')} className={`flex-1 md:flex-none text-left px-4 py-3 rounded-lg font-bold flex items-center justify-center md:justify-start gap-2 whitespace-nowrap ${mode === 'scanner' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-100 text-slate-600'}`}><ScanLine size={18} /> <span className="hidden md:inline">QR受付スキャン</span><span className="md:hidden">スキャン</span></button>
+        <div className="border-t my-2 hidden md:block"></div>
+        <button onClick={() => setMode('editForm')} className={`flex-1 md:flex-none text-left px-4 py-3 rounded-lg font-bold flex items-center justify-center md:justify-start gap-2 whitespace-nowrap ${mode === 'editForm' ? 'bg-indigo-100 text-indigo-700' : 'hover:bg-slate-100 text-slate-600'}`}><Settings size={18} /> <span className="hidden md:inline">登録フォーム編集</span><span className="md:hidden">設定</span></button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto bg-white p-4 md:p-8">
+
+        {/* 事前登録URL表示エリア */}
+        <div className="bg-slate-900 text-slate-300 rounded-xl p-5 mb-6">
+          <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+            <div className="flex-1 w-full">
+              <h4 className="font-bold text-white mb-1 flex items-center gap-2"><QrCode size={18} /> 事前登録用フォーム</h4>
+              <p className="text-xs text-slate-400">このURLを来場予定者に共有してください。</p>
+              <div className="mt-2 flex gap-2">
+                <input type="text" value={shortUrl || formUrlVisitor} readOnly className="bg-slate-800 text-blue-300 text-xs px-3 py-2 rounded border border-slate-700 w-full" />
+                <button className={`px-3 py-2 rounded text-xs flex items-center gap-1 shrink-0 transition-colors ${isCopied ? 'bg-green-600 text-white' : 'bg-slate-700 hover:bg-slate-600 text-white'}`} onClick={copyVisitorFormUrl}>{isCopied ? <Check size={14} /> : <Copy size={14} />} {isCopied ? 'コピー完了' : 'コピー'}</button>
+                <button onClick={refreshVisitorUrl} className="bg-amber-600 hover:bg-amber-500 text-white px-3 py-2 rounded text-xs flex items-center gap-1 shrink-0" title="URLを更新"><RefreshCcw size={14} /> 更新</button>
+              </div>
+              {/* QRコード作成リンク */}
+              <div className="mt-3 flex items-center gap-2">
+                <a
+                  href="https://qr.paps.jp/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded text-xs font-bold flex items-center gap-2 transition-colors"
+                >
+                  <QrCode size={14} /> QRコードを作成（外部サイト）
+                </a>
+                <span className="text-xs text-slate-400">URLをコピーしてQRコード作成サイトに貼り付けてください</span>
+              </div>
+            </div>
+            <div className="flex gap-2 w-full md:w-auto">
+              <button onClick={() => setShowSimulatedPublicForm(true)} className="flex-1 md:flex-none bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white px-6 py-3 rounded-lg font-bold flex items-center justify-center gap-2 shadow-lg transform hover:scale-105 transition-all"><ExternalLink size={18} /> 登録画面 (デモ)</button>
+            </div>
+          </div>
+        </div>
+
+        {mode === 'dashboard' && (
+          <div className="animate-fade-in">
+            <div className="flex flex-col md:flex-row justify-between items-end mb-6 gap-4">
+              <div><h2 className="text-2xl font-bold text-slate-800">来場者リスト</h2></div>
+              <div className="flex items-center gap-4 w-full md:w-auto">
+                <div className="relative w-full md:w-auto">
+                  <Search size={16} className="absolute left-3 top-3 text-slate-400" />
+                  <input type="text" placeholder="名前・会社名で検索" className="pl-9 pr-4 py-2 border rounded-full text-sm w-full md:w-64 focus:ring-2 focus:ring-blue-500 outline-none" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+                </div>
+              </div>
+            </div>
+            <div className="border border-slate-200 rounded-xl overflow-x-auto">
+              <table className="w-full text-left text-sm min-w-[600px]">
+                <thead className="bg-slate-50 text-slate-500 font-bold border-b"><tr><th className="p-4">ステータス</th><th className="p-4">受付区分</th><th className="p-4">氏名</th><th className="p-4">会社名</th><th className="p-4">人数</th><th className="p-4">操作</th></tr></thead>
+                <tbody>
+                  {filteredVisitors.map((v) => (
+                    <tr key={v.id} className="border-b hover:bg-slate-50 transition-colors">
+                      <td className="p-4">{v.status === 'checked-in' ? <span className="bg-blue-100 text-blue-700 px-3 py-1 rounded-full text-xs font-bold flex items-center w-fit gap-1"><CheckCircle size={12} /> 来場済</span> : <span className="bg-slate-100 text-slate-500 px-3 py-1 rounded-full text-xs font-bold">未入場</span>}</td>
+                      <td className="p-4 text-slate-600">{v.type}</td><td className="p-4 font-bold text-slate-800">{v.repName}</td><td className="p-4 text-slate-600">{v.companyName}</td><td className="p-4 text-slate-600">{v.count}名</td>
+                      <td className="p-4">
+                        <button onClick={() => {
+                          if (window.confirm(`${v.repName} 様の来場記録を削除しますか？`)) {
+                            const updated = visitors.filter(item => item.id !== v.id);
+                            updateMainData('visitors', updated);
+                          }
+                        }} className="text-slate-400 hover:text-red-500 p-2 rounded-full hover:bg-red-50 transition-colors"><Trash2 size={16} /></button>
+                      </td>
+                    </tr>
+                  ))}
+                  {filteredVisitors.length === 0 && <tr><td colSpan="6" className="p-8 text-center text-slate-400">該当なし</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {mode === 'scanner' && (
+          <div className="flex flex-col items-center justify-center h-full animate-fade-in relative">
+            <div className="bg-slate-900 rounded-3xl p-4 md:p-8 shadow-2xl w-full max-w-lg text-center relative overflow-hidden">
+              <h2 className="text-xl md:text-2xl font-bold text-white mb-6 flex items-center justify-center gap-2"><Camera className="text-blue-400" /> QR Scanner</h2>
+
+              {/* 実機カメラエリア */}
+              <div className="rounded-xl overflow-hidden mb-6 bg-black relative border-2 border-slate-700 aspect-square">
+                {isScanning ? (
+                  <Scanner
+                    onScan={handleScan}
+                    styles={{ container: { width: '100%', height: '100%' } }}
+                    allowMultiple={true}
+                    scanDelay={500}
+                    components={{
+                      audio: false, // 独自のBEEP音を使うため無効化
+                      onOff: false,
+                      torch: false,
+                    }}
+                  />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center bg-slate-900 text-white">
+                    <p className="font-bold animate-pulse">Processing...</p>
+                  </div>
+                )}
+                <div className="absolute inset-0 border-2 border-blue-500/50 pointer-events-none"></div>
+              </div>
+
+              {lastScannedVisitor && (
+                <div className="bg-green-600 rounded-xl p-4 text-white animate-slide-up shadow-lg text-left">
+                  <div className="flex items-center gap-4"><div className="bg-white/20 p-3 rounded-full"><UserCheck size={32} /></div><div><p className="text-xs opacity-80 uppercase tracking-wider font-bold">Check-in Complete</p><p className="text-xl font-bold">{lastScannedVisitor.repName} 様</p><p className="text-sm opacity-90">{lastScannedVisitor.companyName}</p></div></div>
+                  {lastScannedVisitor.msg && <p className="mt-2 text-yellow-300 text-sm font-bold bg-black/20 p-1 rounded">{lastScannedVisitor.msg}</p>}
+                </div>
+              )}
+              <p className="text-slate-500 text-xs mt-4">カメラへのアクセスを許可してください</p>
+            </div>
+          </div>
+        )}
+
+        {mode === 'editForm' && <VisitorFormEditor config={visitorFormConfig} onSave={handleConfigSave} />}
+      </div>
+      {showSimulatedPublicForm && <SimulatedPublicVisitorForm config={visitorFormConfig} onClose={() => setShowSimulatedPublicForm(false)} onSubmit={handlePublicRegister} />}
+    </div>
+  );
+}
+// ============================================================================
+// 4. 展示会詳細タブ (Main, Tasks, Lectures)
+// ============================================================================
+
+function TabMainBoard({ exhibition, updateMainData, updateBatch, tasks, onNavigate }) {
+  const [newMember, setNewMember] = useState('');
+  const [showSettings, setShowSettings] = useState(false);
+  const [showHotelModal, setShowHotelModal] = useState(false);
+  const [hotelForm, setHotelForm] = useState({ name: '', url: '', dates: [], members: [] });
+  const [tempHotelDate, setTempHotelDate] = useState('');
+
+  // Edit form state (mirrors CreateExhibitionForm fields)
+  const [editData, setEditData] = useState({});
+  const [tempEditDate, setTempEditDate] = useState('');
+  const [tempEditPreDate, setTempEditPreDate] = useState('');
+  const [editErrors, setEditErrors] = useState([]);
+
+  // Initialize edit data when settings modal opens
+  useEffect(() => {
+    if (showSettings) {
+      setEditData({
+        title: exhibition.title || '',
+        dates: exhibition.dates || [],
+        preDates: exhibition.preDates || [],
+        place: exhibition.place || '',
+        prefecture: exhibition.prefecture || '',
+        venueAddress: exhibition.venueAddress || '',
+        openTime: exhibition.openTime || '10:00',
+        closeTime: exhibition.closeTime || '17:00',
+        concept: exhibition.concept || '',
+        targetVisitors: exhibition.targetVisitors || 0,
+        targetMakers: exhibition.targetMakers || 0,
+        targetProfit: exhibition.targetProfit || 0,
+        venueUrl: exhibition.venueUrl || '',
+        googleMapsUrl: exhibition.googleMapsUrl || '',
+        staff: exhibition.staff || ''
+      });
+      setEditErrors([]);
+    }
+  }, [showSettings, exhibition]);
+
+  // === Stats Calculations ===
+  const scannedVisitors = exhibition.visitors?.length || 0;
+  const preRegistrations = exhibition.preRegistrations || 0;
+  const confirmedMakers = exhibition.makers?.filter(m => m.status === 'confirmed') || [];
+  const pendingMakers = exhibition.makers?.filter(m => !m.status || m.status === 'invited' || m.status === 'pending') || [];
+
+  // Budget calculation (replicate TabBudget logic)
+  const extractNum = (s) => parseInt(String(s).replace(/[^0-9]/g, '')) || 1;
+  const { venueDetails, otherBudgets, makers, lectures } = exhibition;
+  const equipmentTotal = (venueDetails?.equipment || []).reduce((sum, item) => sum + (item.count * item.price), 0);
+  const boothIncome = (makers || []).filter(m => m.status === 'confirmed').reduce((sum, m) => sum + (extractNum(m.boothCount) * 30000), 0);
+  const lectureFees = (lectures || []).reduce((sum, l) => sum + Number(l.fee || 0), 0);
+  const incomes = (otherBudgets || []).filter(b => b.type === 'income');
+  const expenses = (otherBudgets || []).filter(b => b.type === 'expense');
+  const totalIncome = boothIncome + incomes.reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
+  const totalExpense = (venueDetails?.cost || 0) + equipmentTotal + lectureFees + expenses.reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
+  const finalBalance = totalIncome - totalExpense;
+
+  // Urgent Tasks (Due within 7 days and not done)
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const urgentTasks = (tasks || [])
+    .filter(t => {
+      if (t.status === 'done' || !t.dueDate) return false;
+      const due = new Date(t.dueDate);
+      due.setHours(0, 0, 0, 0);
+      const diff = (due - today) / (1000 * 60 * 60 * 24);
+      return diff <= 7;
+    })
+    .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))
+    .slice(0, 5);
+
+  // Staff array
+  const staffList = exhibition.staff?.split(',').map(s => s.trim()).filter(Boolean) || [];
+
+  // === Member Management ===
+  const addMember = () => {
+    if (!newMember.trim()) return;
+    if (!staffList.includes(newMember.trim())) {
+      updateMainData('staff', [...staffList, newMember.trim()].join(', '));
+    }
+    setNewMember('');
+  };
+  const removeMember = (name) => {
+    updateMainData('staff', staffList.filter(s => s !== name).join(', '));
+  };
+
+  // === Hotel Management ===
+  const hotels = exhibition.hotelReservations || [];
+  const addHotelDate = () => {
+    if (tempHotelDate && !hotelForm.dates.includes(tempHotelDate)) {
+      setHotelForm({ ...hotelForm, dates: [...hotelForm.dates, tempHotelDate].sort() });
+      setTempHotelDate('');
+    }
+  };
+  const removeHotelDate = (d) => setHotelForm({ ...hotelForm, dates: hotelForm.dates.filter(x => x !== d) });
+  const toggleHotelMember = (m) => {
+    if (hotelForm.members.includes(m)) {
+      setHotelForm({ ...hotelForm, members: hotelForm.members.filter(x => x !== m) });
+    } else {
+      setHotelForm({ ...hotelForm, members: [...hotelForm.members, m] });
+    }
+  };
+  const saveHotel = () => {
+    if (!hotelForm.name.trim()) return;
+    const newHotel = { id: crypto.randomUUID(), ...hotelForm };
+    updateMainData('hotelReservations', [...hotels, newHotel]);
+    setHotelForm({ name: '', url: '', dates: [], members: [] });
+    setShowHotelModal(false);
+  };
+  const removeHotel = (id) => {
+    updateMainData('hotelReservations', hotels.filter(h => h.id !== id));
+  };
+
+  // === Edit Settings Logic ===
+  const addEditDate = (type) => {
+    const val = type === 'main' ? tempEditDate : tempEditPreDate;
+    if (!val) return;
+    const key = type === 'main' ? 'dates' : 'preDates';
+    if (!editData[key].includes(val)) {
+      setEditData({ ...editData, [key]: [...editData[key], val].sort() });
+    }
+    type === 'main' ? setTempEditDate('') : setTempEditPreDate('');
+  };
+  const removeEditDate = (type, idx) => {
+    const key = type === 'main' ? 'dates' : 'preDates';
+    setEditData({ ...editData, [key]: editData[key].filter((_, i) => i !== idx) });
+  };
+  const validateAndSave = () => {
+    const errors = [];
+    if (!editData.title.trim()) errors.push('展示会タイトルは必須です');
+    if (!editData.dates || editData.dates.length === 0) errors.push('開催日を1日以上追加してください');
+    if (!editData.targetVisitors || editData.targetVisitors <= 0) errors.push('集客目標を入力してください');
+    if (!editData.targetMakers || editData.targetMakers <= 0) errors.push('招致メーカー目標を入力してください');
+    if (!editData.targetProfit || editData.targetProfit <= 0) errors.push('目標利益額を入力してください');
+    if (!editData.staff || editData.staff.split(',').filter(s => s.trim()).length === 0) errors.push('運営スタッフを1人以上追加してください');
+    if (errors.length > 0) {
+      setEditErrors(errors);
+      return;
+    }
+    // Save all changes in batch
+    updateBatch(editData);
+    setShowSettings(false);
+  };
+
+  // Google Maps Embed URL (query-based, no API key needed)
+  const mapQuery = exhibition.venueAddress || exhibition.place || '';
+  const mapEmbedUrl = mapQuery ? `https://www.google.com/maps?q=${encodeURIComponent(mapQuery)}&output=embed` : '';
+
+  // Color palette for member avatars
+  const avatarColors = ['bg-blue-500', 'bg-emerald-500', 'bg-amber-500', 'bg-rose-500', 'bg-purple-500', 'bg-cyan-500'];
+  const getAvatarColor = (idx) => avatarColors[idx % avatarColors.length];
+
+  return (
+    <div className="p-6 space-y-6 animate-fade-in">
+      {/* Settings Button (Top Right) */}
+      <div className="flex justify-end">
+        <button onClick={() => setShowSettings(true)} className="bg-slate-800 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 hover:bg-slate-700 transition-colors shadow-lg">
+          <Settings size={18} /> 設定変更
+        </button>
+      </div>
+
+      {/* 4 Status Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* 来場者数 Card (Blue gradient) */}
+        <div onClick={() => onNavigate && onNavigate('entrance')} className="cursor-pointer bg-gradient-to-br from-blue-500 to-blue-600 text-white p-5 rounded-2xl shadow-lg relative overflow-hidden transition-transform hover:scale-[1.02]">
+          <div className="absolute -top-4 -right-4 w-20 h-20 bg-blue-400/30 rounded-full blur-xl"></div>
+          <div className="flex items-center gap-2 text-blue-100 text-sm font-medium mb-2"><Users size={16} /> 来場者数</div>
+          <div className="text-4xl font-black">{scannedVisitors.toLocaleString()}</div>
+          <div className="text-blue-200 text-sm mt-1">目標: {(exhibition.targetVisitors || 0).toLocaleString()} ({exhibition.targetVisitors > 0 ? ((scannedVisitors / exhibition.targetVisitors) * 100).toFixed(1) : 0}%)</div>
+          <div className="mt-3 h-2 bg-blue-400/50 rounded-full overflow-hidden">
+            <div className="h-full bg-white transition-all duration-700" style={{ width: `${Math.min((scannedVisitors / (exhibition.targetVisitors || 1)) * 100, 100)}%` }}></div>
+          </div>
+        </div>
+
+        {/* 出展メーカー Card */}
+        <div onClick={() => onNavigate && onNavigate('makers')} className="cursor-pointer bg-white p-5 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-all hover:border-blue-200">
+          <div className="flex items-center gap-2 text-slate-500 text-sm font-medium mb-2"><Building2 size={16} /> 出展メーカー</div>
+          <div className="flex items-baseline gap-2">
+            <span className="text-4xl font-black text-slate-800">{confirmedMakers.length}</span>
+            <span className="text-slate-400 text-lg">社 (確定)</span>
+          </div>
+          {pendingMakers.length > 0 && (
+            <div className="text-amber-500 text-sm font-bold mt-1">未回答: {pendingMakers.length}社</div>
+          )}
+        </div>
+
+        {/* 事前登録者数 Card */}
+        <div onClick={() => onNavigate && onNavigate('entrance')} className="cursor-pointer bg-white p-5 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-all hover:border-blue-200">
+          <div className="flex items-center gap-2 text-slate-500 text-sm font-medium mb-2"><FileText size={16} /> 事前登録者数</div>
+          <div className="flex items-baseline gap-2">
+            <span className="text-4xl font-black text-slate-800">{preRegistrations.toLocaleString()}</span>
+            <span className="text-slate-400 text-lg">名</span>
+          </div>
+        </div>
+
+        {/* 最終収支 Card */}
+        <div onClick={() => onNavigate && onNavigate('budget')} className="cursor-pointer bg-white p-5 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-all hover:border-blue-200">
+          <div className="flex items-center gap-2 text-slate-500 text-sm font-medium mb-2"><TrendingUp size={16} /> 最終収支</div>
+          <div className={`text-3xl font-black ${finalBalance >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+            ¥{finalBalance.toLocaleString()}
+          </div>
+          <div className="text-slate-400 text-xs mt-1">出展費用+雑収入 - 総支出</div>
+        </div>
+      </div>
+
+      {/* Main Content Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Left Column (2/3) */}
+        <div className="lg:col-span-2 space-y-6">
+          {/* Urgent Tasks */}
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5">
+            <h3 className="text-amber-700 font-bold flex items-center gap-2 mb-4"><AlertTriangle size={18} /> 期限が迫っているタスク</h3>
+            {urgentTasks.length === 0 ? (
+              <p className="text-amber-600 text-sm">現在、期限間近のタスクはありません。</p>
+            ) : (
+              <div className="space-y-2">
+                {urgentTasks.map(t => {
+                  const due = new Date(t.dueDate);
+                  due.setHours(0, 0, 0, 0);
+                  const diff = Math.ceil((due - today) / (1000 * 60 * 60 * 24));
+                  const isOverdue = diff < 0;
+                  const isToday = diff === 0;
+                  return (
+                    <div key={t.id} className="bg-white p-3 rounded-xl border border-amber-100 flex justify-between items-center">
+                      <div>
+                        <p className="font-bold text-slate-800">{t.title}</p>
+                        <span className="text-xs text-slate-500">{t.assignee}</span>
+                      </div>
+                      <span className={`text-xs font-bold px-2 py-1 rounded ${isOverdue ? 'bg-red-100 text-red-600' : isToday ? 'bg-orange-100 text-orange-600' : 'bg-amber-100 text-amber-700'}`}>
+                        {isOverdue ? '期限切れ' : isToday ? '本日' : `残り${diff}日`}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Venue Information */}
+          <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+            <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-4"><MapPin size={18} className="text-blue-500" /> 会場インフォメーション</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-3">
+                <div>
+                  <span className="text-xs text-slate-400 block">会場名</span>
+                  <span className="font-bold text-slate-800 text-lg">{exhibition.place || '未設定'}</span>
+                </div>
+                <div>
+                  <span className="text-xs text-slate-400 block">住所</span>
+                  <span className="text-slate-700">{exhibition.venueAddress || '未設定'}</span>
+                </div>
+                <div className="flex gap-8">
+                  <div>
+                    <span className="text-xs text-slate-400 block">開場</span>
+                    <span className="font-bold text-slate-800">{exhibition.openTime || '10:00'}</span>
+                  </div>
+                  <div>
+                    <span className="text-xs text-slate-400 block">閉場</span>
+                    <span className="font-bold text-slate-800">{exhibition.closeTime || '17:00'}</span>
+                  </div>
+                </div>
+                <div className="flex gap-4 pt-2">
+                  {exhibition.venueUrl && (
+                    <a href={exhibition.venueUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 hover:underline flex items-center gap-1"><ExternalLink size={14} /> 会場Webサイト</a>
+                  )}
+                  {exhibition.googleMapsUrl && (
+                    <a href={exhibition.googleMapsUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 hover:underline flex items-center gap-1"><Map size={14} /> Googleマップで開く</a>
+                  )}
+                </div>
+              </div>
+              {/* Map Embed */}
+              <div className="rounded-xl overflow-hidden border border-slate-200 h-48 bg-slate-100">
+                {mapEmbedUrl ? (
+                  <iframe src={mapEmbedUrl} width="100%" height="100%" style={{ border: 0 }} allowFullScreen loading="lazy" referrerPolicy="no-referrer-when-downgrade" title="Venue Map"></iframe>
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-slate-400 text-sm">地図を表示するには住所を設定してください</div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Hotel Management */}
+          <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-bold text-slate-700 flex items-center gap-2"><BedDouble size={18} className="text-purple-500" /> ホテル予約管理</h3>
+              <button onClick={() => setShowHotelModal(true)} className="text-sm bg-purple-100 text-purple-600 px-3 py-1 rounded-lg font-bold hover:bg-purple-200 flex items-center gap-1"><Plus size={14} /> 追加</button>
+            </div>
+            {hotels.length === 0 ? (
+              <p className="text-slate-400 text-sm">ホテル予約情報がありません。</p>
+            ) : (
+              <div className="space-y-3">
+                {hotels.map(h => (
+                  <div key={h.id} className="bg-purple-50 p-4 rounded-xl border border-purple-100 flex justify-between items-start">
+                    <div>
+                      <div className="font-bold text-purple-900 flex items-center gap-2">
+                        {h.name}
+                        {h.url && <a href={h.url} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700"><ExternalLink size={14} /></a>}
+                      </div>
+                      <div className="text-sm text-purple-700 mt-1">
+                        <span className="font-medium">宿泊日: </span>{h.dates?.join(', ') || '未指定'}
+                      </div>
+                      <div className="text-sm text-purple-600 mt-1">
+                        <span className="font-medium">宿泊者: </span>{h.members?.join(', ') || '未指定'}
+                      </div>
+                    </div>
+                    <button onClick={() => removeHotel(h.id)} className="text-slate-400 hover:text-red-500"><Trash2 size={16} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Right Column (1/3) - Project Members */}
+        <div className="space-y-6">
+          <div className="bg-slate-900 rounded-2xl p-5 text-white">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-bold flex items-center gap-2"><Users size={18} /> Project Members</h3>
+              <button onClick={() => document.getElementById('member-input')?.focus()} className="text-slate-400 hover:text-white"><Plus size={18} /></button>
+            </div>
+            <div className="space-y-3">
+              {staffList.map((s, i) => (
+                <div key={i} className="flex items-center gap-3 group">
+                  <div className={`w-8 h-8 ${getAvatarColor(i)} rounded-full flex items-center justify-center text-sm font-bold text-white shadow`}>{s[0]}</div>
+                  <span className="flex-1">{s}</span>
+                  <button onClick={() => removeMember(s)} className="text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"><X size={16} /></button>
+                </div>
+              ))}
+              <div className="flex items-center gap-2 pt-2 border-t border-slate-700">
+                <input id="member-input" type="text" value={newMember} onChange={e => setNewMember(e.target.value)} onKeyDown={e => e.key === 'Enter' && addMember()} className="flex-1 bg-slate-800 text-white px-3 py-2 rounded-lg text-sm border border-slate-700 focus:border-blue-500 outline-none" placeholder="メンバー追加..." />
+                <button onClick={addMember} className="bg-blue-600 hover:bg-blue-700 text-white p-2 rounded-lg"><Plus size={16} /></button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">
+          <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-2xl">
+            <div className="bg-slate-900 p-6 text-white flex justify-between items-center sticky top-0 z-10">
+              <div>
+                <h2 className="text-xl font-bold">プロジェクト設定変更</h2>
+                <p className="text-slate-400 text-sm">展示会の基本情報を編集します</p>
+              </div>
+              <button onClick={() => setShowSettings(false)} className="p-2 hover:bg-slate-800 rounded-full"><X size={24} /></button>
+            </div>
+            <div className="p-6 space-y-6">
+              {editErrors.length > 0 && (
+                <div className="bg-red-50 border border-red-200 p-4 rounded-lg">
+                  <p className="text-red-700 font-bold text-sm mb-2">以下の項目を確認してください：</p>
+                  <ul className="text-red-600 text-sm list-disc list-inside">
+                    {editErrors.map((err, i) => <li key={i}>{err}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              {/* Title */}
+              <div>
+                <label className="block text-sm font-medium text-slate-600 mb-1">展示会タイトル <span className="text-red-500">*</span></label>
+                <input type="text" value={editData.title || ''} onChange={e => setEditData({ ...editData, title: e.target.value })} className="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
+              </div>
+
+              {/* Dates */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">開催日 <span className="text-red-500">*</span></label>
+                  <div className="flex gap-2 mb-2">
+                    <input type="date" value={tempEditDate} onChange={e => setTempEditDate(e.target.value)} className="flex-1 p-2 border border-slate-200 rounded-lg" />
+                    <button onClick={() => addEditDate('main')} className="bg-blue-100 text-blue-600 p-2 rounded-lg hover:bg-blue-200"><Plus size={20} /></button>
+                  </div>
+                  <div className="flex flex-wrap gap-2">{editData.dates?.map((d, i) => (<span key={i} className="bg-blue-50 text-blue-700 px-2 py-1 rounded text-sm flex items-center gap-1">{d} <button onClick={() => removeEditDate('main', i)}><X size={12} /></button></span>))}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">事前準備日</label>
+                  <div className="flex gap-2 mb-2">
+                    <input type="date" value={tempEditPreDate} onChange={e => setTempEditPreDate(e.target.value)} className="flex-1 p-2 border border-slate-200 rounded-lg" />
+                    <button onClick={() => addEditDate('pre')} className="bg-amber-100 text-amber-600 p-2 rounded-lg hover:bg-amber-200"><Plus size={20} /></button>
+                  </div>
+                  <div className="flex flex-wrap gap-2">{editData.preDates?.map((d, i) => (<span key={i} className="bg-amber-50 text-amber-700 px-2 py-1 rounded text-sm flex items-center gap-1">{d} <button onClick={() => removeEditDate('pre', i)}><X size={12} /></button></span>))}</div>
+                </div>
+              </div>
+
+              {/* Venue */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">会場名</label>
+                  <input type="text" value={editData.place || ''} onChange={e => setEditData({ ...editData, place: e.target.value })} className="w-full p-3 border border-slate-200 rounded-lg" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">会場住所</label>
+                  <input type="text" value={editData.venueAddress || ''} onChange={e => setEditData({ ...editData, venueAddress: e.target.value })} className="w-full p-3 border border-slate-200 rounded-lg" />
+                </div>
+              </div>
+
+              {/* Times */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">開場時間</label>
+                  <input type="time" value={editData.openTime || ''} onChange={e => setEditData({ ...editData, openTime: e.target.value })} className="w-full p-3 border border-slate-200 rounded-lg" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">閉場時間</label>
+                  <input type="time" value={editData.closeTime || ''} onChange={e => setEditData({ ...editData, closeTime: e.target.value })} className="w-full p-3 border border-slate-200 rounded-lg" />
+                </div>
+              </div>
+
+              {/* URLs */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">会場URL</label>
+                  <input type="text" value={editData.venueUrl || ''} onChange={e => setEditData({ ...editData, venueUrl: e.target.value })} className="w-full p-3 border border-slate-200 rounded-lg" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">GoogleマップURL</label>
+                  <input type="text" value={editData.googleMapsUrl || ''} onChange={e => setEditData({ ...editData, googleMapsUrl: e.target.value })} className="w-full p-3 border border-slate-200 rounded-lg" />
+                </div>
+              </div>
+
+              {/* Targets */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">集客目標 <span className="text-red-500">*</span></label>
+                  <input type="number" value={editData.targetVisitors || ''} onChange={e => setEditData({ ...editData, targetVisitors: parseInt(e.target.value) || 0 })} className="w-full p-3 border border-slate-200 rounded-lg" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">招致メーカー目標 <span className="text-red-500">*</span></label>
+                  <input type="number" value={editData.targetMakers || ''} onChange={e => setEditData({ ...editData, targetMakers: parseInt(e.target.value) || 0 })} className="w-full p-3 border border-slate-200 rounded-lg" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">目標利益額 <span className="text-red-500">*</span></label>
+                  <input type="number" value={editData.targetProfit || ''} onChange={e => setEditData({ ...editData, targetProfit: parseInt(e.target.value) || 0 })} className="w-full p-3 border border-blue-300 bg-blue-50 rounded-lg font-bold text-blue-800" />
+                </div>
+              </div>
+
+              {/* Staff */}
+              <div>
+                <label className="block text-sm font-medium text-slate-600 mb-1">運営スタッフ <span className="text-red-500">*</span></label>
+                <input type="text" value={editData.staff || ''} onChange={e => setEditData({ ...editData, staff: e.target.value })} className="w-full p-3 border border-slate-200 rounded-lg" placeholder="カンマ区切りで入力" />
+              </div>
+
+              {/* Actions */}
+              <div className="flex justify-end gap-4 pt-4 border-t">
+                <button onClick={() => setShowSettings(false)} className="px-6 py-3 text-slate-600 hover:bg-slate-100 rounded-lg font-medium">キャンセル</button>
+                <button onClick={validateAndSave} className="px-8 py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-lg">保存</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hotel Modal */}
+      {showHotelModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl">
+            <div className="bg-purple-600 p-6 text-white flex justify-between items-center rounded-t-2xl">
+              <h2 className="text-xl font-bold">ホテル予約追加</h2>
+              <button onClick={() => setShowHotelModal(false)} className="p-2 hover:bg-purple-500 rounded-full"><X size={24} /></button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-600 mb-1">ホテル名</label>
+                <input type="text" value={hotelForm.name} onChange={e => setHotelForm({ ...hotelForm, name: e.target.value })} className="w-full p-3 border border-slate-200 rounded-lg" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-600 mb-1">URL</label>
+                <input type="text" value={hotelForm.url} onChange={e => setHotelForm({ ...hotelForm, url: e.target.value })} className="w-full p-3 border border-slate-200 rounded-lg" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-600 mb-1">宿泊日</label>
+                <div className="flex gap-2 mb-2">
+                  <input type="date" value={tempHotelDate} onChange={e => setTempHotelDate(e.target.value)} className="flex-1 p-2 border border-slate-200 rounded-lg" />
+                  <button onClick={addHotelDate} className="bg-purple-100 text-purple-600 p-2 rounded-lg hover:bg-purple-200"><Plus size={20} /></button>
+                </div>
+                <div className="flex flex-wrap gap-2">{hotelForm.dates.map((d, i) => (<span key={i} className="bg-purple-50 text-purple-700 px-2 py-1 rounded text-sm flex items-center gap-1">{d} <button onClick={() => removeHotelDate(d)}><X size={12} /></button></span>))}</div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-600 mb-1">宿泊者 (メンバーから選択)</label>
+                <div className="flex flex-wrap gap-2">
+                  {staffList.map((s, i) => (
+                    <button key={i} onClick={() => toggleHotelMember(s)} className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${hotelForm.members.includes(s) ? 'bg-purple-600 text-white border-purple-600' : 'bg-white text-slate-600 border-slate-200 hover:border-purple-300'}`}>{s}</button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex justify-end gap-4 pt-4 border-t">
+                <button onClick={() => setShowHotelModal(false)} className="px-6 py-3 text-slate-600 hover:bg-slate-100 rounded-lg font-medium">キャンセル</button>
+                <button onClick={saveHotel} className="px-8 py-3 bg-purple-600 text-white rounded-lg font-bold hover:bg-purple-700 shadow-lg">追加</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TabTasks({ tasks, setTasks, staff }) {
+  const [draggedItem, setDraggedItem] = useState(null);
+  const [expandedId, setExpandedId] = useState(null);
+
+  // Categories
+  const categories = [
+    { id: 'sales', label: '営業側タスク', color: 'bg-blue-100 text-blue-700' },
+    { id: 'plan', label: '企画側タスク', color: 'bg-indigo-100 text-indigo-700' },
+    { id: 'prep', label: '準備タスク', color: 'bg-amber-100 text-amber-700' },
+    { id: 'post', label: '終了後タスク', color: 'bg-slate-100 text-slate-700' }
+  ];
+
+  const handleDragStart = (e, task) => {
+    setDraggedItem(task);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', task.id);
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+  };
+
+  // Handle drop on a Category Container (Append or Move)
+  const handleDropContainer = (e, targetCatId) => {
+    e.preventDefault();
+    if (!draggedItem) return;
+
+    if (draggedItem.category !== targetCatId) {
+      // Move to new category (append to end)
+      const updated = tasks.map(t => t.id === draggedItem.id ? { ...t, category: targetCatId } : t);
+      setTasks(updated);
+      setDraggedItem({ ...draggedItem, category: targetCatId }); // Update local ref
+    }
+  };
+
+  // Handle drop on a specific Task (Reorder)
+  const handleDropTask = (e, targetTask) => {
+    e.preventDefault();
+    e.stopPropagation(); // Stop bubbling to container
+    if (!draggedItem || draggedItem.id === targetTask.id) return;
+
+    // Calculate new order
+    const newTasks = [...tasks];
+    const draggedIndex = newTasks.findIndex(t => t.id === draggedItem.id);
+    const targetIndex = newTasks.findIndex(t => t.id === targetTask.id);
+
+    // Remove dragged item
+    const [removed] = newTasks.splice(draggedIndex, 1);
+    // Update its category to match target
+    removed.category = targetTask.category;
+
+    // Insert at target index (adjusting for removal shift if needed is handled by splice logic usually, 
+    // but simplified: insert at targetIndex)
+    // If we move down, targetIndex decreases by 1... wait, splice handles the list mutation. 
+    // We just need to find the specific index in the array `tasks` (which is mixed categories).
+    // Actually, simple array move:
+
+    newTasks.splice(targetIndex, 0, removed);
+    setTasks(newTasks);
+  };
+
+  const addTask = (category) => {
+    const newTask = { id: crypto.randomUUID(), category, title: '新規タスク', assignee: '', status: 'todo', desc: '' };
+    setTasks([...tasks, newTask]);
+  };
+
+  const updateTask = (id, field, val) => {
+    setTasks(tasks.map(t => t.id === id ? { ...t, [field]: val } : t));
+  };
+
+  const deleteTask = (id) => {
+    if (confirm('タスクを削除しますか？')) {
+      setTasks(tasks.filter(t => t.id !== id));
+    }
+  };
+
+  const toggleExpand = (id) => {
+    setExpandedId(expandedId === id ? null : id);
+  };
+
+  return (
+    <div className="p-6 space-y-8 animate-fade-in">
+      <div className="flex justify-end mb-2">
+        <p className="text-xs text-slate-400">※ドラッグ＆ドロップで並び替え・カテゴリ移動が可能です</p>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
+        {categories.map(cat => (
+          <div key={cat.id} className="bg-slate-50 p-4 rounded-xl border border-slate-200 flex flex-col h-full min-h-[300px]"
+            onDragOver={handleDragOver} onDrop={(e) => handleDropContainer(e, cat.id)}>
+            <h3 className={`font-bold mb-4 px-3 py-1 rounded inline-block text-sm ${cat.color}`}>{cat.label}</h3>
+
+            <div className="space-y-3 flex-1">
+              {tasks.filter(t => t.category === cat.id).map((task) => (
+                <div
+                  key={task.id}
+                  draggable
+                  onDragStart={(e) => handleDragStart(e, task)}
+                  onDrop={(e) => handleDropTask(e, task)}
+                  onDragOver={handleDragOver}
+                  className={`bg-white p-3 rounded-lg shadow-sm border border-slate-200 cursor-move hover:shadow-md transition-all group ${draggedItem?.id === task.id ? 'opacity-50' : 'opacity-100'}`}
+                >
+                  <div className="flex items-start gap-2 mb-2">
+                    <GripVertical className="text-slate-300 mt-1 shrink-0" size={16} />
+                    <div className="flex-1 min-w-0">
+                      <input
+                        className="w-full font-bold outline-none text-slate-800 text-sm bg-transparent"
+                        value={task.title}
+                        onChange={e => updateTask(task.id, 'title', e.target.value)}
+                        placeholder="タスク内容"
+                      />
+                    </div>
+                    <button onClick={() => deleteTask(task.id)} className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={14} /></button>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2 mb-2 pl-6">
+                    <select className="text-xs border rounded px-1 py-0.5 bg-slate-50 max-w-[80px]" value={task.assignee} onChange={e => updateTask(task.id, 'assignee', e.target.value)}>
+                      <option value="">担当</option>
+                      {staff?.split(',').map(s => s.trim()).filter(s => s).map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                    <input type="date" className="text-xs border rounded px-1 py-0.5 bg-slate-50 w-[90px]" value={task.dueDate || ''} onChange={e => updateTask(task.id, 'dueDate', e.target.value)} />
+                    <button onClick={() => toggleExpand(task.id)} className={`text-xs px-2 py-0.5 rounded border transition-colors ${task.desc ? 'bg-blue-50 text-blue-600 border-blue-200' : 'text-slate-400 border-slate-200 hover:bg-slate-50'}`}>
+                      詳細
+                    </button>
+                  </div>
+
+                  {(expandedId === task.id || task.desc) && (
+                    <div className={`pl-6 overflow-hidden transition-all ${expandedId === task.id ? 'max-h-32' : 'max-h-0'}`}>
+                      <textarea
+                        className="w-full text-xs p-2 border rounded bg-slate-50 focus:bg-white transition-colors outline-none resize-none h-20"
+                        placeholder="詳細説明..."
+                        value={task.desc || ''}
+                        onChange={e => updateTask(task.id, 'desc', e.target.value)}
+                      />
+                    </div>
+                  )}
+                </div>
+              ))}
+              {tasks.filter(t => t.category === cat.id).length === 0 && (
+                <div className="text-center py-8 text-slate-300 text-xs border-2 border-dashed border-slate-200 rounded-lg">
+                  タスクなし
+                </div>
+              )}
+            </div>
+            <button onClick={() => addTask(cat.id)} className="w-full mt-4 py-2 border border-blue-200 text-blue-600 rounded-lg font-bold hover:bg-blue-50 transition-colors flex items-center justify-center gap-1 text-xs"><Plus size={14} /> 追加</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TabLectures({ lectures, updateMainData, staff }) {
+  const [isAdding, setIsAdding] = useState(false);
+  const [isEditing, setIsEditing] = useState(null); // id of editing item
+  const [newData, setNewData] = useState({
+    name: '', theme: '', startTime: '', endTime: '', fee: 0, status: 'planning', profile: '', pic: ''
+  });
+
+  const STATUS_LABELS = {
+    'planning': { label: '調整中', color: 'bg-slate-100 text-slate-600' },
+    'offered': { label: '依頼済', color: 'bg-amber-100 text-amber-700' },
+    'confirmed': { label: '確定', color: 'bg-blue-100 text-blue-700' },
+    'cancelled': { label: '中止', color: 'bg-red-100 text-red-700' }
+  };
+
+  const handleEdit = (l) => {
+    setNewData({ ...l });
+    setIsEditing(l.id);
+    setIsAdding(true);
+  };
+
+  const handleDelete = (id) => {
+    if (!window.confirm('削除しますか？')) return;
+    const newLectures = lectures.filter(l => l.id !== id);
+    updateMainData('lectures', newLectures);
+  };
+
+  const handleSave = () => {
+    // Validate
+    if (!newData.name || !newData.theme) {
+      alert('講師名とテーマは必須です');
+      return;
+    }
+
+    let usersUpdatedLectures;
+    if (isEditing) {
+      usersUpdatedLectures = lectures.map(l => l.id === isEditing ? { ...newData, id: isEditing } : l);
+    } else {
+      const item = { id: crypto.randomUUID(), ...newData };
+      usersUpdatedLectures = [...(lectures || []), item];
+    }
+
+    updateMainData('lectures', usersUpdatedLectures);
+    setIsAdding(false);
+    setIsEditing(null);
+    setNewData({ name: '', theme: '', startTime: '', endTime: '', fee: 0, status: 'planning', profile: '', pic: '' });
+  };
+
+  const totalBudget = (lectures || []).reduce((sum, l) => sum + Number(l.fee || 0), 0);
+
+  return (
+    <div className="p-6 animate-fade-in flex flex-col h-full overflow-hidden">
+      <div className="flex justify-between items-center mb-6 shrink-0">
+        <div>
+          <h3 className="text-xl font-bold flex items-center gap-2"><Mic className="text-purple-600" /> 講演会・セミナー管理</h3>
+          <p className="text-sm text-slate-500 mt-1">講師の依頼状況や謝礼金を管理します</p>
+        </div>
+        <div className="flex flex-col items-end">
+          <span className="text-xs text-slate-400 font-bold">謝礼金合計（予算連動）</span>
+          <span className="text-2xl font-bold text-slate-800">¥{totalBudget.toLocaleString()}</span>
+        </div>
+      </div>
+
+      {!isAdding && (
+        <div className="mb-4">
+          <button onClick={() => { setIsEditing(null); setNewData({ name: '', theme: '', startTime: '', endTime: '', fee: 0, status: 'planning', profile: '', pic: '' }); setIsAdding(true); }} className="bg-purple-600 text-white px-4 py-3 rounded-lg font-bold flex items-center gap-2 hover:bg-purple-700 shadow-lg transition-all"><Plus size={18} /> 新規講演を追加</button>
+        </div>
+      )}
+
+      {isAdding && (
+        <div className="bg-white p-6 rounded-xl border border-purple-100 shadow-xl mb-8 animate-slide-down shrink-0">
+          <h4 className="font-bold text-purple-800 mb-4 border-b pb-2 flex items-center gap-2">
+            {isEditing ? <Edit3 size={18} /> : <Plus size={18} />}
+            {isEditing ? '講演情報の編集' : '新規講演登録'}
+          </h4>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="space-y-4">
+              <div><label className="block text-xs font-bold text-slate-500 mb-1">講師名 <span className="text-red-500">*</span></label><input type="text" value={newData.name} className="w-full border border-slate-300 rounded-lg p-3 focus:ring-2 focus:ring-purple-500 outline-none" placeholder="例：山田 太郎 先生" onChange={e => setNewData({ ...newData, name: e.target.value })} /></div>
+              <div><label className="block text-xs font-bold text-slate-500 mb-1">テーマ <span className="text-red-500">*</span></label><input type="text" value={newData.theme} className="w-full border border-slate-300 rounded-lg p-3 focus:ring-2 focus:ring-purple-500 outline-none" placeholder="講演タイトル" onChange={e => setNewData({ ...newData, theme: e.target.value })} /></div>
+              <div><label className="block text-xs font-bold text-slate-500 mb-1">プロフィール・所属</label><textarea value={newData.profile} className="w-full border border-slate-300 rounded-lg p-3 focus:ring-2 focus:ring-purple-500 outline-none" rows="3" placeholder="講師の経歴や所属など" onChange={e => setNewData({ ...newData, profile: e.target.value })} /></div>
+            </div>
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-2">
+                <div><label className="block text-xs font-bold text-slate-500 mb-1">開始時間</label><input type="time" value={newData.startTime} className="w-full border border-slate-300 rounded-lg p-3" onChange={e => setNewData({ ...newData, startTime: e.target.value })} /></div>
+                <div><label className="block text-xs font-bold text-slate-500 mb-1">終了時間</label><input type="time" value={newData.endTime} className="w-full border border-slate-300 rounded-lg p-3" onChange={e => setNewData({ ...newData, endTime: e.target.value })} /></div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div><label className="block text-xs font-bold text-slate-500 mb-1">謝礼金 (円)</label><input type="number" value={newData.fee} className="w-full border border-slate-300 rounded-lg p-3" onChange={e => setNewData({ ...newData, fee: e.target.value })} /></div>
+                <div><label className="block text-xs font-bold text-slate-500 mb-1">ステータス</label>
+                  <select value={newData.status} className="w-full border border-slate-300 rounded-lg p-3 bg-white" onChange={e => setNewData({ ...newData, status: e.target.value })}>
+                    {Object.entries(STATUS_LABELS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div><label className="block text-xs font-bold text-slate-500 mb-1">担当スタッフ</label><select value={newData.pic} className="w-full border border-slate-300 rounded-lg p-3 bg-white" onChange={e => setNewData({ ...newData, pic: e.target.value })}><option value="">選択してください</option>{staff?.split(',').map(s => <option key={s} value={s.trim()}>{s.trim()}</option>)}</select></div>
+            </div>
+          </div>
+          <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-slate-100">
+            <button onClick={() => { setIsAdding(false); setIsEditing(null); }} className="px-6 py-2 bg-slate-100 text-slate-600 rounded-lg font-bold hover:bg-slate-200 transition-colors">キャンセル</button>
+            <button onClick={handleSave} className="px-8 py-2 bg-purple-600 text-white rounded-lg font-bold hover:bg-purple-700 shadow-lg shadow-purple-500/30 transition-all">保存する</button>
+          </div>
+        </div>
+      )}
+
+      <div className="flex-1 overflow-y-auto space-y-4 pb-20">
+        {(lectures || []).length === 0 && (
+          <div className="text-center py-20 text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-300">
+            <Mic size={48} className="mx-auto mb-4 opacity-20" />
+            <p>登録された講演はありません</p>
+          </div>
+        )}
+        {(lectures || []).map(l => (
+          <div key={l.id} className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow flex flex-col md:flex-row gap-6 group relative overflow-hidden">
+            <div className={`absolute top-0 right-0 w-2 h-full ${STATUS_LABELS[l.status || 'planning'].color.replace('text-', 'bg-').split(' ')[0]}`}></div>
+
+            <div className="flex-1">
+              <div className="flex items-start justify-between mb-2">
+                <span className={`text-xs font-bold px-2 py-1 rounded-full ${STATUS_LABELS[l.status || 'planning'].color}`}>{STATUS_LABELS[l.status || 'planning'].label}</span>
+                <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <button onClick={() => handleEdit(l)} className="p-2 text-slate-400 hover:text-blue-600 bg-slate-50 rounded-full"><Edit3 size={16} /></button>
+                  <button onClick={() => handleDelete(l.id)} className="p-2 text-slate-400 hover:text-red-600 bg-slate-50 rounded-full"><Trash2 size={16} /></button>
+                </div>
+              </div>
+              <h4 className="text-xl font-bold text-slate-800 mb-1">{l.theme}</h4>
+              <div className="flex items-center gap-2 mb-4">
+                <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center font-serif text-slate-500 font-bold">{l.name?.[0]}</div>
+                <span className="font-bold text-slate-700">{l.name} <span className="text-xs text-slate-400 font-normal">先生</span></span>
+              </div>
+
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 text-sm text-slate-600 bg-slate-50 p-3 rounded-lg">
+                <div className="flex flex-col">
+                  <span className="text-[10px] text-slate-400 font-bold">時間</span>
+                  <span className="font-bold flex items-center gap-1"><Clock size={14} /> {l.startTime || '--:--'} ~ {l.endTime || '--:--'}</span>
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-[10px] text-slate-400 font-bold">謝礼金</span>
+                  <span className="font-bold flex items-center gap-1"><Wallet size={14} /> ¥{Number(l.fee).toLocaleString()}</span>
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-[10px] text-slate-400 font-bold">担当者</span>
+                  <span className="font-bold flex items-center gap-1"><User size={14} /> {l.pic || '-'}</span>
+                </div>
+              </div>
+              {l.profile && <p className="text-xs text-slate-500 mt-3 line-clamp-2">{l.profile}</p>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// 5. メーカー回答フォーム & タブ定義
+// ============================================================================
+
+function MakerResponseForm({ exhibition, config, onClose, onSubmit }) {
+  const [step, setStep] = useState(1);
+  const [formData, setFormData] = useState({ participation: 'yes' });
+  const [submitted, setSubmitted] = useState(false);
+
+  const isParticipationStep = step === 1;
+  const isDetailStep = step === 2;
+  const isCompleteStep = step === 3;
+
+  // Overview Data (Fallback to exhibition data if config is empty)
+  const exDate = config?.exhibitionDate || (exhibition?.dates && exhibition.dates.length > 0 ? new Date(exhibition.dates[0]).toLocaleDateString() : '-');
+  const exPlace = config?.venueName || exhibition?.place || '-';
+  const exAddress = config?.venueAddress || exhibition?.venueAddress || '-';
+
+  const handleNext = () => {
+    if (step === 1) {
+      if (formData.participation === 'no') {
+        setStep(3); // Go to decline
+      } else {
+        setStep(2); // Go to details
+      }
+    } else if (step === 2) {
+      handleSubmit();
+    } else if (step === 3) {
+      if (formData.participation === 'no') {
+        handleSubmit(); // Submit decline
+      }
+    }
+  };
+
+  const handleSubmit = async () => {
+    await onSubmit(formData);
+    setSubmitted(true);
+    // Send email logic (Client-side simulation or mailto)
+    if (formData.email) {
+      console.log(`Sending copy to ${formData.email} and r.kitagawa@caremax.co.jp`);
+    }
+  };
+
+  const copyToClipboard = () => {
+    const text = JSON.stringify(formData, null, 2);
+    navigator.clipboard.writeText(text).then(() => alert('回答内容をコピーしました'));
+  };
+
+  if (submitted) {
+    return (
+      <div className="fixed inset-0 bg-slate-100 overflow-y-auto z-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-xl shadow-xl p-8 max-w-2xl w-full mx-auto animate-fade-in text-center my-10">
+          <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6 text-green-600"><Check size={40} /></div>
+          <h2 className="text-2xl font-bold text-slate-800 mb-4">
+            {formData.participation === 'yes' ? '回答ありがとうございました' : 'ご回答を受け付けました'}
+          </h2>
+          <p className="text-slate-600 mb-6">
+            {formData.participation === 'yes' ? '登録内容を確認しました。ホームより展示会の詳細をご確認ください。' : 'またの機会がございましたら、よろしくお願い申し上げます。'}
+          </p>
+
+          <div className="bg-slate-50 p-6 rounded-xl text-left text-sm font-mono mb-6 overflow-x-auto border border-slate-200">
+            <pre>{JSON.stringify(formData, null, 2)}</pre>
+          </div>
+
+          <div className="flex gap-4 justify-center">
+            <button onClick={copyToClipboard} className="bg-slate-800 text-white px-6 py-3 rounded-lg font-bold flex items-center gap-2 hover:bg-slate-700"><Copy size={18} /> 回答をコピー</button>
+            <a href={`mailto:?subject=展示会回答コピー&body=${encodeURIComponent(JSON.stringify(formData, null, 2))}`} className="bg-blue-600 text-white px-6 py-3 rounded-lg font-bold flex items-center gap-2 hover:bg-blue-700"><Mail size={18} /> メール送信</a>
+          </div>
+          <button onClick={() => window.location.reload()} className="mt-8 text-slate-500 hover:text-slate-800 underline">フォームに戻る</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 bg-slate-100 overflow-y-auto z-50 flex items-center justify-center p-4">
+      <div className="bg-white w-full max-w-3xl rounded-2xl shadow-2xl overflow-hidden animate-slide-up flex flex-col max-h-[90vh]">
+        <div className="bg-blue-900 p-6 text-white shrink-0">
+          <h2 className="text-xl font-bold flex items-center gap-2"><FileText /> 出展申し込みフォーム</h2>
+        </div>
+
+        <div className="p-8 overflow-y-auto flex-1 space-y-8">
+          {/* Step 1: Basic Info & Greeting */}
+          {isParticipationStep && (
+            <div className="space-y-6 animate-fade-in">
+              <div className="bg-blue-50 p-6 rounded-xl border border-blue-100 text-sm leading-relaxed text-slate-700 whitespace-pre-wrap">
+                {config?.greeting || `貴社ますますご清栄のこととお喜び申し上げます。
+日頃は格別のお引き立てを賜り厚く御礼申しあげます。
+早速ではございますが、下記の要領で福祉用具展示会を開催する運びとなりました。
+つきましては御社ご出展をお願い致したく、ご案内申し上げます。
+ご検討の程、宜しくお願い申し上げます。
+※出展を希望されない場合も、お手数ですが、その旨お答えいただきますようお願い申し上げます。`}
+              </div>
+
+              <div className="bg-slate-50 p-6 rounded-xl border border-slate-200 space-y-4">
+                <h3 className="font-bold border-b pb-2 mb-2">展示会概要</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                  <div><span className="text-slate-500 block text-xs">開催日時</span><span className="font-bold">{exDate}</span></div>
+                  <div><span className="text-slate-500 block text-xs">会場</span><span className="font-bold">{exPlace}</span></div>
+                  <div className="col-span-2"><span className="text-slate-500 block text-xs">住所</span><span className="font-bold">{exAddress}</span></div>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <label className="block font-bold text-slate-700">貴社名 <span className="text-red-500">*</span></label>
+                <input type="text" className="w-full p-3 border rounded-lg" value={formData.companyName || ''} onChange={e => setFormData({ ...formData, companyName: e.target.value })} />
+
+                <label className="block font-bold text-slate-700">お名前 <span className="text-red-500">*</span></label>
+                <input type="text" className="w-full p-3 border rounded-lg" value={formData.repName || ''} onChange={e => setFormData({ ...formData, repName: e.target.value })} />
+
+                {/* Email, Phone - Needed for identification if not invited */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block font-bold text-slate-700">メールアドレス <span className="text-red-500">*</span></label>
+                    <input type="email" className="w-full p-3 border rounded-lg" value={formData.email || ''} onChange={e => setFormData({ ...formData, email: e.target.value })} />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-700">電話番号 <span className="text-red-500">*</span></label>
+                    <input type="tel" className="w-full p-3 border rounded-lg" value={formData.phone || ''} onChange={e => setFormData({ ...formData, phone: e.target.value })} />
+                  </div>
+                </div>
+
+                <label className="block font-bold text-slate-700">出展可否 <span className="text-red-500">*</span></label>
+                <div className="flex gap-4">
+                  <label className={`flex-1 p-4 rounded-xl border-2 cursor-pointer transition-all ${formData.participation === 'yes' ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200 hover:border-blue-300'}`}>
+                    <input type="radio" name="participation" value="yes" checked={formData.participation === 'yes'} onChange={() => setFormData({ ...formData, participation: 'yes' })} className="mr-2" />
+                    出展する
+                  </label>
+                  <label className={`flex-1 p-4 rounded-xl border-2 cursor-pointer transition-all ${formData.participation === 'no' ? 'border-red-600 bg-red-50 text-red-700' : 'border-slate-200 hover:border-red-300'}`}>
+                    <input type="radio" name="participation" value="no" checked={formData.participation === 'no'} onChange={() => setFormData({ ...formData, participation: 'no' })} className="mr-2" />
+                    辞退する
+                  </label>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Step 2: Detailed Questions */}
+          {isDetailStep && (
+            <div className="space-y-6 animate-fade-in">
+              <h3 className="text-lg font-bold border-b pb-2">詳細情報の入力</h3>
+              <div className="bg-yellow-50 p-4 rounded-lg border border-yellow-200 text-sm text-yellow-800">
+                <p className="font-bold mb-1">搬入出について</p>
+                <p>{config?.transportInfo || '管理者により設定された搬入出案内が表示されます。'}</p>
+              </div>
+
+              {config?.questions?.map((q, i) => (
+                <div key={i} className="space-y-2">
+                  <label className="block font-bold text-slate-700">{q.label} {q.required && <span className="text-red-500">*</span>}</label>
+                  {q.type === 'text' && <input type="text" className="w-full p-3 border rounded-lg" onChange={e => setFormData({ ...formData, [q.id]: e.target.value })} />}
+                  {q.type === 'textarea' && <textarea className="w-full p-3 border rounded-lg h-24" onChange={e => setFormData({ ...formData, [q.id]: e.target.value })} />}
+                  {q.type === 'select' && (
+                    <select className="w-full p-3 border rounded-lg" onChange={e => setFormData({ ...formData, [q.id]: e.target.value })}>
+                      <option value="">選択してください</option>
+                      {q.options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                    </select>
+                  )}
+                </div>
+              ))}
+
+              <div className="pt-6 border-t">
+                <label className="block font-bold text-slate-700 mb-1">お問い合わせ先</label>
+                <p className="text-slate-600 bg-slate-100 p-3 rounded-lg select-all">r.kitagawa@caremax.co.jp</p>
+              </div>
+            </div>
+          )}
+
+          {/* Step 3: Decline Reason */}
+          {isCompleteStep && formData.participation === 'no' && (
+            <div className="space-y-4 animate-fade-in">
+              <h3 className="text-lg font-bold border-b pb-2 text-red-600">辞退理由の入力</h3>
+              <label className="block font-bold text-slate-700">辞退理由（任意）</label>
+              <textarea className="w-full p-3 border rounded-lg h-32" placeholder="差し支えなければ理由をお聞かせください" onChange={e => setFormData({ ...formData, declineReason: e.target.value })}></textarea>
+            </div>
+          )}
+        </div>
+
+        <div className="bg-slate-50 p-4 border-t flex justify-end gap-3 shrink-0">
+          {step > 1 && <button onClick={() => setStep(step - 1)} className="px-6 py-3 rounded-lg text-slate-600 hover:bg-slate-200 font-bold">戻る</button>}
+          <button onClick={handleNext} className="px-8 py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-lg">
+            {step === 2 || (step === 3 && formData.participation === 'no') ? '送信する' : '次へ'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const ALL_TAB_DEFINITIONS = [
+  { id: 'main', label: 'Main Board', icon: LayoutDashboard },
+  { id: 'tasks', label: 'タスク管理', icon: CheckSquare },
+  { id: 'schedule', label: 'スケジュール', icon: Calendar },
+  { id: 'makers', label: '招待メーカー', icon: Briefcase },
+  { id: 'entrance', label: '来場者管理', icon: UserCheck },
+  { id: 'lectures', label: '講演会', icon: Mic },
+  { id: 'equipment', label: '会場・備品', icon: Box },
+  { id: 'budget', label: '収支・予算', icon: DollarSign },
+  { id: 'files', label: '資料', icon: FileText },
+];
+
+
+
+// ============================================================================
+// 6. 公開フォーム・ダッシュボード・アプリ本体
+// ============================================================================
+
+// -----------------------------------------------------------
+// 公開フォーム: ダウンロード機能付き（スマホ対応修正版）
+// -----------------------------------------------------------
+function PublicVisitorView({ exhibition, onSubmit }) {
+  const { visitorFormConfig } = exhibition;
+  const [formData, setFormData] = useState({});
+  const [submitted, setSubmitted] = useState(false);
+  const [qrData, setQrData] = useState(null);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const visitorId = crypto.randomUUID();
+    // QRコードにはIDのみ埋め込む（シンプルなQRで読み取りやすく）
+    setQrData(visitorId);
+
+    const finalData = { ...formData, id: visitorId };
+    const success = await onSubmit(finalData);
+    if (success) setSubmitted(true);
+  };
+
+  // 画像保存処理
+  const downloadQR = () => {
+    // ラッパーdivの中にあるcanvas要素を確実に探す
+    const canvas = document.querySelector('#qr-wrapper canvas');
+
+    if (canvas) {
+      try {
+        const pngUrl = canvas.toDataURL("image/png");
+
+        // ダウンロード用リンクを作成してクリック
+        const downloadLink = document.createElement("a");
+        downloadLink.href = pngUrl;
+        downloadLink.download = `visitor_qr_${Date.now()}.png`; // ユニークなファイル名
+        document.body.appendChild(downloadLink);
+        downloadLink.click();
+        document.body.removeChild(downloadLink);
+      } catch (e) {
+        // エラー時はアラートを出す
+        alert("保存に失敗しました。QRコードを長押しして「写真に保存」してください。");
+      }
+    } else {
+      alert("QRコードの生成待ちです。もう一度押してください。");
+    }
+  };
+
+  if (submitted) {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+        <div className="bg-white max-w-md w-full rounded-2xl shadow-xl p-8 text-center animate-fade-in">
+          <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center text-green-600 mx-auto mb-4"><Check size={32} strokeWidth={3} /></div>
+          <h2 className="text-2xl font-bold text-slate-800 mb-2">登録完了</h2>
+          <p className="text-slate-600 text-sm mb-6">以下のQRコードを保存し、当日受付にご提示ください。</p>
+
+          {/* ID付きのdivで囲む (ダウンロード機能用) */}
+          <div id="qr-wrapper" className="bg-white border-2 border-slate-800 p-4 rounded-xl inline-block mb-6">
+            <QRCodeCanvas
+              value={qrData}
+              size={200}
+              level={"H"}
+              includeMargin={true}
+            />
+          </div>
+
+          <button onClick={downloadQR} className="w-full bg-slate-800 text-white font-bold py-3 rounded-xl mb-2 flex items-center justify-center gap-2 hover:bg-slate-700">
+            <Download size={18} /> 画像として保存
+          </button>
+          {/* スマホユーザーへの案内 */}
+          <p className="text-xs text-slate-400 mb-6">※ボタンで保存できない場合は、<br />QRコードを長押しして「写真に保存」してください。</p>
+
+          <div className="bg-slate-50 p-4 rounded-lg text-left text-sm space-y-2 mb-6"><div className="flex justify-between"><span className="text-slate-500">氏名</span><span className="font-bold">{formData.repName || '-'}</span></div><div className="flex justify-between"><span className="text-slate-500">会社名</span><span className="font-bold">{formData.companyName || '-'}</span></div></div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-4 md:p-8">
+      <div className="max-w-xl mx-auto bg-white rounded-2xl shadow-lg overflow-hidden">
+        <div className="bg-blue-600 p-6 text-white"><h1 className="text-xl font-bold mb-2">{exhibition.title}</h1><h2 className="text-lg opacity-90">{visitorFormConfig.title}</h2></div>
+        <div className="p-6 md:p-8"><form onSubmit={handleSubmit} className="space-y-5">{visitorFormConfig.items.map(item => (<div key={item.id}><label className="block text-sm font-bold text-slate-700 mb-1">{item.label} {item.required && <span className="text-red-500">*</span>}</label>{item.type === 'select' ? (<select required={item.required} className="w-full border border-slate-300 p-3 rounded-lg bg-white outline-none" onChange={e => setFormData({ ...formData, [item.id]: e.target.value })}><option value="">選択してください</option>{item.options.map(opt => <option key={opt} value={opt}>{opt}</option>)}</select>) : (<input type={item.type} required={item.required} className="w-full border border-slate-300 p-3 rounded-lg outline-none" placeholder={item.help} onChange={e => setFormData({ ...formData, [item.id]: e.target.value })} />)}</div>))}<button type="submit" className="w-full bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg hover:bg-blue-700 transition-all mt-4">登録してQRコードを発行</button></form></div>
+      </div>
+    </div>
+  );
+}
+
+function PublicMakerView({ exhibition, onSubmit }) {
+  const isDeadlinePassed = exhibition.formConfig?.deadline && new Date(exhibition.formConfig.deadline) < new Date();
+
+  if (isDeadlinePassed) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
+        <div className="bg-white p-8 rounded-xl shadow-lg text-center max-w-md w-full">
+          <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-500"><Clock size={32} /></div>
+          <h2 className="text-xl font-bold text-slate-800 mb-2">受付は終了しました</h2>
+          <p className="text-slate-500 text-sm">この展示会の出展申し込み受付は締め切られました。<br />お問い合わせは主催者までご連絡ください。</p>
+        </div>
+      </div>
+    );
+  }
+
+  return <MakerResponseForm exhibition={exhibition} config={exhibition.formConfig} onClose={() => { }} onSubmit={async (data) => { await onSubmit(data); }} />;
+}
+
+
+const MAKER_CATEGORIES = {
+  '食品': { color: 'bg-orange-100 text-orange-800', label: '食品' },
+  '靴': { color: 'bg-pink-100 text-pink-800', label: '靴' },
+  'IoT': { color: 'bg-blue-100 text-blue-800', label: 'IoT' },
+  '日常生活': { color: 'bg-purple-100 text-purple-800', label: '日常生活' },
+  '住宅改修': { color: 'bg-indigo-100 text-indigo-800', label: '住宅改修' },
+  'ベッド': { color: 'bg-green-100 text-green-800', label: 'ベッド' },
+  '歩行': { color: 'bg-red-100 text-red-800', label: '歩行' },
+  '排泄': { color: 'bg-cyan-100 text-cyan-800', label: '排泄' },
+  '医療': { color: 'bg-rose-100 text-rose-800', label: '医療' },
+  'その他': { color: 'bg-amber-100 text-amber-800', label: 'その他' },
+};
+
+function CsvImportModal({ onClose, onImport }) {
+  const [password, setPassword] = useState('');
+  const [file, setFile] = useState(null);
+  const [error, setError] = useState('');
+
+  const handleSubmit = async () => {
+    if (password !== 'kitagawa1') {
+      setError('パスワードが違います');
+      return;
+    }
+    if (!file) {
+      setError('ファイルを選択してください');
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      const lines = text.split(/\r?\n/);
+      const newMakers = [];
+
+      lines.forEach(line => {
+        if (!line.trim()) return;
+        const parts = line.split(',');
+        if (parts.length >= 2) {
+          const name = parts[0].trim();
+          const code = parts[1].trim();
+          const category = parts[2] ? parts[2].trim() : 'その他';
+          if (name && code) {
+            newMakers.push({ name, code, category });
+          }
+        }
+      });
+      onImport(newMakers);
+      onClose();
+    } catch (e) {
+      setError('読み込みエラー: ' + e.message);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 animate-fade-in">
+      <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-md">
+        <h3 className="text-xl font-bold mb-4 flex items-center gap-2"><Upload size={20} /> CSV一括登録</h3>
+        <div className="space-y-4">
+          <div><label className="block text-sm font-bold text-slate-700 mb-1">管理者パスワード</label><input type="password" value={password} onChange={e => setPassword(e.target.value)} className="w-full p-2 border border-slate-300 rounded" placeholder="パスワードを入力" /></div>
+          <div><label className="block text-sm font-bold text-slate-700 mb-1">CSVファイル</label><input type="file" accept=".csv" onChange={e => setFile(e.target.files[0])} className="w-full p-2 border border-slate-300 rounded bg-slate-50" />
+            <p className="text-xs text-slate-500 mt-1">※ A列: 企業名, B列: 仕入先コード, C列: カテゴリ</p>
+          </div>
+          {error && <p className="text-red-600 text-sm font-bold">{error}</p>}
+          <div className="flex justify-end gap-2 mt-6"><button onClick={onClose} className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded">キャンセル</button><button onClick={handleSubmit} className="px-4 py-2 bg-green-600 text-white font-bold rounded hover:bg-green-700 shadow">インポート実行</button></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditMakerModal({ maker, onClose, onSave, isNew = false, isFixedList = true }) {
+  const [password, setPassword] = useState('');
+  const [data, setData] = useState({ ...maker });
+  const [error, setError] = useState('');
+
+  const handleSave = () => {
+    // Password required only for Fixed List operations
+    if (isFixedList && password !== 'kitagawa1') {
+      setError('パスワードが違います');
+      return;
+    }
+    if (!data.name || !data.code) {
+      setError('社名と仕入先コードは必須です');
+      return;
+    }
+    onSave(data);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 animate-fade-in">
+      <div className="bg-white p-6 rounded-xl shadow-2xl w-full max-w-md">
+        <h3 className="text-lg font-bold mb-4 flex items-center gap-2"><Edit3 size={18} /> {isNew ? '新規企業追加' : '企業情報編集'}</h3>
+        <div className="space-y-3">
+          {isFixedList && (
+            <div><label className="block text-xs font-bold text-slate-500">管理者パスワード <span className="text-red-500">*</span></label><input type="password" value={password} onChange={e => setPassword(e.target.value)} className="w-full p-2 border border-slate-200 rounded" placeholder="固定リスト編集にはパスワードが必要です" /></div>
+          )}
+          <div><label className="block text-xs font-bold text-slate-500">社名 <span className="text-red-500">*</span></label><input type="text" value={data.name} onChange={e => setData({ ...data, name: e.target.value })} className="w-full p-2 border border-slate-200 rounded" /></div>
+          <div><label className="block text-xs font-bold text-slate-500">仕入先コード <span className="text-red-500">*</span></label><input type="text" value={data.code} onChange={e => setData({ ...data, code: e.target.value })} className="w-full p-2 border border-slate-200 rounded" /></div>
+          <div><label className="block text-xs font-bold text-slate-500">カテゴリ</label>
+            <select value={data.category} onChange={e => setData({ ...data, category: e.target.value })} className="w-full p-2 border border-slate-200 rounded">
+              {Object.keys(MAKER_CATEGORIES).map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          {error && <p className="text-red-500 text-xs font-bold">{error}</p>}
+          <div className="flex justify-end gap-2 mt-4"><button onClick={onClose} className="px-3 py-2 text-slate-500 hover:bg-slate-100 rounded">キャンセル</button><button onClick={handleSave} className="px-4 py-2 bg-blue-600 text-white font-bold rounded hover:bg-blue-700">{isNew ? '追加' : '保存'}</button></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+
+function MakerPortal({ maker, exhibitions, onScan }) {
+  const [activeTab, setActiveTab] = useState('home');
+  const [selectedExhibition, setSelectedExhibition] = useState(null);
+  const [showScanner, setShowScanner] = useState(false);
+  const [scanResult, setScanResult] = useState(null);
+  const [showInvitationModal, setShowInvitationModal] = useState(null); // Holds new invitation to show
+  const [seenInvitations, setSeenInvitations] = useState(() => {
+    const saved = localStorage.getItem(`seen_invitations_${maker.code}`);
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  // Filter exhibitions where this maker is invited
+  const myExhibitions = exhibitions.filter(ex => {
+    const makers = ex.makers || [];
+    return makers.some(m => m.code === maker.code);
+  });
+
+  // Categorize exhibitions
+  const today = new Date();
+  const getStatus = (ex) => {
+    const m = (ex.makers || []).find(m => m.code === maker.code);
+    if (!m) return 'none';
+    return m.status || 'invited';
+  };
+  const isPast = (ex) => {
+    if (!ex.dates || ex.dates.length === 0) return false;
+    const lastDate = new Date(ex.dates[ex.dates.length - 1]);
+    return lastDate < today;
+  };
+
+  const confirmedExhibitions = myExhibitions.filter(ex => getStatus(ex) === 'confirmed' && !isPast(ex));
+  const invitedExhibitions = myExhibitions.filter(ex => ['invited', 'pending'].includes(getStatus(ex)));
+  const declinedExhibitions = myExhibitions.filter(ex => getStatus(ex) === 'declined');
+  const pastExhibitions = myExhibitions.filter(ex => getStatus(ex) === 'confirmed' && isPast(ex));
+
+  // Unread invitations count
+  const unreadInvitations = invitedExhibitions.filter(ex => !seenInvitations.includes(ex.id));
+
+  // Check for new invitation on mount
+  useEffect(() => {
+    if (unreadInvitations.length > 0 && !showInvitationModal) {
+      const newest = unreadInvitations[0];
+      setShowInvitationModal(newest);
+    }
+  }, [unreadInvitations.length]);
+
+  const handleDismissInvitation = (exId) => {
+    const updated = [...seenInvitations, exId];
+    setSeenInvitations(updated);
+    localStorage.setItem(`seen_invitations_${maker.code}`, JSON.stringify(updated));
+    setShowInvitationModal(null);
+  };
+
+  const handleScan = async (result) => {
+    if (!result) return;
+    const rawCode = result[0]?.rawValue;
+    if (!rawCode) return;
+    setShowScanner(false);
+    const res = await onScan(rawCode, selectedExhibition?.id);
+    setScanResult(res);
+  };
+
+  const closeScanResult = () => {
+    setScanResult(null);
+    setShowScanner(true);
+  };
+
+  const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444'];
+
+  // Get scan logs for selected exhibition
+  const getMyLogs = (ex) => {
+    if (!ex) return [];
+    return (ex.scanLogs || []).filter(l => l.makerId === maker.code);
+  };
+
+  // Exhibition Card Component
+  const ExhibitionCard = ({ exhibition, status }) => {
+    const statusStyles = {
+      confirmed: 'border-l-4 border-l-emerald-500',
+      invited: 'border-l-4 border-l-amber-500',
+      declined: 'border-l-4 border-l-slate-400 opacity-60',
+      past: 'border-l-4 border-l-slate-300 opacity-50'
+    };
+    return (
+      <div
+        className={`bg-white p-4 rounded-lg shadow-sm cursor-pointer hover:shadow-md transition-shadow ${statusStyles[status] || ''}`}
+        onClick={() => { setSelectedExhibition(exhibition); setActiveTab('detail'); }}
+      >
+        <h4 className="font-bold text-slate-800">{exhibition.title}</h4>
+        <p className="text-xs text-slate-500 mt-1 flex items-center gap-1">
+          <Calendar size={12} /> {exhibition.dates?.join(', ') || '日程未定'}
+        </p>
+        <p className="text-xs text-slate-500 flex items-center gap-1">
+          <MapPin size={12} /> {exhibition.place || exhibition.venueAddress || '会場未定'}
+        </p>
+      </div>
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-100 flex">
+      {/* Left Sidebar - Admin Style */}
+      <div className="w-64 bg-slate-900 text-white flex flex-col fixed inset-y-0 left-0 z-40">
+        <div className="p-6 border-b border-slate-700">
+          <h1 className="text-xl font-bold tracking-tighter text-blue-400 flex items-center gap-2"><Ghost className="text-red-500" size={24} /> Kaientai-X</h1>
+          <p className="text-xs text-slate-400 mt-1">Event Management System</p>
+        </div>
+        <div className="px-4 py-6 border-b border-slate-700">
+          <div className="bg-slate-800 p-3 rounded-lg">
+            <p className="text-xs text-slate-400">ログイン企業</p>
+            <p className="font-bold text-sm truncate">{maker.name}</p>
+            <p className="text-xs text-slate-500 font-mono mt-1">{maker.code}</p>
+          </div>
+        </div>
+        <nav className="flex-1 p-4 space-y-1">
+          <button
+            onClick={() => { setActiveTab('home'); setSelectedExhibition(null); }}
+            className={`w-full text-left px-4 py-3 rounded-lg flex items-center gap-3 ${activeTab === 'home' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-800'}`}
+          >
+            <LayoutDashboard size={18} /> ホーム
+          </button>
+          <button
+            onClick={() => setActiveTab('analysis')}
+            className={`w-full text-left px-4 py-3 rounded-lg flex items-center gap-3 ${activeTab === 'analysis' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-800'}`}
+          >
+            <TrendingUp size={18} /> 展示会分析
+          </button>
+          <button
+            onClick={() => setActiveTab('invitations')}
+            className={`w-full text-left px-4 py-3 rounded-lg flex items-center gap-3 relative ${activeTab === 'invitations' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-800'}`}
+          >
+            <Mail size={18} /> 招待一覧
+            {unreadInvitations.length > 0 && (
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 bg-red-500 text-white text-xs font-bold w-5 h-5 rounded-full flex items-center justify-center">
+                {unreadInvitations.length}
+              </span>
+            )}
+          </button>
+        </nav>
+        <div className="p-4 border-t border-slate-700 text-xs text-slate-500">
+          © Kaientai-X
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-1 ml-64">
+        {/* Header */}
+        <header className="bg-white shadow-sm sticky top-0 z-30 px-8 py-4 flex justify-between items-center">
+          <h2 className="text-xl font-bold text-slate-800">
+            {activeTab === 'home' && 'マイ展示会'}
+            {activeTab === 'analysis' && '展示会分析'}
+            {activeTab === 'invitations' && '招待一覧'}
+            {activeTab === 'detail' && selectedExhibition?.title}
+          </h2>
+          <div className="flex items-center gap-4">
+            <span className="text-sm text-slate-500">{maker.name}</span>
+            <div className="bg-slate-100 p-2 rounded-full"><User size={20} className="text-slate-400" /></div>
+          </div>
+        </header>
+
+        {/* Content Area */}
+        <main className="p-8">
+          {/* HOME TAB */}
+          {activeTab === 'home' && (
+            <div className="space-y-8 animate-fade-in">
+              {/* Confirmed */}
+              <section>
+                <h3 className="text-lg font-bold text-slate-700 mb-4 flex items-center gap-2">
+                  <CheckCircle className="text-emerald-500" size={20} /> 参加確定 ({confirmedExhibitions.length})
+                </h3>
+                {confirmedExhibitions.length > 0 ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {confirmedExhibitions.map(ex => <ExhibitionCard key={ex.id} exhibition={ex} status="confirmed" />)}
+                  </div>
+                ) : (
+                  <p className="text-slate-400 text-sm">参加確定の展示会はありません</p>
+                )}
+              </section>
+
+              {/* Invited */}
+              <section>
+                <h3 className="text-lg font-bold text-slate-700 mb-4 flex items-center gap-2">
+                  <Mail className="text-amber-500" size={20} /> 招待中 ({invitedExhibitions.length})
+                </h3>
+                {invitedExhibitions.length > 0 ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {invitedExhibitions.map(ex => <ExhibitionCard key={ex.id} exhibition={ex} status="invited" />)}
+                  </div>
+                ) : (
+                  <p className="text-slate-400 text-sm">招待中の展示会はありません</p>
+                )}
+              </section>
+
+              {/* Declined */}
+              <section>
+                <h3 className="text-lg font-bold text-slate-700 mb-4 flex items-center gap-2">
+                  <UserX className="text-slate-400" size={20} /> 辞退 ({declinedExhibitions.length})
+                </h3>
+                {declinedExhibitions.length > 0 ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {declinedExhibitions.map(ex => <ExhibitionCard key={ex.id} exhibition={ex} status="declined" />)}
+                  </div>
+                ) : (
+                  <p className="text-slate-400 text-sm">辞退した展示会はありません</p>
+                )}
+              </section>
+
+              {/* Past */}
+              <section>
+                <h3 className="text-lg font-bold text-slate-700 mb-4 flex items-center gap-2">
+                  <Clock className="text-slate-400" size={20} /> 終了済み ({pastExhibitions.length})
+                </h3>
+                {pastExhibitions.length > 0 ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {pastExhibitions.map(ex => <ExhibitionCard key={ex.id} exhibition={ex} status="past" />)}
+                  </div>
+                ) : (
+                  <p className="text-slate-400 text-sm">終了済みの展示会はありません</p>
+                )}
+              </section>
+
+              {myExhibitions.length === 0 && (
+                <div className="text-center py-20 text-slate-400">
+                  招待されている展示会はありません
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ANALYSIS TAB */}
+          {activeTab === 'analysis' && (
+            <div className="space-y-6 animate-fade-in">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="bg-white p-6 rounded-xl shadow-sm text-center">
+                  <p className="text-sm text-slate-500">参加展示会数</p>
+                  <p className="text-4xl font-bold text-blue-600 mt-2">{confirmedExhibitions.length + pastExhibitions.length}</p>
+                </div>
+                <div className="bg-white p-6 rounded-xl shadow-sm text-center">
+                  <p className="text-sm text-slate-500">総スキャン数</p>
+                  <p className="text-4xl font-bold text-emerald-600 mt-2">
+                    {myExhibitions.reduce((sum, ex) => sum + getMyLogs(ex).length, 0)}
+                  </p>
+                </div>
+                <div className="bg-white p-6 rounded-xl shadow-sm text-center">
+                  <p className="text-sm text-slate-500">ユニーク来場者</p>
+                  <p className="text-4xl font-bold text-amber-600 mt-2">
+                    {new Set(myExhibitions.flatMap(ex => getMyLogs(ex).map(l => l.visitorId))).size}
+                  </p>
+                </div>
+              </div>
+              <div className="bg-white p-6 rounded-xl shadow-sm">
+                <h3 className="font-bold text-slate-700 mb-4">来場者属性分析</h3>
+                <div className="h-64 flex items-center justify-center">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={[
+                          { name: '小売', value: 40 }, { name: '商社', value: 30 }, { name: 'メーカー', value: 20 }, { name: 'その他', value: 10 }
+                        ]}
+                        cx="50%" cy="50%"
+                        innerRadius={60} outerRadius={80}
+                        paddingAngle={5}
+                        dataKey="value"
+                      >
+                        {COLORS.map((color, index) => <Cell key={`cell-${index}`} fill={color} />)}
+                      </Pie>
+                      <RechartsTooltip />
+                      <Legend />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+                <p className="text-xs text-center text-slate-400 mt-2">※デモデータ表示中</p>
+              </div>
+            </div>
+          )}
+
+          {/* INVITATIONS TAB */}
+          {activeTab === 'invitations' && (
+            <div className="space-y-4 animate-fade-in">
+              {invitedExhibitions.length === 0 ? (
+                <div className="text-center py-20 text-slate-400">未回答の招待はありません</div>
+              ) : (
+                invitedExhibitions.map(ex => (
+                  <div
+                    key={ex.id}
+                    className={`bg-white p-4 rounded-lg shadow-sm border-l-4 ${!seenInvitations.includes(ex.id) ? 'border-l-red-500 bg-red-50' : 'border-l-amber-400'} flex items-center justify-between cursor-pointer hover:shadow-md`}
+                    onClick={() => { setSelectedExhibition(ex); setActiveTab('detail'); }}
+                  >
+                    <div className="flex items-center gap-4">
+                      <div className={`p-3 rounded-full ${!seenInvitations.includes(ex.id) ? 'bg-red-100' : 'bg-amber-100'}`}>
+                        <Mail size={20} className={!seenInvitations.includes(ex.id) ? 'text-red-500' : 'text-amber-600'} />
+                      </div>
+                      <div>
+                        <h4 className="font-bold text-slate-800">{ex.title}</h4>
+                        <p className="text-xs text-slate-500">{ex.dates?.join(', ')} | {ex.place || ex.venueAddress}</p>
+                      </div>
+                    </div>
+                    <ChevronRight size={20} className="text-slate-400" />
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+
+          {/* DETAIL TAB */}
+          {activeTab === 'detail' && selectedExhibition && (
+            <div className="space-y-6 animate-fade-in">
+              <button onClick={() => { setActiveTab('home'); setSelectedExhibition(null); }} className="text-sm text-blue-600 hover:underline flex items-center gap-1">
+                <ArrowLeft size={16} /> 戻る
+              </button>
+
+              {/* Exhibition Info */}
+              <div className="bg-white p-6 rounded-xl shadow-sm">
+                <h3 className="text-xl font-bold text-slate-800 mb-4">展示会詳細</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                  <div><span className="text-slate-500">日程:</span> <span className="font-medium">{selectedExhibition.dates?.join(', ')}</span></div>
+                  <div><span className="text-slate-500">会場:</span> <span className="font-medium">{selectedExhibition.venueAddress || selectedExhibition.place}</span></div>
+                  <div><span className="text-slate-500">開場時間:</span> <span className="font-medium">{selectedExhibition.openTime} - {selectedExhibition.closeTime}</span></div>
+                  <div><span className="text-slate-500">コンセプト:</span> <span className="font-medium">{selectedExhibition.concept}</span></div>
+                </div>
+              </div>
+
+              {/* Response Copy */}
+              {(() => {
+                const myInfo = (selectedExhibition.makers || []).find(m => m.code === maker.code);
+                if (!myInfo || !myInfo.response) return null;
+                return (
+                  <div className="bg-white p-6 rounded-xl shadow-sm">
+                    <h3 className="font-bold text-slate-800 mb-4">出展申込時の回答内容</h3>
+                    <div className="bg-slate-50 p-4 rounded-lg space-y-2 text-sm">
+                      {Object.entries(myInfo.response).map(([key, val]) => (
+                        <div key={key}><span className="text-slate-500">{key}:</span> <span className="font-medium">{String(val)}</span></div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* QR Scan Button */}
+              <button
+                onClick={() => setShowScanner(true)}
+                className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-bold py-4 rounded-xl shadow-lg flex items-center justify-center gap-3"
+              >
+                <ScanLine size={24} /> QRスキャンを開始
+              </button>
+
+              {/* Scan Logs */}
+              <div className="bg-white p-6 rounded-xl shadow-sm">
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="font-bold text-slate-800">スキャン履歴 ({getMyLogs(selectedExhibition).length}件)</h3>
+                  <button
+                    onClick={() => {
+                      // Excel export
+                      const logs = getMyLogs(selectedExhibition);
+                      if (logs.length === 0) { alert('データがありません'); return; }
+                      const wb = new ExcelJS.Workbook();
+                      const ws = wb.addWorksheet('ScanLogs');
+                      ws.addRow(['日時', '会社名', '氏名', '電話', 'メール']);
+                      logs.forEach(l => {
+                        ws.addRow([
+                          new Date(l.scannedAt).toLocaleString(),
+                          l.visitorSnapshot?.companyName || '',
+                          l.visitorSnapshot?.repName || '',
+                          l.visitorSnapshot?.phone || '',
+                          l.visitorSnapshot?.email || ''
+                        ]);
+                      });
+                      wb.xlsx.writeBuffer().then(buffer => {
+                        saveAs(new Blob([buffer]), `scan_logs_${selectedExhibition.title}.xlsx`);
+                      });
+                    }}
+                    className="text-sm bg-green-600 text-white px-4 py-2 rounded-lg flex items-center gap-2"
+                  >
+                    <Download size={16} /> Excel出力
+                  </button>
+                </div>
+                <div className="divide-y divide-slate-100 max-h-80 overflow-y-auto">
+                  {getMyLogs(selectedExhibition).length === 0 ? (
+                    <p className="text-center py-8 text-slate-400">スキャン履歴がありません</p>
+                  ) : (
+                    getMyLogs(selectedExhibition).map(log => (
+                      <div key={log.id} className="py-3 flex items-center gap-3">
+                        <div className="bg-slate-100 p-2 rounded-full"><User size={16} className="text-slate-400" /></div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-bold text-slate-700 truncate">{log.visitorSnapshot?.repName || 'Unknown'}</p>
+                          <p className="text-xs text-slate-400">{log.visitorSnapshot?.companyName}</p>
+                        </div>
+                        <span className="text-xs text-slate-400">{new Date(log.scannedAt).toLocaleString()}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+
+      {/* Scanner Modal */}
+      {showScanner && (
+        <div className="fixed inset-0 bg-black z-50 flex flex-col">
+          <div className="p-4 flex justify-between items-center text-white bg-black/50 absolute top-0 w-full z-40">
+            <h2 className="font-bold flex items-center gap-2"><ScanLine /> スキャン中...</h2>
+            <button onClick={() => setShowScanner(false)} className="p-2 bg-white/20 rounded-full"><X /></button>
+          </div>
+          <div className="flex-1 relative flex items-center justify-center bg-black">
+            <Scanner onScan={handleScan} components={{ audio: false }} styles={{ container: { width: '100%', height: '100%' } }} />
+            <div className="absolute inset-0 border-[40px] border-black/50 pointer-events-none flex items-center justify-center">
+              <div className="w-64 h-64 border-2 border-blue-500/50 relative">
+                <div className="absolute top-0 left-0 w-4 h-4 border-t-4 border-l-4 border-blue-500"></div>
+                <div className="absolute top-0 right-0 w-4 h-4 border-t-4 border-r-4 border-blue-500"></div>
+                <div className="absolute bottom-0 left-0 w-4 h-4 border-b-4 border-l-4 border-blue-500"></div>
+                <div className="absolute bottom-0 right-0 w-4 h-4 border-b-4 border-r-4 border-blue-500"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Scan Result Modal */}
+      {scanResult && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 animate-fade-in">
+          <div className={`bg-white w-full max-w-sm rounded-2xl overflow-hidden shadow-2xl ${scanResult.success ? 'border-t-8 border-green-500' : 'border-t-8 border-red-500'}`}>
+            <div className="p-6 text-center">
+              <div className={`mx-auto w-16 h-16 rounded-full flex items-center justify-center mb-4 ${scanResult.success ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
+                {scanResult.success ? <Check size={32} /> : <AlertTriangle size={32} />}
+              </div>
+              <h3 className="text-xl font-bold mb-1">{scanResult.success ? 'スキャン成功' : 'エラー'}</h3>
+              <p className="text-sm text-slate-500 mb-6">{scanResult.message}</p>
+              {scanResult.visitor && (
+                <div className="bg-slate-50 p-4 rounded-xl text-left mb-6 space-y-2">
+                  <div><p className="text-xs text-slate-400">会社名</p><p className="font-bold text-slate-700">{scanResult.visitor.companyName}</p></div>
+                  <div><p className="text-xs text-slate-400">氏名</p><p className="font-bold text-slate-700 text-lg">{scanResult.visitor.repName} <span className="text-sm font-normal">様</span></p></div>
+                </div>
+              )}
+              <button onClick={closeScanResult} className="w-full bg-slate-900 text-white font-bold py-3 rounded-xl">続けてスキャン</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* New Invitation Modal (One-time) */}
+      {showInvitationModal && (
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4 animate-fade-in">
+          <div className="bg-white max-w-md w-full rounded-2xl overflow-hidden shadow-2xl">
+            <div className="bg-gradient-to-r from-amber-500 to-orange-500 p-6 text-center text-white">
+              <Mail size={48} className="mx-auto mb-3" />
+              <h2 className="text-2xl font-bold">新しい招待状</h2>
+            </div>
+            <div className="p-6 text-center">
+              <h3 className="text-xl font-bold text-slate-800 mb-2">{showInvitationModal.title}</h3>
+              <p className="text-sm text-slate-500 mb-1">{showInvitationModal.dates?.join(', ')}</p>
+              <p className="text-sm text-slate-500 mb-6">{showInvitationModal.place || showInvitationModal.venueAddress}</p>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => handleDismissInvitation(showInvitationModal.id)}
+                  className="flex-1 bg-slate-200 text-slate-700 font-bold py-3 rounded-xl"
+                >
+                  後で
+                </button>
+                <button
+                  onClick={() => {
+                    handleDismissInvitation(showInvitationModal.id);
+                    setSelectedExhibition(showInvitationModal);
+                    setActiveTab('detail');
+                  }}
+                  className="flex-1 bg-amber-500 text-white font-bold py-3 rounded-xl"
+                >
+                  詳細を見る
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Legacy wrapper for compatibility
+function MakerDashboard({ maker, exhibitionName, scanLogs, onScan, exhibitions }) {
+  // If exhibitions array is provided, use new MakerPortal
+  if (exhibitions && exhibitions.length > 0) {
+    return <MakerPortal maker={maker} exhibitions={exhibitions} onScan={onScan} />;
+  }
+
+  // Fallback to single-exhibition mode (legacy)
+  const singleExhibition = { title: exhibitionName, scanLogs: scanLogs, id: 'legacy' };
+  return <MakerPortal maker={maker} exhibitions={[singleExhibition]} onScan={onScan} />;
+}
+
+function EnterpriseConsole({ masterMakers, setMasterMakers }) {
+  const [activeTab, setActiveTab] = useState('fixed');
+  const [viewMode, setViewMode] = useState('grid'); // Changed default from 'list' to 'grid'
+  const [showCsvImport, setShowCsvImport] = useState(false);
+  const [editingMaker, setEditingMaker] = useState(null);
+  const [showAddModal, setShowAddModal] = useState(false); // New: for adding new makers
+  const [searchTerm, setSearchTerm] = useState('');
+  const [sortBy, setSortBy] = useState('category'); // category, code
+  const [filterCategory, setFilterCategory] = useState('all'); // New: category filter
+
+  // Mock Data (Initial if empty)
+  useEffect(() => {
+    if (masterMakers.length === 0) {
+      setMasterMakers([
+        { id: '1', name: '株式会社ケアマックス', code: 'C001', category: '食品', portalUrl: 'https://kaientai-x/portal/C001', isFixed: true },
+        { id: '2', name: 'テックソリューションズ', code: 'T002', category: 'IoT', portalUrl: 'https://kaientai-x/portal/T002', isFixed: true },
+      ]);
+    }
+  }, []);
+
+  const handleImport = (importedList) => {
+    // Merge Logic (Skip duplicates by code)
+    const newItems = [];
+    importedList.forEach(item => {
+      if (!masterMakers.some(m => m.code === item.code)) {
+        newItems.push({
+          id: crypto.randomUUID(),
+          ...item,
+          portalUrl: `https://kaientai-x/portal/${item.code}`
+        });
+      }
+    });
+
+    if (newItems.length > 0) {
+      // CSV import adds to all list, not fixed by default
+      setMasterMakers(prev => [...prev, ...newItems.map(item => ({ ...item, isFixed: activeTab === 'fixed' }))]);
+      alert(`${newItems.length}件を追加しました。${importedList.length - newItems.length}件は重複のためスキップされました。`);
+    } else {
+      alert('追加可能な新規データはありませんでした（全て重複）。');
+    }
+  };
+
+  const handleSaveMaker = (updatedMaker, isNew = false) => {
+    // Duplicate check for new makers or code changes
+    const existingCode = masterMakers.find(m => m.code === updatedMaker.code && m.id !== updatedMaker.id);
+    if (existingCode) {
+      alert(`エラー: 仕入先コード "${updatedMaker.code}" は既に登録されています。`);
+      return false;
+    }
+    if (isNew) {
+      // New makers: add to current tab's list
+      const newMaker = { ...updatedMaker, id: crypto.randomUUID(), portalUrl: `https://kaientai-x/portal/${updatedMaker.code}`, isFixed: activeTab === 'fixed' };
+      setMasterMakers(prev => [...prev, newMaker]);
+      alert('新規企業を追加しました');
+    } else {
+      setMasterMakers(prev => prev.map(m => m.id === updatedMaker.id ? updatedMaker : m));
+      alert('企業情報を更新しました');
+    }
+    setEditingMaker(null);
+    setShowAddModal(false);
+    return true;
+  };
+
+  const handleDeleteMaker = (maker) => {
+    if (window.confirm(`「${maker.name}」を削除してもよろしいですか？`)) {
+      setMasterMakers(prev => prev.filter(m => m.id !== maker.id));
+      alert('削除しました');
+    }
+  };
+
+  // Move maker to fixed list
+  const handleMoveToFixed = (maker) => {
+    if (maker.isFixed) {
+      alert('この企業は既に固定リストに登録されています。');
+      return;
+    }
+    const pw = prompt('固定リストに移動するにはパスワードを入力してください:');
+    if (pw !== 'kitagawa1') {
+      alert('パスワードが違います');
+      return;
+    }
+    setMasterMakers(prev => prev.map(m => m.id === maker.id ? { ...m, isFixed: true } : m));
+    alert(`「${maker.name}」を固定リストに移動しました。`);
+  };
+
+  // Filter by tab: fixed list shows only isFixed=true, all list shows everything
+  const filteredMakers = masterMakers.filter(m =>
+    (activeTab === 'fixed' ? m.isFixed : true) &&
+    (m.name.includes(searchTerm) || m.code.includes(searchTerm) || m.category.includes(searchTerm)) &&
+    (filterCategory === 'all' || m.category === filterCategory)
+  ).sort((a, b) => {
+    if (sortBy === 'category') {
+      return a.category.localeCompare(b.category);
+    }
+    return a.code.localeCompare(b.code);
+  });
+
+  const MakerCard = ({ maker }) => {
+    const catStyle = MAKER_CATEGORIES[maker.category] || MAKER_CATEGORIES['その他'];
+    const baseUrl = window.location.origin + window.location.pathname;
+    const demoUrl = `${baseUrl}?mode=demo_portal&code=${maker.code}`;
+
+    return (
+      <div className={`bg-white rounded-lg shadow-sm border border-slate-200 hover:shadow-md transition-shadow ${viewMode === 'micro' ? 'p-2' : 'p-4'}`}>
+        {viewMode === 'micro' ? (
+          /* Micro View: Compact, color + name only - Clickable to edit */
+          <div className="flex items-center gap-2 cursor-pointer hover:bg-slate-50" onClick={() => setEditingMaker(maker)}>
+            <div className={`w-3 h-3 rounded-full ${catStyle.color.split(' ')[0]}`}></div>
+            <span className="text-xs font-medium text-slate-700 truncate">{maker.name}</span>
+            {activeTab === 'selection' && maker.isFixed && <Star size={10} className="text-amber-500 fill-amber-500" />}
+          </div>
+        ) : (
+          /* Normal/Grid View */
+          <>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-xs ${catStyle.color}`}>
+                  {maker.category ? maker.category.substring(0, 2) : '他'}
+                </div>
+                <div>
+                  <h4 className="font-bold text-slate-800 flex items-center gap-1">
+                    {maker.name}
+                    {activeTab === 'selection' && maker.isFixed && <Star size={14} className="text-amber-500 fill-amber-500" title="固定リスト登録済" />}
+                  </h4>
+                  <div className="flex items-center gap-2 text-xs text-slate-500">
+                    <span className="font-mono bg-slate-100 px-1 rounded">{maker.code}</span>
+                    <span>{maker.category}</span>
+                  </div>
+                </div>
+              </div>
+              <div className="flex gap-1">
+                {activeTab === 'selection' && !maker.isFixed && (
+                  <button onClick={() => handleMoveToFixed(maker)} className="text-amber-500 hover:bg-amber-50 p-2 rounded-full" title="固定リストに移動"><Star size={16} /></button>
+                )}
+                <button onClick={() => setEditingMaker(maker)} className="text-blue-600 hover:bg-blue-50 p-2 rounded-full" title="編集"><Edit3 size={16} /></button>
+                <button onClick={() => handleDeleteMaker(maker)} className="text-red-500 hover:bg-red-50 p-2 rounded-full" title="削除"><Trash2 size={16} /></button>
+              </div>
+            </div>
+
+            {/* Simplified Portal URL Display */}
+            <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-100">
+              <span className="text-xs font-bold text-slate-500">ポータルURL</span>
+              <div className="flex gap-1">
+                <button
+                  onClick={() => { navigator.clipboard.writeText(demoUrl); alert('URLをコピーしました'); }}
+                  className="bg-slate-100 text-slate-600 hover:bg-slate-200 px-3 py-1 rounded text-xs flex items-center gap-1"
+                  title="コピー"
+                >
+                  <Copy size={12} /> コピー
+                </button>
+                <button
+                  onClick={() => window.open(demoUrl, '_blank')}
+                  className="bg-blue-600 text-white px-3 py-1 rounded text-xs flex items-center gap-1 hover:bg-blue-700"
+                  title="ポータルを開く"
+                >
+                  <ExternalLink size={12} /> 開く
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-6 animate-fade-in pb-20">
+      <div className="flex justify-between items-end">
+        <div>
+          <h2 className="text-3xl font-bold text-slate-800">Enterprise Console</h2>
+          <p className="text-slate-500 mt-1">参加企業マスター管理・ポータル発行</p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={() => setShowAddModal(true)} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg font-bold hover:bg-blue-700 shadow-sm transition-all hover:-translate-y-0.5">
+            <Plus size={18} /> 新規追加
+          </button>
+          <button onClick={() => setShowCsvImport(true)} className="flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg font-bold hover:bg-green-700 shadow-sm transition-all hover:-translate-y-0.5">
+            <Upload size={18} /> CSV取込
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="flex border-b border-slate-200 bg-slate-50">
+          <button onClick={() => setActiveTab('fixed')} className={`flex-1 py-4 text-center font-bold text-sm ${activeTab === 'fixed' ? 'text-blue-600 border-b-2 border-blue-600 bg-white' : 'text-slate-500 hover:text-slate-700'}`}>固定リスト ({masterMakers.filter(m => m.isFixed).length}社)</button>
+          <button onClick={() => setActiveTab('selection')} className={`flex-1 py-4 text-center font-bold text-sm ${activeTab === 'selection' ? 'text-blue-600 border-b-2 border-blue-600 bg-white' : 'text-slate-500 hover:text-slate-700'}`}>全リスト ({masterMakers.length}社)</button>
+        </div>
+
+        <div className="p-6 bg-slate-50/50 min-h-[400px]">
+          {activeTab === 'fixed' ? (
+            <>
+              <div className="flex justify-between items-center mb-4">
+                <div className="flex gap-2">
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value)}
+                    className="p-2 border border-slate-200 rounded-lg text-sm bg-white outline-none"
+                  >
+                    <option value="category">カテゴリ順</option>
+                    <option value="code">コード順</option>
+                  </select>
+                  <select
+                    value={filterCategory}
+                    onChange={(e) => setFilterCategory(e.target.value)}
+                    className="p-2 border border-slate-200 rounded-lg text-sm bg-white outline-none"
+                  >
+                    <option value="all">全カテゴリ</option>
+                    {Object.keys(MAKER_CATEGORIES).map(cat => (
+                      <option key={cat} value={cat}>{cat}</option>
+                    ))}
+                  </select>
+                  <div className="relative">
+                    <Search className="absolute left-3 top-2.5 text-slate-400" size={16} />
+                    <input
+                      type="text"
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      placeholder="企業名・コード検索..."
+                      className="pl-9 p-2 border border-slate-200 rounded-lg text-sm w-64 outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+                <div className="flex bg-white rounded-lg border border-slate-200 p-1">
+                  <button onClick={() => setViewMode('list')} className={`p-2 rounded ${viewMode === 'list' ? 'bg-slate-100 text-blue-600' : 'text-slate-400'}`} title="リスト"><List size={16} /></button>
+                  <button onClick={() => setViewMode('grid')} className={`p-2 rounded ${viewMode === 'grid' ? 'bg-slate-100 text-blue-600' : 'text-slate-400'}`} title="グリッド"><LayoutDashboard size={16} /></button>
+                  <button onClick={() => setViewMode('micro')} className={`p-2 rounded ${viewMode === 'micro' ? 'bg-slate-100 text-blue-600' : 'text-slate-400'}`} title="極小">•••</button>
+                </div>
+              </div>
+
+              <div className={`grid gap-4 ${viewMode === 'micro' ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8' : viewMode === 'grid' ? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3' : 'grid-cols-1'}`}>
+                {filteredMakers.map(maker => <MakerCard key={maker.id} maker={maker} />)}
+                {filteredMakers.length === 0 && <div className="col-span-full text-center py-20 text-slate-400">条件に一致する企業がありません。</div>}
+              </div>
+            </>
+          ) : (
+            /* Selection List - Same as Fixed but no password required */
+            <>
+              <div className="flex justify-between items-center mb-4">
+                <div className="flex gap-2">
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value)}
+                    className="p-2 border border-slate-200 rounded-lg text-sm bg-white outline-none"
+                  >
+                    <option value="category">カテゴリ順</option>
+                    <option value="code">コード順</option>
+                  </select>
+                  <select
+                    value={filterCategory}
+                    onChange={(e) => setFilterCategory(e.target.value)}
+                    className="p-2 border border-slate-200 rounded-lg text-sm bg-white outline-none"
+                  >
+                    <option value="all">全カテゴリ</option>
+                    {Object.keys(MAKER_CATEGORIES).map(cat => (
+                      <option key={cat} value={cat}>{cat}</option>
+                    ))}
+                  </select>
+                  <div className="relative">
+                    <Search className="absolute left-3 top-2.5 text-slate-400" size={16} />
+                    <input
+                      type="text"
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      placeholder="企業名・コード検索..."
+                      className="pl-9 p-2 border border-slate-200 rounded-lg text-sm w-64 outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+                <div className="flex bg-white rounded-lg border border-slate-200 p-1">
+                  <button onClick={() => setViewMode('list')} className={`p-2 rounded ${viewMode === 'list' ? 'bg-slate-100 text-blue-600' : 'text-slate-400'}`} title="リスト"><List size={16} /></button>
+                  <button onClick={() => setViewMode('grid')} className={`p-2 rounded ${viewMode === 'grid' ? 'bg-slate-100 text-blue-600' : 'text-slate-400'}`} title="グリッド"><LayoutDashboard size={16} /></button>
+                  <button onClick={() => setViewMode('micro')} className={`p-2 rounded ${viewMode === 'micro' ? 'bg-slate-100 text-blue-600' : 'text-slate-400'}`} title="極小">•••</button>
+                </div>
+              </div>
+
+              <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                <p className="text-sm text-blue-700"><strong>全リスト</strong>: 自由に企業を追加・編集できます（パスワード不要）。</p>
+              </div>
+
+              <div className={`grid gap-4 ${viewMode === 'micro' ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8' : viewMode === 'grid' ? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3' : 'grid-cols-1'}`}>
+                {filteredMakers.map(maker => <MakerCard key={maker.id} maker={maker} />)}
+                {filteredMakers.length === 0 && <div className="col-span-full text-center py-20 text-slate-400">条件に一致する企業がありません。</div>}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {showCsvImport && <CsvImportModal onClose={() => setShowCsvImport(false)} onImport={handleImport} />}
+      {editingMaker && <EditMakerModal maker={editingMaker} onClose={() => setEditingMaker(null)} onSave={(m) => handleSaveMaker(m, false)} existingCodes={masterMakers.map(x => x.code)} isFixedList={activeTab === 'fixed'} />}
+      {showAddModal && <EditMakerModal maker={{ name: '', code: '', category: '食品' }} onClose={() => setShowAddModal(false)} onSave={(m) => handleSaveMaker(m, true)} existingCodes={masterMakers.map(x => x.code)} isNew={true} isFixedList={activeTab === 'fixed'} />}
+    </div>
+  );
+}
+
+function OperationalManualView() {
+  const [activeTab, setActiveTab] = useState('preparation'); // preparation, dayOf, postEvent
+  const [activeStep, setActiveStep] = useState(0);
+
+  const MANUAL_DATA = {
+    preparation: {
+      label: '①準備編',
+      steps: [
+        {
+          title: "Step 1: 新規展示会の作成",
+          desc: "展示会場を押さえた時点で、新規展示会を作成しましょう！ダッシュボードの「新規展示会を作成」ボタンから、展示会の基本情報を登録します。",
+          actions: [
+            "「新規展示会を作成」ボタンをクリック → 右上の青いボタンから新規作成画面へ",
+            "基本情報を入力 → タイトル、開催日、会場名、都道府県などを設定",
+            "目標値を設定 → 集客目標・招致目標・利益目標を入力",
+            "「作成」ボタンで確定 → プロジェクト一覧に追加されます"
+          ],
+          points: [
+            "開催日は複数設定可能です",
+            "会場URLを登録するとGoogleマップ連携できます",
+            "担当スタッフも事前に登録しておくと便利です"
+          ],
+          icons: ["Event"]
+        },
+        {
+          title: "Step 2: タスクの整理",
+          desc: "タスク管理タブで、タスク一覧を確認！営業タスクと企画タスク、どちらも確認してそれぞれのタスクに期限を設定してください。",
+          actions: [
+            "タスクの横のペンボタンから編集できます",
+            "営業タスクで、いらないタスク・または追加したいタスクがあれば適宜追加してください",
+            "タスク順も見やすいようにドラッグで並び替えることもできます"
+          ],
+          points: [
+            "期限を設定することで進捗管理がしやすくなります",
+            "不要なタスクは削除してスッキリ整理しましょう"
+          ]
+        },
+        {
+          title: "Step 3: メーカーを招待",
+          desc: "メーカーを招待！ 招待メーカータブ",
+          actions: [
+            "マスター管理シートをクリックし、招待確定リストタブの中身を確認 → ここに記載のメーカーは全国どこの展示会でも招待します",
+            "招待確定リスト以外に呼びたいメーカーがあれば、招待リストに仕入先コードとともに追加（※招待固定リストは企画でCSV取込をするので入力不要）",
+            "オリジナル招待フォームの「⚙フォーム編集」から招待アンケート内容を編集（質問の追加・回答方法や必須設定も自由に設定可能）",
+            "質問を保存後、回答画面（デモ）でアンケート内容が問題ないか確認！",
+            "問題なければ企画部に招待Goの指示をお願いします！（※メーカーに展示会招待メールを一斉送信します）",
+            "追加招待が完了したら、赤い受付締め切りボタンを押してフォームをシャットダウン"
+          ],
+          points: [
+            "招待URLは各メーカー共通です",
+            "受付締め切りは慎重に！一度締め切ると新規回答が受け付けられません"
+          ]
+        },
+        {
+          title: "Step 3.5: 講演会の招致",
+          desc: "講演会を実施する場合、講演会タブで項目が全て埋められる内容まで作成してください。",
+          actions: [
+            "講演会タブを開き、必要項目を全て入力（不完全だと案内チラシが作成できません）"
+          ],
+          points: [
+            "講演者情報、時間、テーマなど漏れなく入力しましょう",
+            "項目が未入力だとチラシ作成に支障が出ます"
+          ]
+        },
+        {
+          title: "Step 4: 事前登録フォーム確認",
+          desc: "受付用タブの登録フォーム編集より、事前登録フォームの内容を確認してください。",
+          actions: [
+            "受付用タブ → 登録フォーム編集 → 内容を確認（基本はデフォルトで問題ないはず）",
+            "カスタマイズして保存！登録画面（デモ）から内容が問題ないか確認！",
+            "問題なければ表示されているURLをコピー",
+            "緑色のボタンから他サイトへ遷移し、URLを貼り付けてQRコード画像を作成",
+            "生成したQR画像を企画部へ送付 → チラシの作成に移ります",
+            "会場の図面（会場のサイズの記載あり）を企画部に送付 → レイアウトたたき台を作成します"
+          ],
+          points: [
+            "QRコード作成サイトへ遷移してQR画像を保存しましょう",
+            "図面があればより正確なレイアウトが作成可能です"
+          ]
+        },
+        {
+          title: "Step 5: 会場・備品タブ",
+          desc: "会場・備品タブで費用と備品を管理。各種使用料金の追加と、当日用意する備品の確認を行います。",
+          actions: [
+            "会場・備品タブより、各種使用料金を追加していってください",
+            "ケアマックス側で当日用意する備品を確認（いらなければ削除、必要であれば追加）",
+            "費用が発生する備品は適宜、収支・予算タブに追加してください",
+            "（仮）収支報告書を作成・報告！Excel出力ボタンを押すと書式に収支表の内容が転記されたデータを取得できます"
+          ],
+          points: [
+            "費用は収支・予算タブと連動させましょう",
+            "備品の抜け漏れがないよう事前にしっかりチェック"
+          ]
+        },
+        {
+          title: "Step 6: レイアウトとチラシ完成",
+          desc: "この時点でレイアウト図とチラシを完成させます。",
+          actions: [
+            "レイアウト図は会場・備品タブに埋め込み",
+            "チラシは資料タブのGoogleドライブに入れます",
+            "企画部よりメーカーへ確定メールを送付（アンケートの際の回答のコピー・メーカースキャナ管理サイト・レイアウト図など）",
+            "タスク管理の登録タスクを処理しながら、集客に移行してください"
+          ],
+          points: [
+            "完成したチラシは必ず資料タブにアップロード",
+            "ここから集客フェーズに突入します！"
+          ]
+        },
+        {
+          title: "Step 7: 当日スケジュール設定",
+          desc: "スケジュールタブより、当日のデモンストレーションをしながらスケジュールを細かく設定してください。",
+          actions: [
+            "スケジュールタブを開く",
+            "当日の流れをシミュレーションしながらスケジュールを設定",
+            "この設定がより効果的にできればできるほど当日の運営成功につながります！！"
+          ],
+          points: [
+            "細かいスケジュール設定が成功のカギ！",
+            "当日の動きをイメージしながら設定しましょう"
+          ]
+        }
+      ]
+    },
+    dayOf: {
+      label: '②当日運営編',
+      steps: [
+        {
+          title: "Step 1: 前日搬入",
+          desc: "前日搬入はスピード勝負！",
+          actions: [
+            "前日搬入当日の動き方をスケジュールを見ながら徹底シミュレーション",
+            "前日搬入参加者に役割の割り振り説明、あれば運営マニュアル書を渡す",
+            "レイアウトどおりにブース設置",
+            "ラミネート板を各ブースに配置。搬入・搬出口の案内ラミネートも",
+            "受付の設置（来場特典の準備も）",
+            "事前登録を自分で仮で行い、QRリーダーの読み込みがうまくいくか確認",
+            "（あれば）講演会開場のセッティング",
+            "再度準備漏れが無いか最終チェック（準備物の漏れに対処できる最後のチャンス）",
+            "当日の参加メンバーに、当日の役割を再度説明"
+          ],
+          points: [
+            "時間との勝負です！テキパキ動きましょう",
+            "最終チェックは念入りに"
+          ]
+        },
+        {
+          title: "Step 2: 開場前",
+          desc: "開場前は一番バタバタします！",
+          actions: [
+            "運営メンバーに再度役割を徹底周知",
+            "未搬入メーカーのチェック",
+            "展示会のBGMのセットアップ、講演会場の確認、その他会場導線の徹底確認",
+            "（時間があれば）メーカーに挨拶（ブースに行って）",
+            "朝礼（カンペを用意しておくと良いです。メーカーにQR読み込みで来場者の管理ができる機能をこの時に説明してください）"
+          ],
+          points: [
+            "音響や導線の確認は開場前に！",
+            "メーカーへの挨拶も忘れずに"
+          ]
+        },
+        {
+          title: "Step 3: 開場後",
+          desc: "開場後は展示会の満足度向上に心血を注ぐ！めんどくさいと思っても工程をサボらない。",
+          actions: [
+            "QRコードリーダーを起動して来場した人のQRを読み込み来場登録！",
+            "全メーカーのブースに誰か一人でも挨拶に伺うことを徹底",
+            "昼食の案内は早めに",
+            "自分のお客様が来場したらニーズを聞いて最低1ブースは誘導してあげる",
+            "講演会の運営メンバーは時間管理を徹底意識してください",
+            "展示会開場中は、できる限り普段の営業対応は後に回してください。（特に電話）",
+            "各自休憩を効果的に回してください（休憩の際に営業対応をする）",
+            "閉場10分前に閉場のアナウンス",
+            "終礼で来場者数と搬出の手順をマイクで説明して、閉場。"
+          ],
+          points: [
+            "笑顔で元気よく対応しましょう",
+            "QRスキャンは確実に"
+          ]
+        },
+        {
+          title: "Step 4: 閉場後",
+          desc: "閉場後　忘れ物が無いように！！",
+          actions: [
+            "備品の撤収（会場・受付・講演会場）。メーカーのテーブルや椅子を優先して手伝ってあげてください。",
+            "忘れ物チェック",
+            "展示会場に終了報告",
+            "お疲れ様でした！！"
+          ],
+          points: [
+            "撤収作業は安全第一で",
+            "忘れ物がないか最後にもう一度確認"
+          ]
+        }
+      ]
+    },
+    postEvent: {
+      label: '③展示会終了後',
+      steps: [
+        {
+          title: "Step 1: 整理・費用報告",
+          desc: "整理・費用報告",
+          actions: [
+            "備品の整理（使用した備品を整理してまとめましょう）",
+            "領収書や請求書を確認して収支・予算に登録されている金額が間違い無いか確認",
+            "Excel出力を押し、収支報告書（確定版）を作成し報告を上げる"
+          ],
+          points: [
+            "お金周りの確認は正確に",
+            "報告書は早めに作成しましょう"
+          ]
+        },
+        {
+          title: "Step 2: 締め",
+          desc: "展示会活動の締めくくりです。",
+          actions: [
+            "お礼メール（出展メーカーへ）を送るので、メール内容を企画に共有してください。（全メーカー内容は統一）",
+            "メーカー入金がされているか、経理と連携して確認",
+            "これにて展示会は完全終了です！本当にお疲れ様でした！！"
+          ],
+          points: [
+            "感謝の気持ちを伝えましょう",
+            "全工程終了です！お疲れ様でした！"
+          ]
+        }
+      ]
+    }
+  };
+
+  const currentCategory = MANUAL_DATA[activeTab];
+  const currentStep = currentCategory.steps[activeStep];
+
+  return (
+    <div className="space-y-6 animate-fade-in pb-20">
+      {/* Header & Alert */}
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-8">
+        <div>
+          <div className="flex items-center gap-3 mb-2">
+            <h2 className="text-3xl font-bold text-slate-800">運用方法マニュアル</h2>
+          </div>
+
+          <p className="text-slate-500">展示会運営の流れをステップバイステップで解説</p>
+        </div>
+
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 max-w-xl shadow-sm flex gap-3 text-red-700 text-sm font-bold items-start">
+          <AlertTriangle size={24} className="flex-shrink-0 text-red-500" />
+          <p className="leading-relaxed">面倒な作業も多い展示会ですが、全員で良い展示会を作り上げるため工程の省略やQR読み込みの対応をしないなど絶対NG</p>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex flex-wrap gap-2 mb-8 bg-slate-100 p-1.5 rounded-xl w-fit">
+        {Object.keys(MANUAL_DATA).map((key) => (
+          <button
+            key={key}
+            onClick={() => { setActiveTab(key); setActiveStep(0); }}
+            className={`px-6 py-2.5 rounded-lg text-sm font-bold transition-all ${activeTab === key ? 'bg-blue-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200'}`}
+          >
+            {MANUAL_DATA[key].label}
+          </button>
+        ))}
+        <button className="px-6 py-2.5 rounded-lg text-sm font-bold text-slate-400 bg-slate-200 cursor-not-allowed">④Kaientai-X便利機能</button>
+      </div>
+
+      {/* Stepper Navigation */}
+      <div className="bg-slate-900 text-white rounded-t-2xl p-0 overflow-x-auto scrollbar-hide flex border-b border-slate-700">
+        {currentCategory.steps.map((step, idx) => (
+          <button
+            key={idx}
+            onClick={() => setActiveStep(idx)}
+            className={`flex-shrink-0 px-6 py-4 text-xs font-bold border-b-4 transition-colors flex flex-col items-center gap-1 ${activeStep === idx ? 'border-blue-500 text-white bg-slate-800' : 'border-transparent text-slate-400 hover:bg-slate-800 hover:text-white'}`}
+          >
+            <span className="opacity-50">Step {activeCategoryStepOffset(activeTab, idx)}</span>
+            <span>{step.title.split(':')[1]?.trim() || step.title}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* Content Area */}
+      <div className="bg-slate-900 text-white rounded-b-2xl shadow-2xl p-8 md:p-12 min-h-[500px] relative overflow-hidden">
+        {/* Background Decoration */}
+        <div className="absolute top-0 right-0 p-20 opacity-5 pointer-events-none">
+          <BookOpen size={400} />
+        </div>
+
+        <div className="relative z-10 max-w-4xl mx-auto space-y-10">
+          {/* Title Section */}
+          <div className="space-y-4">
+            <h3 className="text-3xl md:text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-300 to-indigo-300 leading-tight">
+              {currentStep.desc}
+            </h3>
+          </div>
+
+          {/* Action List */}
+          <div className="space-y-4">
+            {currentStep.actions.map((action, idx) => (
+              <div key={idx} className="flex gap-4 items-start bg-slate-800/50 p-4 rounded-xl border border-slate-700 hover:border-blue-500/50 transition-colors">
+                <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center font-bold text-white shadow-lg flex-shrink-0">
+                  {idx + 1}
+                </div>
+                <p className="pt-1 text-slate-200 font-medium leading-relaxed">{action}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Points Section */}
+          {currentStep.points && (
+            <div className="mt-8 bg-slate-800/80 rounded-xl border border-slate-700 p-6">
+              <h4 className="flex items-center gap-2 text-amber-400 font-bold mb-4 text-lg">
+                <span className="animate-pulse">💡</span> ポイント
+              </h4>
+              <ul className="space-y-2">
+                {currentStep.points.map((point, idx) => (
+                  <li key={idx} className="flex items-start gap-2 text-slate-300 text-sm">
+                    <span className="text-amber-400 mt-1">●</span> {point}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+
+        {/* Navigation Buttons */}
+        <div className="mt-12 flex justify-between pt-8 border-t border-slate-800">
+          <button
+            disabled={activeStep === 0}
+            onClick={() => setActiveStep(p => p - 1)}
+            className="px-6 py-3 rounded-lg font-bold text-slate-400 hover:text-white disabled:opacity-30 disabled:hover:text-slate-400 transition-colors flex items-center gap-2"
+          >
+            <ArrowLeft size={20} /> 前のステップ
+          </button>
+          <button
+            disabled={activeStep === currentCategory.steps.length - 1}
+            onClick={() => setActiveStep(p => p + 1)}
+            className="px-6 py-3 rounded-lg font-bold bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-30 disabled:hover:bg-blue-600 transition-all shadow-lg hover:shadow-blue-500/25 flex items-center gap-2"
+          >
+            次のステップ <ChevronRight size={20} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Helper to keep step numbers consistent if needed (or just use index+1)
+// For now, simpler to just use index + 1
+function activeCategoryStepOffset(tab, idx) {
+  return idx + 1;
+}
+
+function DashboardView({ exhibitions, onCreateClick, onCardClick, onDeleteClick }) {
+
+  const [viewMode, setViewMode] = useState('large'); // large, compact, list
+
+  // Helper to sort and calculate dates
+  const sortedExhibitions = [...exhibitions].sort((a, b) => {
+    const dateA = a.dates && a.dates[0] ? new Date(a.dates[0]) : new Date(8640000000000000);
+    const dateB = b.dates && b.dates[0] ? new Date(b.dates[0]) : new Date(8640000000000000);
+    return Math.abs(dateA - new Date()) - Math.abs(dateB - new Date()); // Sort by closeness to today? Or just date? Result: Closest first.
+  });
+
+  const getDaysUntil = (dates) => {
+    if (!dates || dates.length === 0) return null;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const eventDates = dates.map(d => new Date(d)).sort((a, b) => a - b);
+    const firstDate = eventDates[0];
+    const diff = Math.ceil((firstDate - today) / (1000 * 60 * 60 * 24));
+    return { diff, isPast: diff < 0 && Math.ceil((eventDates[eventDates.length - 1] - today) / (1000 * 60 * 60 * 24)) < 0 };
+  };
+
+
+
+  return (
+    <div className="space-y-8 animate-fade-in pb-20">
+      {/* Header & Actions */}
+      <div className="flex flex-col md:flex-row justify-between items-end gap-4">
+        <div>
+          <h2 className="text-3xl font-bold text-slate-800">Projects</h2>
+          <p className="text-slate-500 mt-1">現在進行中の展示会プロジェクト一覧</p>
+        </div>
+        <div className="flex gap-3">
+
+          <div className="flex bg-white rounded-lg border border-slate-200 p-1 mr-2">
+            <button onClick={() => setViewMode('large')} className={`p-2 rounded ${viewMode === 'large' ? 'bg-slate-100 text-blue-600' : 'text-slate-400'}`} title="大きく表示"><LayoutGrid size={18} /></button>
+            <button onClick={() => setViewMode('compact')} className={`p-2 rounded ${viewMode === 'compact' ? 'bg-slate-100 text-blue-600' : 'text-slate-400'}`} title="コンパクト"><Grid size={18} /></button>
+            <button onClick={() => setViewMode('list')} className={`p-2 rounded ${viewMode === 'list' ? 'bg-slate-100 text-blue-600' : 'text-slate-400'}`} title="リスト"><List size={18} /></button>
+          </div>
+          <button
+            onClick={onCreateClick}
+            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-full shadow-lg transition-all hover:-translate-y-1 font-bold"
+          >
+            <Plus size={20} /> 新規展示会を作成
+          </button>
+        </div>
+      </div>
+
+      {/* Project Grid */}
+      {exhibitions.length === 0 ? (
+        <div className="text-center py-20 bg-white rounded-2xl border-2 border-dashed border-slate-200 hover:border-blue-300 transition-colors group cursor-pointer" onClick={onCreateClick}>
+          <div className="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4 group-hover:bg-blue-50 transition-colors">
+            <Plus size={40} className="text-slate-300 group-hover:text-blue-500" />
+          </div>
+          <h3 className="text-xl font-bold text-slate-600 mb-2">プロジェクトがありません</h3>
+          <p className="text-slate-400 mb-6">最初の展示会プロジェクトを作成して始めましょう</p>
+          <button className="text-blue-600 font-bold hover:underline">新規作成</button>
+        </div>
+      ) : (
+        <div className={`grid gap-6 ${viewMode === 'large' ? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3' : viewMode === 'compact' ? 'grid-cols-2 md:grid-cols-3 lg:grid-cols-4' : 'grid-cols-1'}`}>
+          {sortedExhibitions.map((ex) => {
+            const visitorProgress = ex.targetVisitors > 0 ? Math.min((ex.currentVisitors / ex.targetVisitors) * 100, 100) : 0;
+            // Task Rate: Completed / Total. Mocking total tasks as length of ex.tasks (if exists) or default to some logic.
+            // Since tasks structure isn't fully visible, assuming ex.tasks is array of objects with 'status'.
+            // If ex.tasks doesn't exist, we'll use a placeholder or random logic (since this is UI refinement).
+            // Actually, let's try to be safe. If tasks undefined, show 0%.
+            const totalTasks = ex.tasks?.length || 0;
+            const completedTasks = ex.tasks?.filter(t => t.status === 'done').length || 0;
+            const taskRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+
+            const makerCount = ex.makers?.filter(m => m.status === 'confirmed')?.length || 0;
+
+            const eventDateStr = ex.dates && ex.dates.length > 0 ? ex.dates[0] : null;
+            const countdown = getDaysUntil(ex.dates);
+            const isPast = countdown?.diff < 0 && !countdown?.isPast;
+
+            if (viewMode === 'list') {
+              return (
+                <div key={ex.id} onClick={() => onCardClick(ex)} className="bg-white rounded-xl border border-slate-200 p-4 hover:shadow-md transition-all cursor-pointer flex items-center gap-4">
+                  <div className="w-16 h-16 bg-slate-200 rounded-lg overflow-hidden flex-shrink-0">
+                    {ex.imageUrl ? <img src={ex.imageUrl} className="w-full h-full object-cover" /> : <div className="flex items-center justify-center h-full text-slate-400"><Image size={24} /></div>}
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-bold text-slate-800">{ex.title}</h3>
+                    <p className="text-xs text-slate-500">{eventDateStr} @ {ex.place}</p>
+                  </div>
+                  <div className="flex gap-4 text-sm text-slate-600">
+                    <div className="text-center"><span className="block font-bold">{ex.currentVisitors || 0}</span><span className="text-xs text-slate-400">集客</span></div>
+                    <div className="text-center"><span className="block font-bold">{taskRate}%</span><span className="text-xs text-slate-400">完了率</span></div>
+                    <div className="text-center"><span className="block font-bold">{makerCount}</span><span className="text-xs text-slate-400">企業</span></div>
+                  </div>
+                  <button onClick={(e) => { e.stopPropagation(); onDeleteClick(ex.id); }} className="p-2 text-slate-400 hover:text-red-500"><Trash2 size={18} /></button>
+                </div>
+              );
+            }
+
+            return (
+              <div
+                key={ex.id}
+                onClick={() => onCardClick(ex)}
+                className={`group bg-white rounded-2xl border border-slate-200 shadow-sm hover:shadow-2xl transition-all duration-300 cursor-pointer overflow-hidden flex flex-col relative transform hover:-translate-y-1 ${ex.isPast ? 'opacity-75 grayscale' : ''}`}
+              >
+                {/* Actions & QR */}
+                <div className="absolute top-3 right-3 z-10 flex gap-2">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); /* Logic to open QR scan */ }}
+                    className="bg-white/95 backdrop-blur px-4 py-2.5 rounded-xl hover:bg-slate-800 hover:text-white text-blue-600 transition-all shadow-lg text-sm font-bold flex items-center gap-2 border border-blue-100 hover:border-slate-800 transform hover:scale-105"
+                    title="QR受付"
+                  >
+                    <ScanLine size={18} /> QR受付
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onDeleteClick(ex.id); }}
+                    className="bg-white/90 backdrop-blur p-2 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-500 transition-colors shadow-sm"
+                    title="プロジェクトを削除"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+
+                {/* Countdown Badge */}
+                {countdown && (
+                  <div className={`absolute top-3 left-3 z-10 px-3 py-1.5 rounded-lg text-xs font-bold shadow-md flex items-center gap-1 ${ex.isPast ? 'bg-slate-600 text-white' :
+                    countdown.diff <= 0 ? 'bg-red-600 text-white animate-pulse' :
+                      countdown.diff <= 7 ? 'bg-orange-500 text-white' :
+                        'bg-blue-600 text-white'
+                    }`}>
+                    <Clock size={12} />
+                    {ex.isPast ? '開催終了' : countdown.diff <= 0 ? '本日開催' : `あと${countdown.diff}日`}
+                  </div>
+                )}
+
+                {/* Cover Image with Overlay */}
+                <div className="h-48 bg-slate-200 relative overflow-hidden">
+                  {ex.imageUrl ? (
+                    <img src={ex.imageUrl} alt={ex.place} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center bg-slate-100 text-slate-300">
+                      <Image size={48} />
+                    </div>
+                  )}
+                  {/* Overlay: Venue/Prefecture Only */}
+                  <div className="absolute inset-0 bg-gradient-to-t from-slate-900/60 via-transparent to-transparent flex items-end p-4">
+                    <p className="text-white font-bold flex items-center gap-1 text-sm shadow-sm">
+                      <MapPin size={14} />
+                      {(() => {
+                        const address = ex.venueAddress || '';
+                        const prefMatch = address.match(/(.{2,3}?[都道府県])/);
+                        const prefecture = prefMatch ? prefMatch[0] : '';
+                        return prefecture ? `${prefecture}・${ex.place}` : ex.place || '会場未定';
+                      })()}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Body */}
+                <div className="p-5 flex-1 flex flex-col gap-3">
+                  {/* Title */}
+                  <h3 className="text-xl font-bold text-slate-800 leading-tight line-clamp-2 hover:text-blue-600 transition-colors">{ex.title}</h3>
+
+                  {/* Date & Tags */}
+                  <div className="flex flex-wrap items-center gap-2 mb-2">
+                    <span className="flex items-center gap-1 text-blue-600 font-bold text-sm">
+                      <Calendar size={14} /> {eventDateStr || '日程未定'}
+                    </span>
+                    {ex.preDates?.length > 0 && <span className="text-[10px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded font-bold">前日搬入あり</span>}
+                    <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded font-bold flex items-center gap-1"><Building2 size={10} /> {makerCount}社参加</span>
+                  </div>
+
+                  {/* Status Metrics */}
+                  <div className="mt-auto space-y-3 pt-3 border-t border-slate-100">
+                    {/* Visitors */}
+                    <div>
+                      <div className="flex justify-between text-xs mb-1.5 items-center">
+                        <span className="text-slate-500 font-bold flex items-center gap-1"><Users size={12} /> 集客目標</span>
+                        <span className="font-bold text-slate-700">{ex.currentVisitors || 0} / {ex.targetVisitors || 500}</span>
+                      </div>
+                      <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                        <div className="h-full bg-blue-500 rounded-full transition-all duration-1000" style={{ width: `${visitorProgress}%` }}></div>
+                      </div>
+                    </div>
+
+                    {/* Task Rate */}
+                    <div>
+                      <div className="flex justify-between text-xs mb-1.5 items-center">
+                        <span className="text-slate-500 font-bold flex items-center gap-1"><CheckSquare size={12} /> タスク完了率</span>
+                        <span className="font-bold text-slate-700">{taskRate}%</span>
+                      </div>
+                      <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                        <div className="h-full bg-emerald-500 rounded-full transition-all duration-1000" style={{ width: `${taskRate}%` }}></div>
+                      </div>
+                    </div>
+
+                    {/* Maker Participation Goal */}
+                    <div>
+                      <div className="flex justify-between text-xs mb-1.5 items-center">
+                        <span className="text-slate-500 font-bold flex items-center gap-1"><Briefcase size={12} /> 参加企業数</span>
+                        <span className="font-bold text-slate-700">{makerCount} / {ex.targetMakers || 0}</span>
+                      </div>
+                      <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                        <div className="h-full bg-indigo-500 rounded-full transition-all duration-1000" style={{ width: `${ex.targetMakers > 0 ? Math.min((makerCount / ex.targetMakers) * 100, 100) : 0}%` }}></div>
+                      </div>
+                    </div>
+                  </div>
+
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CreateExhibitionForm({ data, setData, onCancel, onSubmit }) {
+  const [tempDate, setTempDate] = useState(''); const [tempPreDate, setTempPreDate] = useState(''); const [staffName, setStaffName] = useState(''); const [isFetchingImg, setIsFetchingImg] = useState(false);
+  const [validationErrors, setValidationErrors] = useState([]);
+
+  const handleChange = (e) => setData({ ...data, [e.target.name]: e.target.value });
+  const addDate = (type) => { if (type === 'main' && tempDate) { setData({ ...data, dates: [...data.dates, tempDate].sort() }); setTempDate(''); } else if (type === 'pre' && tempPreDate) { setData({ ...data, preDates: [...data.preDates, tempPreDate].sort() }); setTempPreDate(''); } };
+  const removeDate = (type, index) => { if (type === 'main') { const newDates = [...data.dates]; newDates.splice(index, 1); setData({ ...data, dates: newDates }); } else { const newPreDates = [...data.preDates]; newPreDates.splice(index, 1); setData({ ...data, preDates: newPreDates }); } };
+  const addStaff = () => { if (!staffName.trim()) return; const currentStaff = data.staff ? data.staff.split(',').map(s => s.trim()) : []; setData({ ...data, staff: [...currentStaff, staffName].join(', ') }); setStaffName(''); };
+  const removeStaff = (name) => { const currentStaff = data.staff ? data.staff.split(',').map(s => s.trim()) : []; setData({ ...data, staff: currentStaff.filter(s => s !== name).join(', ') }); };
+
+  const MOCK_IMAGES = [
+    // Strictly Exhibition / Trade Show / Big Venue / Convention Center
+    'https://images.unsplash.com/photo-1540575467063-17e6c43d2e58?auto=format&fit=crop&w=800&q=80', // Large Exhibition Hall
+    'https://images.unsplash.com/photo-1587825140708-dfaf72ae4b04?auto=format&fit=crop&w=800&q=80', // Conference Hall
+    'https://images.unsplash.com/photo-1596524430615-b46475ddff6e?auto=format&fit=crop&w=800&q=80', // Modern Convention Center
+    'https://images.unsplash.com/photo-1519167758481-83f550bb49b3?auto=format&fit=crop&w=800&q=80', // Hall Interior
+    'https://images.unsplash.com/photo-1560520031-3a4dc4e9de0c?auto=format&fit=crop&w=800&q=80', // Trade Show Booths (Blur)
+    'https://images.unsplash.com/photo-1531058020387-3be344556be6?auto=format&fit=crop&w=800&q=80', // Corporate Event Dark
+    'https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=800&q=80', // Event Space Crowd
+    'https://images.unsplash.com/photo-1551818255-e6e10975bc17?auto=format&fit=crop&w=800&q=80', // Convention Audience
+    'https://images.unsplash.com/photo-1511578314322-379afb476865?auto=format&fit=crop&w=800&q=80', // Empty Trade Show Floor
+    'https://images.unsplash.com/photo-1475721027767-f753c9130ae4?auto=format&fit=crop&w=800&q=80', // Keynote Stage
+    'https://images.unsplash.com/photo-1505373877841-8d25f7d46678?auto=format&fit=crop&w=800&q=80', // Tech Expo
+    'https://images.unsplash.com/photo-1561489413-985b06da5bee?auto=format&fit=crop&w=800&q=80', // Exhibition Aisle
+    'https://images.unsplash.com/photo-1523580494863-6f3031224c94?auto=format&fit=crop&w=800&q=80', // Red Seats Audience
+    'https://images.unsplash.com/photo-1559223607-a43c990c364e?auto=format&fit=crop&w=800&q=80', // Panel Discussion
+    'https://images.unsplash.com/photo-1582192730841-2a682d7375f9?auto=format&fit=crop&w=800&q=80', // Conference Room Large
+    'https://images.unsplash.com/photo-1550305080-4e029753abcf?auto=format&fit=crop&w=800&q=80', // Walkway / Corridor
+    'https://images.unsplash.com/photo-1469334031218-e382a71b716b?auto=format&fit=crop&w=800&q=80', // Fashion Runway/Expo
+    'https://images.unsplash.com/photo-1560439514-e960a3ef5019?auto=format&fit=crop&w=800&q=80', // Business Meeting Hall
+    'https://images.unsplash.com/photo-1577962917302-cd874c4e31d2?auto=format&fit=crop&w=800&q=80', // Networking Event
+    'https://images.unsplash.com/photo-1596704017254-9b121068fb29?auto=format&fit=crop&w=800&q=80', // Empty Hall Light
+    'https://images.unsplash.com/photo-1544531861-c0aaec1d5758?auto=format&fit=crop&w=800&q=80', // Seminar Side View
+    'https://images.unsplash.com/photo-1528605248644-14dd04022da1?auto=format&fit=crop&w=800&q=80', // Showroom
+    'https://images.unsplash.com/photo-1570126618953-d437176e8c79?auto=format&fit=crop&w=800&q=80', // Corporate Venue
+    'https://images.unsplash.com/photo-1517457373958-b7bdd4587205?auto=format&fit=crop&w=800&q=80', // Event Space Setup
+    'https://images.unsplash.com/photo-1491438590914-bc09fcaaf77a?auto=format&fit=crop&w=800&q=80', // People Networking
+    'https://images.unsplash.com/photo-1505932794465-14a51f20c268?auto=format&fit=crop&w=800&q=80', // Modern Office/Lobby
+    'https://images.unsplash.com/photo-1556761175-b413da4baf72?auto=format&fit=crop&w=800&q=80', // Co-working Hall
+    'https://images.unsplash.com/photo-1563986768609-322da13575f3?auto=format&fit=crop&w=800&q=80', // Digital Signage
+    'https://images.unsplash.com/photo-1517048676732-d65bc937f952?auto=format&fit=crop&w=800&q=80', // Conference Room Board
+    'https://images.unsplash.com/photo-1557804506-669a67965ba0?auto=format&fit=crop&w=800&q=80', // Strategy Meeting
+    'https://images.unsplash.com/photo-1551288049-bebda4e38f71?auto=format&fit=crop&w=800&q=80', // Data Analytics Screen
+    'https://images.unsplash.com/photo-1628348070889-cb656235b4eb?auto=format&fit=crop&w=800&q=80', // Reception Desk
+    'https://images.unsplash.com/photo-1533750516457-a7f992034fec?auto=format&fit=crop&w=800&q=80', // Registration Area
+    'https://images.unsplash.com/photo-1574633069187-1033411b9b6e?auto=format&fit=crop&w=800&q=80', // Sketching Event
+    'https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=800&q=80', // Corporate Building
+    'https://images.unsplash.com/photo-1501386761578-eac5c94b800a?auto=format&fit=crop&w=800&q=80', // Concert/Crowd
+    'https://images.unsplash.com/photo-1555848962-6e79363ec58f?auto=format&fit=crop&w=800&q=80', // Modern Architecture
+    'https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=800&q=80', // Technology Chip/Abstract
+    'https://images.unsplash.com/photo-1563986768494-4dee74395a1e?auto=format&fit=crop&w=800&q=80', // ID Badge
+    'https://images.unsplash.com/photo-1591115765373-5207764f72e7?auto=format&fit=crop&w=800&q=80', // Long Corridor
+    'https://images.unsplash.com/photo-1497366754035-f200968a6e72?auto=format&fit=crop&w=800&q=80', // Office Interior
+    'https://images.unsplash.com/photo-1565514020176-dbf2277f0c3e?auto=format&fit=crop&w=800&q=80', // Abstract Mesh
+    'https://images.unsplash.com/photo-1549923746-c502d488b3ea?auto=format&fit=crop&w=800&q=80', // Conference Chairs
+    'https://images.unsplash.com/photo-1516321497487-e288fb19713f?auto=format&fit=crop&w=800&q=80', // Online Conference
+    'https://images.unsplash.com/photo-1558403194-611308249627?auto=format&fit=crop&w=800&q=80', // Team Room
+    'https://images.unsplash.com/photo-1507537297725-24a1c029d3ca?auto=format&fit=crop&w=800&q=80', // Spotlight
+    'https://images.unsplash.com/photo-1510074377623-8cf13fb86c08?auto=format&fit=crop&w=800&q=80', // Gold Light Abstract
+    'https://images.unsplash.com/photo-1525909002-1b05e0c869d8?auto=format&fit=crop&w=800&q=80', // Colorful Booths
+    'https://images.unsplash.com/photo-1558591710-4b4a1ae0f04d?auto=format&fit=crop&w=800&q=80', // Discussion Table
+    'https://images.unsplash.com/photo-1531482615713-2afd69097998?auto=format&fit=crop&w=800&q=80'  // Black Background People
+  ];
+  const simulateFetchImage = () => { if (!data.venueUrl) return; setIsFetchingImg(true); setTimeout(() => { const random = MOCK_IMAGES[Math.floor(Math.random() * MOCK_IMAGES.length)]; setData({ ...data, imageUrl: random }); setIsFetchingImg(false); }, 1000); };
+
+  // Validation function
+  const validateAndSubmit = () => {
+    const errors = [];
+    if (!data.title.trim()) errors.push('展示会タイトルは必須です');
+    if (!data.dates || data.dates.length === 0) errors.push('開催日を1日以上追加してください');
+    if (!data.targetVisitors || data.targetVisitors <= 0) errors.push('集客目標を入力してください');
+    if (!data.targetMakers || data.targetMakers <= 0) errors.push('招致メーカー目標を入力してください');
+    if (!data.targetProfit || data.targetProfit <= 0) errors.push('目標利益額を入力してください');
+    if (!data.staff || data.staff.split(',').filter(s => s.trim()).length === 0) errors.push('運営スタッフを1人以上追加してください');
+
+    if (errors.length > 0) {
+      setValidationErrors(errors);
+      return;
+    }
+    setValidationErrors([]);
+    onSubmit();
+  };
+
+  const RequiredLabel = ({ children }) => (
+    <label className="block text-sm font-medium text-slate-600 mb-1">
+      {children} <span className="text-red-500">*</span>
+    </label>
+  );
+
+  return (
+    <div className="max-w-4xl mx-auto bg-white rounded-2xl shadow-xl border border-slate-100 overflow-hidden animate-slide-up">
+      <div className="bg-slate-900 p-8 text-white flex justify-between items-center"><div><h2 className="text-2xl font-bold">New Exhibition Project</h2><p className="text-slate-400">新しい展示会プロジェクトを立ち上げます</p></div><button onClick={onCancel} className="p-2 hover:bg-slate-800 rounded-full"><X size={24} /></button></div>
+      <div className="p-8 space-y-8 h-[70vh] overflow-y-auto">
+        {validationErrors.length > 0 && (
+          <div className="bg-red-50 border border-red-200 p-4 rounded-lg">
+            <p className="text-red-700 font-bold text-sm mb-2">以下の項目を確認してください：</p>
+            <ul className="text-red-600 text-sm list-disc list-inside">
+              {validationErrors.map((err, i) => <li key={i}>{err}</li>)}
+            </ul>
+          </div>
+        )}
+
+        <section><h3 className="text-lg font-bold text-slate-800 border-b pb-2 mb-4 flex items-center gap-2"><FileText className="text-blue-600" /> 基本情報</h3><div className="grid grid-cols-1 md:grid-cols-2 gap-6"><div className="col-span-2"><RequiredLabel>展示会タイトル</RequiredLabel><input type="text" name="title" value={data.title} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="例：2026 未来技術展" /></div><div><RequiredLabel>開催日 (複数可)</RequiredLabel><div className="flex gap-2 mb-2"><input type="date" value={tempDate} onChange={e => setTempDate(e.target.value)} className="flex-1 p-2 border border-slate-200 rounded-lg" /><button onClick={() => addDate('main')} className="bg-blue-100 text-blue-600 p-2 rounded-lg hover:bg-blue-200"><Plus size={20} /></button></div><div className="flex flex-wrap gap-2">{data.dates.map((d, i) => (<span key={i} className="bg-blue-50 text-blue-700 px-2 py-1 rounded text-sm flex items-center gap-1">{d} <button onClick={() => removeDate('main', i)}><X size={12} /></button></span>))}</div></div><div><label className="block text-sm font-medium text-slate-600 mb-1">事前準備日 (複数可)</label><div className="flex gap-2 mb-2"><input type="date" value={tempPreDate} onChange={e => setTempPreDate(e.target.value)} className="flex-1 p-2 border border-slate-200 rounded-lg" /><button onClick={() => addDate('pre')} className="bg-amber-100 text-amber-600 p-2 rounded-lg hover:bg-amber-200"><Plus size={20} /></button></div><div className="flex flex-wrap gap-2">{data.preDates.map((d, i) => (<span key={i} className="bg-amber-50 text-amber-700 px-2 py-1 rounded text-sm flex items-center gap-1">{d} <button onClick={() => removeDate('pre', i)}><X size={12} /></button></span>))}</div></div></div></section>
+
+        <section><h3 className="text-lg font-bold text-slate-800 border-b pb-2 mb-4 flex items-center gap-2"><MapPin className="text-blue-600" /> エリア・会場・Web</h3><div className="grid grid-cols-1 md:grid-cols-2 gap-6"><div><label className="block text-sm font-medium text-slate-600 mb-1">エリア選択</label><select name="prefecture" value={data.prefecture} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg bg-white"><option value="">都道府県を選択...</option>{PREFECTURES.map(group => (<optgroup key={group.region} label={group.region}>{group.prefs.map(p => <option key={p} value={p}>{p}</option>)}</optgroup>))}</select></div><div><label className="block text-sm font-medium text-slate-600 mb-1">会場名（予定）</label><input type="text" name="place" value={data.place} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" placeholder="例：福岡国際センター" /></div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1">会場住所</label><input type="text" name="venueAddress" value={data.venueAddress} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" placeholder="例：福岡県福岡市博多区石城町２−１" /></div><div><label className="block text-sm font-medium text-slate-600 mb-1">開場時間</label><input type="time" name="openTime" value={data.openTime} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" /></div><div><label className="block text-sm font-medium text-slate-600 mb-1">閉場時間</label><input type="time" name="closeTime" value={data.closeTime} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" /></div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1">展示会場URL</label><div className="flex gap-2"><input type="text" name="venueUrl" value={data.venueUrl} onChange={handleChange} className="flex-1 p-3 border border-slate-200 rounded-lg" placeholder="https://..." /><button onClick={simulateFetchImage} disabled={!data.venueUrl || isFetchingImg} className="bg-slate-800 text-white px-4 rounded-lg text-sm font-bold hover:bg-slate-700 disabled:opacity-50 flex items-center gap-2 whitespace-nowrap">{isFetchingImg ? <RefreshCw className="animate-spin" size={16} /> : <LinkIcon size={16} />} 画像を取得</button></div>{data.imageUrl && (<div className="mt-2 p-2 border border-slate-200 rounded-lg bg-slate-50 flex items-center gap-4"><img src={data.imageUrl} alt="Preview" className="w-20 h-14 object-cover rounded" /><span className="text-xs text-green-600 font-bold">✓ 画像を取得しました</span></div>)}</div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1 flex items-center gap-2"><Map size={16} /> GoogleマップURL</label><input type="text" name="googleMapsUrl" value={data.googleMapsUrl || ''} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" placeholder="https://maps.google.com/..." /></div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1">コンセプト</label><textarea name="concept" value={data.concept} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" rows="3" placeholder="展示会のテーマや狙いを記入" /></div></div></section>
+
+        <section><h3 className="text-lg font-bold text-slate-800 border-b pb-2 mb-4 flex items-center gap-2"><Target className="text-blue-600" /> 目標設定・チーム</h3><div className="grid grid-cols-1 md:grid-cols-3 gap-6"><div><RequiredLabel>集客目標 (人)</RequiredLabel><input type="number" name="targetVisitors" value={data.targetVisitors} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" /></div><div><RequiredLabel>招致メーカー目標 (社)</RequiredLabel><input type="number" name="targetMakers" value={data.targetMakers} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" /></div><div><RequiredLabel>目標利益額 (円)</RequiredLabel><input type="number" name="targetProfit" value={data.targetProfit} onChange={handleChange} className="w-full p-3 border border-blue-300 bg-blue-50 rounded-lg font-bold text-blue-800" placeholder="1000000" /></div><div className="col-span-1 md:col-span-3"><RequiredLabel>運営スタッフ</RequiredLabel><div className="flex gap-2 mb-2"><input type="text" value={staffName} onChange={e => setStaffName(e.target.value)} className="flex-1 p-3 border border-slate-200 rounded-lg" placeholder="スタッフ名" /><button onClick={addStaff} className="bg-slate-800 text-white px-4 rounded-lg"><Plus /></button></div><div className="flex flex-wrap gap-2">{data.staff && data.staff.split(',').filter(s => s).map((s, i) => (<span key={i} className="bg-slate-100 text-slate-700 px-3 py-1 rounded-full flex items-center gap-2 text-sm">{s.trim()} <button onClick={() => removeStaff(s.trim())}><X size={14} /></button></span>))}</div></div></div></section>
+
+        <div className="bg-blue-50 p-4 rounded-lg border border-blue-200 text-sm text-blue-800 flex items-start gap-2"><Info size={16} className="mt-0.5 shrink-0" /><p>固定メーカーリストが招待リストに自動反映されます。</p></div>
+        <div className="flex justify-end gap-4 pt-4 border-t"><button onClick={onCancel} className="px-6 py-3 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">キャンセル</button><button onClick={validateAndSubmit} className="px-8 py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-lg shadow-blue-500/30 transition-all">プロジェクト作成</button></div>
+      </div>
+    </div>
+  );
+}
+
+
+
+function ExhibitionDetail({ exhibition, onBack, updateVisitorCount, updateExhibitionData, batchUpdateExhibitionData, masterMakers, initialTab, onTabChange }) {
+  const [activeTab, setActiveTab] = useState(initialTab || 'main');
+  const [entranceMode, setEntranceMode] = useState('dashboard'); // QRスキャナーモード制御用
+
+  const setVenueDetails = (d) => updateExhibitionData(exhibition.id, 'venueDetails', d);
+  const setMakers = (m) => updateExhibitionData(exhibition.id, 'makers', m);
+  const setVisitors = (v) => updateExhibitionData(exhibition.id, 'visitors', v);
+  const setTasks = (t) => updateExhibitionData(exhibition.id, 'tasks', t);
+  const updateMainData = (k, v) => updateExhibitionData(exhibition.id, k, v);
+  const updateMainDataBatch = (updates) => batchUpdateExhibitionData(exhibition.id, updates);
+
+
+  // QRスキャナーを直接開くハンドラ
+  const openScanner = () => {
+    setActiveTab('entrance');
+    setEntranceMode('scanner');
+  };
+
+  // Sync prop changes for tab persistence
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [initialTab]);
+
+  const handleTabChange = (tabId) => {
+    setActiveTab(tabId);
+    if (onTabChange) onTabChange(tabId);
+    if (tabId !== 'entrance') setEntranceMode('dashboard');
+  };
+
+  const ALL_TAB_DEFINITIONS = [
+    { id: 'main', label: '基本情報', icon: Ghost },
+    { id: 'schedule', label: 'スケジュール', icon: Calendar },
+    { id: 'equipment', label: '会場・備品', icon: Box },
+    { id: 'makers', label: '招待メーカー', icon: Building2 },
+    { id: 'tasks', label: 'タスク管理', icon: CheckSquare },
+    { id: 'budget', label: '収支・予算', icon: DollarSign },
+    { id: 'entrance', label: '来場者管理', icon: Users },
+    { id: 'lectures', label: '講演会', icon: Mic },
+    { id: 'files', label: '資料', icon: Folder },
+  ];
+
+  return (
+    <div className="space-y-6 animate-fade-in">
+      <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+        <div>
+          <button onClick={onBack} className="text-slate-400 hover:text-blue-600 flex items-center gap-1 mb-2 text-sm">
+            <ArrowLeft size={16} /> ダッシュボードに戻る
+          </button>
+          <div className="flex items-center gap-4 flex-wrap">
+            {/* 開催日表示 */}
+            <div className="flex flex-col items-start gap-1">
+              {exhibition.dates && exhibition.dates.length > 0 && (
+                <span className="bg-blue-100 text-blue-700 px-3 py-1 rounded-lg font-bold text-sm flex items-center gap-2">
+                  <Calendar size={14} /> {exhibition.dates[0]}
+                  {exhibition.dates.length > 1 && <span className="text-blue-500">(+{exhibition.dates.length - 1}日)</span>}
+                </span>
+              )}
+              {exhibition.preDates && exhibition.preDates.length > 0 && (
+                <span className="bg-amber-100 text-amber-700 px-3 py-1 rounded-lg font-bold text-sm flex items-center gap-2">
+                  <Truck size={14} /> 前日搬入あり
+                </span>
+              )}
+            </div>
+            <h1 className="text-3xl font-bold text-slate-800">{exhibition.title}</h1>
+            {/* プロジェクトタイトル横のQRスキャンボタン */}
+            <button
+              onClick={openScanner}
+              className="bg-blue-600 hover:bg-blue-700 text-white p-2 rounded-full shadow-lg flex items-center justify-center transition-transform hover:scale-110 active:scale-95"
+              title="QRスキャナーを起動"
+            >
+              <ScanLine size={20} />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex overflow-x-auto gap-2 border-b border-slate-200 pb-1 scrollbar-hide">
+        {ALL_TAB_DEFINITIONS.map(tab => (
+          <button key={tab.id} onClick={() => handleTabChange(tab.id)} className={`flex items-center gap-2 px-4 py-3 rounded-t-lg font-medium transition-all whitespace-nowrap ${activeTab === tab.id ? 'bg-white text-blue-600 border-b-2 border-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-800 hover:bg-white/50'}`}><tab.icon size={18} /> {tab.label}</button>
+        ))}
+      </div>
+
+      <div className="bg-white rounded-xl shadow-sm border border-slate-100 min-h-[500px]">
+        {activeTab === 'main' && <TabMainBoard exhibition={exhibition} updateMainData={updateMainData} updateBatch={updateMainDataBatch} tasks={exhibition.tasks || []} onNavigate={handleTabChange} />}
+        {activeTab === 'schedule' && <TabSchedule scheduleData={exhibition.schedule} updateMainData={updateMainData} staff={exhibition.staff || ''} dates={exhibition.dates || []} preDates={exhibition.preDates || []} />}
+        {activeTab === 'equipment' && <TabEquipment exhibition={exhibition} details={exhibition.venueDetails || {}} setDetails={setVenueDetails} />}
+        {activeTab === 'makers' && <TabMakers exhibition={exhibition} setMakers={setMakers} updateMainData={updateMainData} masterMakers={masterMakers} />}
+        {activeTab === 'tasks' && <TabTasks tasks={exhibition.tasks || []} setTasks={setTasks} staff={exhibition.staff || ''} />}
+        {activeTab === 'budget' && <TabBudget exhibition={exhibition} updateMainData={updateMainData} />}
+        {activeTab === 'entrance' && <TabEntrance exhibition={exhibition} updateVisitorCount={updateVisitorCount} visitors={exhibition.visitors || []} setVisitors={setVisitors} updateMainData={updateMainData} initialMode={entranceMode} />}
+        {activeTab === 'lectures' && <TabLectures lectures={exhibition.lectures || []} updateMainData={updateMainData} staff={exhibition.staff || ''} />}
+        {activeTab === 'files' && <TabFiles />}
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [view, setView] = useState('loading');
+  const [exhibitions, setExhibitions] = useState([]);
+  const [selectedExhibition, setSelectedExhibition] = useState(null);
+  const [newExhibition, setNewExhibition] = useState({ title: '', dates: [], preDates: [], place: '', prefecture: '', venueAddress: '', openTime: '10:00', closeTime: '17:00', concept: '', targetVisitors: 0, targetMakers: 0, targetProfit: 0, venueUrl: '', googleMapsUrl: '', imageUrl: '', staff: '' });
+  const [exhibitionTabs, setExhibitionTabs] = useState({}); // { [exhibitionId]: 'activeTabName' }
+
+  const [masterMakers, setMasterMakers] = useState(() => {
+    const saved = localStorage.getItem('kaientai_master_makers');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  useEffect(() => {
+    if (masterMakers.length === 0) {
+      // Initial Mock Data if nothing in storage
+      const initialData = [
+        { id: '1', name: '株式会社ケアマックス', code: 'C001', category: '食品', portalUrl: 'https://kaientai-x/portal/C001' },
+        { id: '2', name: 'テックソリューションズ', code: 'T002', category: 'IoT', portalUrl: 'https://kaientai-x/portal/T002' },
+      ];
+      setMasterMakers(initialData);
+    }
+  }, []);
+
+  // Persist changes
+  useEffect(() => {
+    if (masterMakers.length > 0) {
+      localStorage.setItem('kaientai_master_makers', JSON.stringify(masterMakers));
+    }
+  }, [masterMakers]);
+
+
+  const [user, setUser] = useState(null);
+  const [db, setDb] = useState(null);
+  const [appId, setAppId] = useState(null);
+  const [urlMode, setUrlMode] = useState('dashboard');
+  const [targetExhibitionId, setTargetExhibitionId] = useState(null);
+  const [dashboardMaker, setDashboardMaker] = useState(null);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+  // Login State
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    return localStorage.getItem('exhibition_auth') === 'true';
+  });
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+
+  const PASSCODE = 'kuwanatakashi';
+
+  const handleLogin = () => {
+    if (loginPassword === PASSCODE) {
+      localStorage.setItem('exhibition_auth', 'true');
+      setIsAuthenticated(true);
+      setLoginError('');
+    } else {
+      setLoginError('パスワードが正しくありません');
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('exhibition_auth');
+    setIsAuthenticated(false);
+  };
+
+  useEffect(() => {
+    const init = async () => {
+      // ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+      // ここにあなたの Firebase Config を貼り付けてください
+      const firebaseConfig = {
+        apiKey: "AIzaSyDsIpXihZp7hQE2yeNcGxgPH-2iU-Obt-s",
+        authDomain: "exhibition-app-891e0.firebaseapp.com",
+        projectId: "exhibition-app-891e0",
+        storageBucket: "exhibition-app-891e0.firebasestorage.app",
+        messagingSenderId: "374193547856",
+        appId: "1:374193547856:web:1e71260bfe402d626cbf55"
+      };
+      // ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
+      try {
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const firestore = getFirestore(app);
+        setAppId('default-app');
+        setDb(firestore);
+        await signInAnonymously(auth);
+        onAuthStateChanged(auth, (u) => setUser(u));
+      } catch (e) {
+        console.error("Firebase init failed:", e);
+      }
+    };
+    init();
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const mode = params.get('mode');
+    const id = params.get('id');
+    const code = params.get('code');
+
+    if (mode === 'demo_portal' && code) {
+      setUrlMode(mode);
+      // No targetExhibitionId needed for demo
+    } else if (mode && id) {
+      setUrlMode(mode);
+      setTargetExhibitionId(id);
+    } else {
+      setUrlMode('dashboard');
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!user || !db || !appId) return;
+    const exRef = collection(db, 'artifacts', appId, 'public', 'data', 'exhibitions');
+    const unsubscribe = onSnapshot(exRef, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      data.sort((a, b) => b.createdAt - a.createdAt);
+      setExhibitions(data);
+
+      // ★追加: 選択中の展示会データもリアルタイム更新する
+      if (selectedExhibition) {
+        const latest = data.find(e => e.id === selectedExhibition.id);
+        if (latest) {
+          // JSON.stringifyで比較して変更がある場合のみ更新（ループ防止）
+          if (JSON.stringify(latest) !== JSON.stringify(selectedExhibition)) {
+            console.log('[DEBUG] Syncing selectedExhibition from server snapshot');
+            setSelectedExhibition(latest);
+          }
+        }
+      }
+
+      if (urlMode === 'visitor_register' && targetExhibitionId) {
+        const target = data.find(e => e.id === targetExhibitionId);
+        if (target) { setSelectedExhibition(target); setView('public_visitor_form'); }
+        else { setView('not_found'); }
+      } else if (urlMode === 'maker_register' && targetExhibitionId) {
+        const target = data.find(e => e.id === targetExhibitionId);
+        if (target) { setSelectedExhibition(target); setView('public_maker_form'); }
+        else { setView('not_found'); }
+      } else if (urlMode === 'dashboard') { // Maker Dashboard Logic
+        const params = new URLSearchParams(window.location.search);
+        const key = params.get('key');
+        if (key && targetExhibitionId) {
+          const target = data.find(e => e.id === targetExhibitionId);
+          if (target) {
+            const maker = (target.makers || []).find(m => m.accessToken === key);
+            if (maker) {
+              setSelectedExhibition(target);
+              setDashboardMaker(maker);
+              setView('maker_dashboard');
+            } else {
+              setView('not_found'); // Invalid Token
+            }
+          } else {
+            setView('not_found');
+          }
+        } else {
+          setView(prev => prev === 'loading' ? 'dashboard' : prev); // Login functionality?
+        }
+      } else if (urlMode === 'demo_portal') {
+        // ★追加: デモポータル機能 (Enterprise Consoleからのプレビュー用)
+        const params = new URLSearchParams(window.location.search);
+        const code = params.get('code');
+        const maker = masterMakers.find(m => m.code === code);
+
+        if (maker) {
+          setDashboardMaker(maker);
+          // デモ用のダミー展示会データ
+          setSelectedExhibition({
+            title: 'Kaientai-X Demo Exhibition',
+            id: 'demo',
+            scanLogs: [],
+            dates: ['2026-10-01', '2026-10-02'],
+            venueAddress: 'Demo Venue'
+          });
+          setView('maker_dashboard');
+        } else {
+          // If not found, check if we should still be loading or give up
+          // Since masterMakers is local state (persisted), it should be available almost immediately or after the initial effect.
+          // If we have some makers but not the one we want: Not Found.
+          if (masterMakers.length > 0) {
+            console.log('Maker not found in master list:', code);
+            setView('not_found');
+          }
+          // If masterMakers is empty, we might be in the very first render before the effect populates it.
+          // However, blocking 'loading' forever is bad.
+          // Let's add a fallback timeout or just show not_found if it takes too long? 
+          // Better: The persistence initialization happens synchronously in useState lazy initializer now! 
+          // So if it's not there now, it's not there.
+          // BUT allow 1 render cycle for the useEffect mock data population if storage was empty.
+          if (masterMakers.length === 0) {
+            // Wait for effect?
+          }
+        }
+      } else {
+        setView(prev => prev === 'loading' ? 'dashboard' : prev);
+      }
+    });
+    return () => unsubscribe();
+  }, [user, db, appId, urlMode, targetExhibitionId, selectedExhibition, masterMakers]); // masterMakersを追加
+
+  const handleCreate = async () => {
+    if (!user || !db) return;
+    const id = crypto.randomUUID();
+    const finalImg = newExhibition.imageUrl || 'https://images.unsplash.com/photo-1540575467063-178a50c2df87?auto=format&fit=crop&w=800&q=80';
+    const baseUrl = window.location.origin + window.location.pathname;
+    const formUrlMaker = `${baseUrl}?mode=maker_register&id=${id}`;
+    const formUrlVisitor = `${baseUrl}?mode=visitor_register&id=${id}`;
+
+    // メーカー初期リストは空配列を使用（CSV取込前提）
+    const newProject = {
+      ...newExhibition, id, createdAt: Date.now(), currentVisitors: 0, imageUrl: finalImg,
+      makers: [], visitors: [], venueDetails: { cost: 0, equipment: [], notes: '', internalSupplies: INITIAL_INTERNAL_SUPPLIES },
+      otherBudgets: [], tasks: INITIAL_TASKS, formUrlMaker, formUrlVisitor,
+      formConfig: DEFAULT_FORM_CONFIG, visitorFormConfig: DEFAULT_VISITOR_FORM_CONFIG, hotels: [], schedule: { dayBefore: [], eventDay: [] }
+    };
+    try {
+      console.log('[DEBUG] Creating new project:', newProject);
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'exhibitions', id), newProject);
+      console.log('[DEBUG] Creation success');
+      setView('dashboard');
+      setNewExhibition({ title: '', dates: [], preDates: [], place: '', prefecture: '', venueAddress: '', openTime: '10:00', closeTime: '17:00', concept: '', targetVisitors: 0, targetMakers: 0, targetProfit: 0, venueUrl: '', imageUrl: '', staff: '' });
+
+    } catch (e) {
+      console.error('[DEBUG] Creation error:', e);
+      alert('作成エラー: ' + e.message);
+    }
+  };
+
+  const deleteExhibition = async (id) => { if (window.confirm("削除しますか？")) { await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'exhibitions', id)); if (selectedExhibition?.id === id) setView('dashboard'); } };
+  const updateExhibitionData = async (id, key, value) => {
+    try {
+      console.log(`[DEBUG] Updating single key: ${key}`, value);
+      const exRef = doc(db, 'artifacts', appId, 'public', 'data', 'exhibitions', id);
+      if (selectedExhibition?.id === id) setSelectedExhibition(prev => ({ ...prev, [key]: value }));
+      await updateDoc(exRef, { [key]: value });
+      console.log(`[DEBUG] Successfully updated ${key}`);
+    } catch (e) {
+      console.error(`[DEBUG] Error updating ${key}:`, e);
+      alert(`保存エラー (${key}): ` + e.message);
+    }
+  };
+  const batchUpdateExhibitionData = async (id, updates) => {
+    try {
+      console.log('[DEBUG] Batch updating exhibition:', updates);
+      // 特別に日付データをチェック
+      if (updates.dates) console.log('[DEBUG] Dates to save:', updates.dates);
+      if (updates.preDates) console.log('[DEBUG] PreDates to save:', updates.preDates);
+
+      const exRef = doc(db, 'artifacts', appId, 'public', 'data', 'exhibitions', id);
+      if (selectedExhibition?.id === id) setSelectedExhibition(prev => ({ ...prev, ...updates }));
+      await updateDoc(exRef, updates);
+      console.log('[DEBUG] Batch update success');
+      console.log('Batch update success');
+    } catch (e) {
+      console.error('[DEBUG] Batch update error:', e);
+      alert('一括保存エラー: ' + e.message);
+    }
+  };
+  const updateVisitorCount = async (id, n) => { updateExhibitionData(id, 'currentVisitors', n); };
+  const handlePublicSubmit = async (type, data) => {
+    if (!selectedExhibition) return;
+    const current = selectedExhibition;
+
+    // ... (rest of handlePublicSubmit)
+
+    let updates = {};
+    let finalStatus;
+    if (type === 'visitor') {
+      const newVisitor = { id: data.id || crypto.randomUUID(), ...data, status: 'registered', registeredAt: Date.now() };
+      updates = { visitors: [...(current.visitors || []), newVisitor] };
+    } else if (type === 'maker') {
+      // デバッグログ
+      console.log('[DEBUG] handlePublicSubmit - Received data:', data);
+      console.log('[DEBUG] handlePublicSubmit - data.status:', data.status);
+
+      // ステータス判定を厳密に行う
+      const isConfirmed = data.status === 'confirmed' ||
+        data.status === '出展を申し込む' ||
+        data.status === 'Confirmed' ||
+        (data.status && data.status.includes('申し込む'));
+      finalStatus = isConfirmed ? 'confirmed' : 'declined';
+
+      console.log('[DEBUG] handlePublicSubmit - isConfirmed:', isConfirmed, '-> finalStatus:', finalStatus);
+
+      // 既存のメーカーリストから会社名またはメールで検索
+      const existingMakers = current.makers || [];
+      const existingIndex = existingMakers.findIndex(m =>
+        (m.companyName && m.companyName === data.companyName) ||
+        (m.email && m.email === data.email)
+      );
+
+      if (existingIndex >= 0) {
+        // 既存メーカーを更新（招待リストにいる場合）
+        const updatedMakers = [...existingMakers];
+        updatedMakers[existingIndex] = {
+          ...updatedMakers[existingIndex],
+          ...data,
+          status: finalStatus,
+          respondedAt: Date.now()
+        };
+        updates = { makers: updatedMakers };
+      } else {
+        // 新規回答者（招待リストにはいなかった）- 回答者としてのみ追加
+        const newMaker = {
+          id: crypto.randomUUID(),
+          ...data,
+          code: 'WEB-' + Date.now().toString().slice(-4),
+          status: finalStatus,
+          source: 'web_response', // 招待リストからではなくWeb回答
+          respondedAt: Date.now()
+        };
+        updates = { makers: [...existingMakers, newMaker] };
+      }
+    }
+
+    try {
+      await updateExhibitionData(current.id, Object.keys(updates)[0], Object.values(updates)[0]);
+      if (type === 'maker') {
+        // Return objects for QR display
+        const updatedMakers = updates.makers;
+        const ourMaker = updatedMakers[updatedMakers.length - 1]; // Assume last if new, or find
+        // Simplified: just return the data + computed status
+        return ourMaker;
+      }
+      return true;
+    } catch (e) { alert("送信エラー: " + e.message); return false; }
+  };
+
+  const handleVisitorScan = async (code) => {
+    if (!selectedExhibition || !dashboardMaker) return { success: false, type: 'error', message: 'System error: Missing context' };
+    const current = selectedExhibition;
+
+    console.log('[DEBUG] handleVisitorScan code:', code);
+
+    // 1. Find Visitor (Handle JSON or Raw ID)
+    let searchId = code;
+    try {
+      const parsed = JSON.parse(code);
+      if (parsed && parsed.id) {
+        searchId = parsed.id;
+      }
+    } catch (e) {
+      // Not JSON, use as is
+    }
+
+    const visitor = (current.visitors || []).find(v => v.id === searchId);
+    if (!visitor) {
+      return { success: false, type: 'error', message: '未登録の来場者QRコードです' };
+    }
+
+    // 2. Check Duplicates
+    const alreadyScanned = (current.scanLogs || []).some(log =>
+      log.makerId === (dashboardMaker.id || dashboardMaker.code) &&
+      log.visitorId === visitor.id
+    );
+
+    if (alreadyScanned) {
+      return { success: false, type: 'warning', message: `${visitor.repName} 様は既にスキャン済みです`, visitor };
+    }
+
+    // 3. Create Scan Log (Save ALL visitor data)
+    const newLog = {
+      id: crypto.randomUUID(),
+      makerId: dashboardMaker.id || dashboardMaker.code,
+      visitorId: visitor.id,
+      scannedAt: Date.now(),
+      visitorSnapshot: { ...visitor } // Save ALL visitor data
+    };
+
+    // 4. Update DB (Fire-and-forget for faster UI response)
+    const currentLogs = current.scanLogs || [];
+    const updatedLogs = [...currentLogs, newLog];
+    updateExhibitionData(current.id, 'scanLogs', updatedLogs).catch(err => {
+      console.error('Failed to save scan log:', err);
+    });
+    console.log('Scan logged (async):', newLog);
+
+    return { success: true, type: 'success', message: 'スキャン完了', visitor };
+  };
+
+
+
+
+  // Scroll Preservation Logic
+  const mainRef = useRef(null);
+  const scrollPositions = useRef({}); // Store scroll positions for each view
+
+  const navigateTo = (nextView) => {
+    if (mainRef.current) {
+      // Save current view's scroll position
+      scrollPositions.current[view] = mainRef.current.scrollTop;
+    }
+    setView(nextView);
+  };
+
+  useLayoutEffect(() => {
+    if (mainRef.current) {
+      // Restore scroll position for the new view (default to 0)
+      const savedPos = scrollPositions.current[view] || 0;
+      mainRef.current.scrollTop = savedPos;
+    }
+  }, [view]);
+
+  if (view === 'loading') return <div className="min-h-screen flex items-center justify-center bg-slate-50"><div className="text-center"><Loader className="animate-spin text-blue-600 mb-2 mx-auto" size={40} /><p className="text-slate-500 font-bold">Connecting to Database...</p></div></div>;
+  if (view === 'not_found') return <div className="min-h-screen flex items-center justify-center bg-slate-50 text-slate-500">プロジェクトが見つかりません。URLを確認してください。</div>;
+  if (view === 'public_visitor_form') return <PublicVisitorView exhibition={selectedExhibition} onSubmit={(d) => handlePublicSubmit('visitor', d)} />;
+  if (view === 'public_maker_form') return <PublicMakerView exhibition={selectedExhibition} onSubmit={(d) => handlePublicSubmit('maker', d)} />;
+  if (view === 'maker_dashboard' && selectedExhibition && dashboardMaker) {
+    return <MakerDashboard maker={dashboardMaker} exhibitionName={selectedExhibition.title} scanLogs={selectedExhibition.scanLogs} onScan={handleVisitorScan} />;
+  }
+
+  // Login Screen
+  if (!isAuthenticated && view !== 'public_visitor_form' && view !== 'public_maker_form' && view !== 'maker_dashboard') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md">
+          <div className="text-center mb-8">
+            <div className="inline-flex items-center gap-2 bg-slate-900 text-white px-4 py-2 rounded-full mb-4">
+              <Ghost className="text-red-500" size={24} />
+              <span className="font-bold text-lg">Kaientai-X</span>
+            </div>
+            <h2 className="text-2xl font-bold text-slate-800">ログイン</h2>
+            <p className="text-slate-500 text-sm mt-2">パスワードを入力してください</p>
+          </div>
+
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-bold text-slate-700 mb-2">パスワード</label>
+              <input
+                type="password"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+                className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                placeholder="パスワードを入力"
+              />
+            </div>
+
+            {loginError && (
+              <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-2 rounded-lg text-sm">
+                {loginError}
+              </div>
+            )}
+
+            <button
+              onClick={handleLogin}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition-colors shadow-lg"
+            >
+              ログイン
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans flex flex-col md:flex-row">
+      <div className="md:hidden bg-slate-900 text-white p-4 flex justify-between items-center sticky top-0 z-50">
+        <h1 className="text-lg font-bold flex items-center gap-2"><Ghost className="text-red-500" size={20} /> Kaientai-X</h1>
+        <button onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}><Menu size={24} /></button>
+      </div>
+
+      <aside className={`fixed inset-y-0 left-0 z-40 w-64 bg-slate-900 text-white transform transition-transform duration-300 ease-in-out md:relative md:translate-x-0 ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="p-6 border-b border-slate-800 flex justify-between items-center">
+          <div onClick={() => { navigateTo('dashboard'); setIsMobileMenuOpen(false); }} className="cursor-pointer transition-opacity hover:opacity-80">
+            <h1 className="text-2xl font-bold tracking-tighter text-blue-400 flex items-center gap-2"><Ghost className="text-red-500" size={28} /> Kaientai-X</h1>
+            <p className="text-xs text-slate-400 mt-1">Event Management System</p>
+          </div>
+          <button onClick={() => setIsMobileMenuOpen(false)} className="md:hidden text-slate-400"><X /></button>
+        </div>
+        <nav className="flex-1 p-4 space-y-2">
+          <button onClick={() => { navigateTo('dashboard'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'dashboard' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-slate-300'}`}><LayoutDashboard size={20} /> ダッシュボード</button>
+          <button onClick={() => { navigateTo('enterprise'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'enterprise' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-slate-300'}`}><Building2 size={20} /> 企業管理コンソール</button>
+          <button onClick={() => { navigateTo('manual'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'manual' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-slate-300'}`}><BookOpen size={20} /> 運用マニュアル</button>
+
+          {/* Resume Project Button */}
+          {selectedExhibition && view !== 'detail' && (
+            <div className="pt-4 mt-2 border-t border-slate-800">
+              <p className="text-xs text-slate-500 font-bold mb-2 px-2 uppercase tracking-wider">Active Project</p>
+              <button onClick={() => { navigateTo('detail'); setIsMobileMenuOpen(false); }} className="w-full text-left bg-slate-800/50 hover:bg-slate-800 border border-slate-700/50 hover:border-blue-500/50 p-3 rounded-xl transition-all group">
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2 text-blue-400 font-bold text-xs"><Radio size={12} className="animate-pulse" /> 編集中</div>
+                  <ArrowRight size={14} className="text-slate-500 group-hover:text-blue-400 transform group-hover:translate-x-1 transition-all" />
+                </div>
+                <div className="font-bold text-sm truncate text-white">{selectedExhibition.title}</div>
+              </button>
+            </div>
+          )}
+        </nav>
+        <div className="p-4 border-t border-slate-800">
+          <div className="flex items-center gap-3 mb-3"><img src="/ship_blue_icon.png" alt="Admin" className="w-10 h-10 rounded-full object-cover border border-slate-700 bg-white" /><div><p className="text-sm font-medium">caremax-corp</p><p className="text-xs text-slate-400 truncate max-w-[150px]" title="seisaku.tokyo@kaientaiweb.jp">seisaku.tokyo@kaientaiweb.jp</p></div></div>
+          <button onClick={handleLogout} className="w-full text-red-400 hover:bg-red-500/10 px-3 py-2 rounded-lg text-sm flex items-center gap-2"><LogOut size={16} /> ログアウト</button>
+        </div>
+      </aside>
+
+      {isMobileMenuOpen && <div className="fixed inset-0 bg-black/50 z-30 md:hidden" onClick={() => setIsMobileMenuOpen(false)}></div>}
+
+      <main ref={mainRef} className="flex-1 h-[calc(100vh-60px)] md:h-screen overflow-y-auto bg-slate-50 relative">
+        <div className="p-4 md:p-10 max-w-7xl mx-auto">
+          {view === 'dashboard' && <DashboardView exhibitions={exhibitions} onCreateClick={() => navigateTo('create')} onCardClick={(ex) => { setSelectedExhibition(ex); navigateTo('detail'); }} onDeleteClick={deleteExhibition} />}
+          {view === 'create' && <CreateExhibitionForm data={newExhibition} setData={setNewExhibition} onCancel={() => navigateTo('dashboard')} onSubmit={handleCreate} />}
+          {view === 'enterprise' && <EnterpriseConsole masterMakers={masterMakers} setMasterMakers={setMasterMakers} />}
+          {view === 'manual' && <OperationalManualView />}
+          {view === 'detail' && selectedExhibition && <ExhibitionDetail exhibition={selectedExhibition} onBack={() => navigateTo('dashboard')} updateVisitorCount={updateVisitorCount} updateExhibitionData={updateExhibitionData} batchUpdateExhibitionData={batchUpdateExhibitionData} masterMakers={masterMakers} initialTab={exhibitionTabs[selectedExhibition.id]} onTabChange={(tab) => setExhibitionTabs(prev => ({ ...prev, [selectedExhibition.id]: tab }))} />}
+        </div>
+      </main>
+
+
+    </div>
+  );
+}
+
+export default App;

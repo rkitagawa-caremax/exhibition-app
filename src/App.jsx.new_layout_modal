@@ -1,0 +1,161 @@
+
+// ============================================================================
+// Layout Builder Component (Restored)
+// ============================================================================
+function LayoutBuilderModal({ onClose, currentLayout, onSave, exhibition }) {
+  const CANVAS_W = 800;
+  const CANVAS_H = 600;
+  // Initialize from saved layout or defaults
+  const [items, setItems] = useState(currentLayout || []);
+  const [selectedId, setSelectedId] = useState(null);
+  const [dragInfo, setDragInfo] = useState(null);
+
+  // Add Element
+  const addElement = (type) => {
+    const newItem = {
+      id: crypto.randomUUID(), type,
+      x: 50, y: 50, w: 100, h: 100, rotation: 0,
+      label: type === 'booth' ? 'ブース' : type === 'text' ? 'テキスト' : '寸法線',
+      bg: type === 'booth' ? 'bg-white border-2 border-slate-800' :
+          type === 'text' ? 'bg-transparent border border-dashed border-slate-300' :
+          'bg-slate-800 h-1'
+    };
+    if (type === 'table') { newItem.w = 60; newItem.h = 30; newItem.bg = 'bg-amber-100 border border-amber-600'; newItem.label = '机'; }
+    if (type === 'chair') { newItem.w = 30; newItem.h = 30; newItem.bg = 'bg-slate-200 border border-slate-400 rounded-full'; newItem.label = '椅子'; }
+    
+    setItems([...items, newItem]);
+  };
+
+  // Drag Logic
+  const handleMouseDown = (e, id) => {
+    e.stopPropagation();
+    setSelectedId(id);
+    const item = items.find(i => i.id === id);
+    if (!item) return;
+    setDragInfo({ id, startX: e.clientX, startY: e.clientY, itemX: item.x, itemY: item.y });
+  };
+
+  const handleMouseMove = (e) => {
+    if (!dragInfo) return;
+    const dx = e.clientX - dragInfo.startX;
+    const dy = e.clientY - dragInfo.startY;
+    let newX = Math.round((dragInfo.itemX + dx) / 10) * 10;
+    let newY = Math.round((dragInfo.itemY + dy) / 10) * 10;
+    newX = Math.max(0, Math.min(newX, CANVAS_W - 20));
+    newY = Math.max(0, Math.min(newY, CANVAS_H - 20));
+    
+    setItems(items.map(i => i.id === dragInfo.id ? { ...i, x: newX, y: newY } : i));
+  };
+
+  const handleMouseUp = () => {
+    setDragInfo(null);
+  };
+
+  const updateItemProp = (id, key, val) => {
+    setItems(items.map(i => i.id === id ? { ...i, [key]: val } : i));
+  };
+
+  const deleteSelected = () => {
+    if (selectedId) {
+      setItems(items.filter(i => i.id !== selectedId));
+      setSelectedId(null);
+    }
+  };
+
+  // Auto Layout
+  const runAutoLayout = (cols = 6) => {
+    if (!window.confirm('現在のレイアウトをクリアして自動配置を実行しますか？')) return;
+    
+    const makers = exhibition?.makers?.filter(m => m.status === 'confirmed') || [];
+    const startX = 50, startY = 50, boothSize = 100, gap = 20;
+    const newItems = [];
+
+    makers.forEach((m, idx) => {
+      const col = idx % cols;
+      const row = Math.floor(idx / cols);
+      newItems.push({
+        id: crypto.randomUUID(), type: 'booth',
+        x: startX + col * (boothSize + gap),
+        y: startY + row * (boothSize + gap),
+        w: boothSize, h: boothSize,
+        label: m.companyName || 'ブース',
+        bg: 'bg-white border-2 border-slate-800', makerId: m.id
+      });
+    });
+    setItems(newItems);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-6xl h-[90vh] flex flex-col animate-scale-up overflow-hidden">
+        {/* Header */}
+        <div className="p-4 border-b flex justify-between items-center bg-slate-50">
+          <h3 className="font-bold text-lg flex items-center gap-2"><LayoutDashboard size={20} /> レイアウト作成ツール</h3>
+          <div className="flex gap-2">
+            <button onClick={() => onSave(items)} className="bg-blue-600 text-white px-4 py-2 rounded-lg font-bold hover:bg-blue-700 flex items-center gap-2"><Save size={16} /> 保存して閉じる</button>
+            <button onClick={onClose} className="bg-white text-slate-500 border px-4 py-2 rounded-lg font-bold hover:bg-slate-50"><X size={16} /></button>
+          </div>
+        </div>
+
+        {/* Toolbar */}
+        <div className="p-2 border-b bg-white flex justify-between items-center">
+          <div className="flex gap-2">
+            <button onClick={() => addElement('booth')} className="px-3 py-1 bg-slate-100 hover:bg-slate-200 rounded text-xs font-bold flex gap-1 items-center"><Plus size={12} /> 小間</button>
+            <button onClick={() => addElement('table')} className="px-3 py-1 bg-slate-100 hover:bg-slate-200 rounded text-xs font-bold flex gap-1 items-center"><Plus size={12} /> 机</button>
+            <button onClick={() => addElement('chair')} className="px-3 py-1 bg-slate-100 hover:bg-slate-200 rounded text-xs font-bold flex gap-1 items-center"><Plus size={12} /> 椅子</button>
+            <button onClick={() => addElement('text')} className="px-3 py-1 bg-slate-100 hover:bg-slate-200 rounded text-xs font-bold flex gap-1 items-center"><Plus size={12} /> 文字</button>
+            <div className="w-px bg-slate-200 mx-2"></div>
+            <button onClick={deleteSelected} disabled={!selectedId} className="px-3 py-1 bg-red-50 text-red-500 hover:bg-red-100 rounded text-xs font-bold disabled:opacity-50 flex gap-1 items-center"><Trash2 size={12} /> 削除</button>
+          </div>
+          <div className="flex gap-2 items-center">
+            <span className="text-xs text-slate-400 font-bold">自動配置(列数):</span>
+            {[4, 5, 6, 8].map(cols => (
+              <button key={cols} onClick={() => runAutoLayout(cols)} className="px-2 py-1 bg-purple-50 text-purple-600 hover:bg-purple-100 rounded text-xs font-bold border border-purple-100">{cols}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Canvas */}
+        <div className="flex-1 overflow-auto bg-slate-200 p-8 flex justify-center" onMouseMove={handleMouseMove} onMouseUp={handleMouseUp}>
+          <div 
+            className="bg-white shadow-xl relative select-none"
+            style={{ width: CANVAS_W, height: CANVAS_H, backgroundImage: 'radial-gradient(#cbd5e1 1px, transparent 1px)', backgroundSize: '20px 20px' }}
+            onClick={() => setSelectedId(null)}
+          >
+             {items.map(item => (
+                <div
+                  key={item.id}
+                  onMouseDown={(e) => handleMouseDown(e, item.id)}
+                  className={`absolute flex items-center justify-center cursor-move group ${item.bg} ${selectedId === item.id ? 'ring-2 ring-blue-500 shadow-xl z-20' : 'shadow-sm z-10'}`}
+                  style={{
+                    left: item.x, top: item.y, width: item.w, height: item.h,
+                    transform: `rotate(${item.rotation || 0}deg)`
+                  }}
+                >
+                  {item.type === 'text' || item.type === 'dimension' ? (
+                     <input
+                        className="bg-transparent text-xs text-center w-full outline-none font-bold"
+                        value={item.label}
+                        onChange={(e) => updateItemProp(item.id, 'label', e.target.value)}
+                        onMouseDown={e => e.stopPropagation()}
+                      />
+                  ) : (
+                    <span className="text-[10px] text-center p-1 pointer-events-none overflow-hidden select-none opacity-80">{item.label}</span>
+                  )}
+                  
+                  {/* Selected Indicator */}
+                  {selectedId === item.id && (
+                    <>
+                      <div className="absolute top-0 left-0 w-2 h-2 bg-blue-500 rounded-full -translate-x-1 -translate-y-1"></div>
+                      <div className="absolute bottom-0 right-0 w-2 h-2 bg-blue-500 rounded-full translate-x-1 translate-y-1"></div>
+                    </>
+                  )}
+                </div>
+              ))}
+              <div className="absolute bottom-2 right-2 text-xs text-slate-300 pointer-events-none">Canvas: {CANVAS_W}x{CANVAS_H}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

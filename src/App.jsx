@@ -15,8 +15,6 @@ import {
 } from 'lucide-react';
 // import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
-import html2canvas from 'html2canvas';
-import jsPDF from 'jspdf';
 import { initializeApp } from "firebase/app";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
 import { getFirestore, collection, updateDoc, doc, deleteDoc, onSnapshot, setDoc, query, limit, orderBy, writeBatch, getDocs } from "firebase/firestore";
@@ -28,6 +26,7 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, L
 import EnterpriseConsole from './components/EnterpriseConsole';
 import OperationalManualView from './components/OperationalManualView';
 import LayoutBuilderModal from './components/LayoutBuilderModal';
+import { downloadInvoicePdfFromWorksheetCanvas } from './invoicePdfRenderer';
 
 // ============================================================================
 // 1. 定数・ヘルパー関数・初期データ
@@ -1635,7 +1634,7 @@ function TabSchedule({ scheduleData, updateMainData, staff, dates, preDates }) {
   );
 }
 
-function TabEquipment({ exhibition, details, setDetails }) {
+function TabEquipment({ exhibition, details, setDetails, masterMakers }) {
   // Fixed rental item names
   const FIXED_RENTAL_ITEMS = ['長机', '椅子', 'プロジェクター', 'マイク', 'マイクスタンド', 'スクリーン', '演台', 'パーテーション'];
 
@@ -1993,6 +1992,7 @@ function TabEquipment({ exhibition, details, setDetails }) {
           currentLayout={layoutData}
           onSave={handleLayoutSave}
           exhibition={exhibition}
+          enterprises={masterMakers}
         />
       )}
     </div>
@@ -2176,6 +2176,9 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
   const makers = exhibition.makers || [];
   const formConfig = exhibition.formConfig || DEFAULT_FORM_CONFIG;
   const [isSendingDocs, setIsSendingDocs] = useState(false);
+  const [isBulkInvoiceDownloading, setIsBulkInvoiceDownloading] = useState(false);
+  const [bulkInvoiceProgress, setBulkInvoiceProgress] = useState({ done: 0, total: 0, phase: '' });
+  const invoiceTemplateBufferRef = useRef(null);
 
   // Send Documents Notification Handler
   const handleSendDocuments = async () => {
@@ -2491,6 +2494,710 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
     } catch (e) {
       console.error(e);
       alert('Excel出力エラー: ' + e.message);
+    }
+  };
+
+  const getMakerValue = (maker, key) => {
+    if (maker?.response && maker.response[key] !== undefined && maker.response[key] !== '') return maker.response[key];
+    if (maker && maker[key] !== undefined && maker[key] !== '') return maker[key];
+    return null;
+  };
+
+  const formatJapaneseDate = (date) => {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
+    return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+  };
+
+  const formatJapaneseMonthEnd = (date) => {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
+    return `${date.getFullYear()}年${date.getMonth() + 1}月末日`;
+  };
+
+  const getFirstEventDate = (dates) => {
+    if (!Array.isArray(dates) || dates.length === 0) return null;
+    const sorted = [...dates].filter(Boolean).sort();
+    if (sorted.length === 0) return null;
+    const parsed = new Date(`${sorted[0]}T00:00:00`);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  };
+
+  const getMonthEndByOffset = (baseDate, monthOffset) => {
+    if (!(baseDate instanceof Date) || Number.isNaN(baseDate.getTime())) return null;
+    return new Date(baseDate.getFullYear(), baseDate.getMonth() + monthOffset + 1, 0);
+  };
+
+  const resolveInvoiceSheetName = (paymentMethod) => {
+    const normalized = String(paymentMethod || '').replace(/\s+/g, '');
+    return normalized.includes('相殺') ? '相殺' : '振込';
+  };
+
+  const sanitizeFileName = (value, fallback) => {
+    const cleaned = String(value || '')
+      .replace(/[\\/:*?"<>|]/g, '_')
+      .replace(/\s+/g, '_')
+      .trim();
+    return cleaned || fallback;
+  };
+
+  const formatDateCompact = (date) => {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    return `${yyyy}${mm}${dd}`;
+  };
+
+  const colLettersToNumber = (letters) => {
+    let num = 0;
+    for (let i = 0; i < letters.length; i++) {
+      num = (num * 26) + (letters.charCodeAt(i) - 64);
+    }
+    return num;
+  };
+
+  const parseMergeRange = (range) => {
+    const m = String(range || '').match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
+    if (!m) return null;
+    return {
+      startCol: colLettersToNumber(m[1]),
+      startRow: parseInt(m[2], 10),
+      endCol: colLettersToNumber(m[3]),
+      endRow: parseInt(m[4], 10)
+    };
+  };
+
+  const excelColumnWidthToPx = (width) => {
+    const w = Number(width);
+    if (!Number.isFinite(w) || w <= 0) return 0;
+    if (w < 1) return Math.floor(w * 12 + 0.5);
+    return Math.floor(((256 * w + Math.floor(128 / 7)) / 256) * 7);
+  };
+
+  const pointsToPx = (pt) => {
+    const p = Number(pt);
+    if (!Number.isFinite(p) || p <= 0) return 0;
+    return p * (96 / 72);
+  };
+
+  const parseWorkbookThemeColors = (workbook) => {
+    const xml = workbook?._themes?.theme1;
+    if (!xml || typeof xml !== 'string') return {};
+    const getClr = (tag) => {
+      const rgx = new RegExp(`<a:${tag}>[\\s\\S]*?(?:<a:srgbClr[^>]*val=\"([0-9A-Fa-f]{6})\"|<a:sysClr[^>]*lastClr=\"([0-9A-Fa-f]{6})\")`, 'i');
+      const m = xml.match(rgx);
+      return (m?.[1] || m?.[2] || '').toUpperCase();
+    };
+    return {
+      0: getClr('lt1'),
+      1: getClr('dk1'),
+      2: getClr('lt2'),
+      3: getClr('dk2'),
+      4: getClr('accent1'),
+      5: getClr('accent2'),
+      6: getClr('accent3'),
+      7: getClr('accent4'),
+      8: getClr('accent5'),
+      9: getClr('accent6'),
+      10: getClr('hlink'),
+      11: getClr('folHlink')
+    };
+  };
+
+  const applyTintToHex = (hex, tint) => {
+    if (!hex) return hex;
+    if (tint === undefined || tint === null || Number.isNaN(Number(tint))) return hex;
+    const t = Number(tint);
+    const clamp = (n) => Math.max(0, Math.min(255, Math.round(n)));
+    const r = parseInt(hex.slice(0, 2), 16);
+    const g = parseInt(hex.slice(2, 4), 16);
+    const b = parseInt(hex.slice(4, 6), 16);
+    if (t < 0) {
+      const f = 1 + t;
+      return `${clamp(r * f).toString(16).padStart(2, '0')}${clamp(g * f).toString(16).padStart(2, '0')}${clamp(b * f).toString(16).padStart(2, '0')}`.toUpperCase();
+    }
+    return `${clamp(r + (255 - r) * t).toString(16).padStart(2, '0')}${clamp(g + (255 - g) * t).toString(16).padStart(2, '0')}${clamp(b + (255 - b) * t).toString(16).padStart(2, '0')}`.toUpperCase();
+  };
+
+  const colorToCss = (color, fallback = '#000000', themeColors = {}) => {
+    if (!color) return fallback;
+    if (color.argb) {
+      const argb = String(color.argb);
+      if (argb.length === 8) return `#${argb.slice(2)}`;
+      if (argb.length === 6) return `#${argb}`;
+    }
+    if (color.indexed !== undefined) {
+      const indexedMap = {
+        9: '#FFFFFF',
+        64: '#000000'
+      };
+      return indexedMap[color.indexed] || fallback;
+    }
+    if (color.theme !== undefined) {
+      const themeHex = themeColors[color.theme];
+      if (themeHex) {
+        const tinted = applyTintToHex(themeHex, color.tint);
+        return `#${tinted}`;
+      }
+    }
+    return fallback;
+  };
+
+  const normalizeInvoiceCellText = (text) => {
+    if (text === null || text === undefined) return '';
+    const s = String(text);
+    // Excel numFmt由来の "\" を日本円マークとして表示
+    return s.replace(/^\\(?=\d)/, '¥');
+  };
+
+  const getCellDisplayText = (cell) => {
+    if (!cell) return '';
+    if (cell.text !== undefined && cell.text !== null && cell.text !== '') return normalizeInvoiceCellText(cell.text);
+    const v = cell.value;
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'object') {
+      if (v.richText) return normalizeInvoiceCellText(v.richText.map(t => t.text).join(''));
+      if (v.formula) return normalizeInvoiceCellText(v.result ?? '');
+      if (v.text) return normalizeInvoiceCellText(v.text);
+      return normalizeInvoiceCellText(JSON.stringify(v));
+    }
+    return normalizeInvoiceCellText(v);
+  };
+
+  const getCellRichRuns = (cell) => {
+    const v = cell?.value;
+    if (!v || typeof v !== 'object' || !Array.isArray(v.richText)) return null;
+    return v.richText.map((run) => ({
+      text: normalizeInvoiceCellText(run?.text ?? ''),
+      font: run?.font || {}
+    }));
+  };
+
+  const excelBorderToCss = (edge, themeColors) => {
+    if (!edge) return '';
+    const style = edge.style || 'thin';
+    const cssStyle = style === 'dashed' ? 'dashed' : style === 'dotted' ? 'dotted' : style === 'double' ? 'double' : 'solid';
+    const cssWidth = style === 'thick' ? 2 : style === 'medium' ? 1.5 : style === 'double' ? 3 : style === 'hair' ? 0.5 : 1;
+    const color = colorToCss(edge.color, '#000000', themeColors);
+    return `${cssWidth}px ${cssStyle} ${color}`;
+  };
+
+  const mediaToDataUrl = (media) => {
+    if (!media || !media.buffer) return null;
+    let bytes;
+    if (media.buffer instanceof ArrayBuffer) {
+      bytes = new Uint8Array(media.buffer);
+    } else if (ArrayBuffer.isView(media.buffer)) {
+      bytes = new Uint8Array(media.buffer.buffer, media.buffer.byteOffset, media.buffer.byteLength);
+    } else if (media.buffer?.data) {
+      bytes = Uint8Array.from(media.buffer.data);
+    } else {
+      return null;
+    }
+
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    const ext = String(media.extension || 'png').toLowerCase();
+    return `data:image/${ext};base64,${btoa(binary)}`;
+  };
+
+  const createInvoicePreviewElement = (workbook, worksheet) => {
+    const maxCol = Math.max(45, worksheet.columnCount || 45);
+    const maxRow = Math.max(28, worksheet.rowCount || 28);
+    const defaultColWidth = Number(worksheet.properties?.defaultColWidth || 8.43);
+    const defaultRowHeight = Number(worksheet.properties?.defaultRowHeight || 13.5);
+    const themeColors = parseWorkbookThemeColors(workbook);
+    const resetCss = (el) => {
+      el.style.all = 'initial';
+      el.style.boxSizing = 'border-box';
+      return el;
+    };
+
+    const colWidths = new Array(maxCol + 1).fill(excelColumnWidthToPx(defaultColWidth));
+    for (let c = 1; c <= maxCol; c++) {
+      const w = worksheet.getColumn(c)?.width;
+      colWidths[c] = w ? excelColumnWidthToPx(w) : excelColumnWidthToPx(defaultColWidth);
+    }
+    const rowHeights = new Array(maxRow + 1).fill(pointsToPx(defaultRowHeight));
+    for (let r = 1; r <= maxRow; r++) {
+      const h = worksheet.getRow(r)?.height;
+      rowHeights[r] = h ? pointsToPx(h) : pointsToPx(defaultRowHeight);
+    }
+
+    const colLeft = new Array(maxCol + 2).fill(0);
+    const rowTop = new Array(maxRow + 2).fill(0);
+    let accW = 0;
+    for (let c = 1; c <= maxCol; c++) {
+      colLeft[c] = accW;
+      accW += colWidths[c];
+    }
+    let accH = 0;
+    for (let r = 1; r <= maxRow; r++) {
+      rowTop[r] = accH;
+      accH += rowHeights[r];
+    }
+
+    const mergeTopLeft = new globalThis.Map();
+    const mergeCovered = new Set();
+    const merges = worksheet.model?.merges || [];
+    merges.forEach((m) => {
+      const parsed = parseMergeRange(m);
+      if (!parsed) return;
+      mergeTopLeft.set(`${parsed.startRow}:${parsed.startCol}`, {
+        rowSpan: parsed.endRow - parsed.startRow + 1,
+        colSpan: parsed.endCol - parsed.startCol + 1
+      });
+      for (let r = parsed.startRow; r <= parsed.endRow; r++) {
+        for (let c = parsed.startCol; c <= parsed.endCol; c++) {
+          if (r === parsed.startRow && c === parsed.startCol) continue;
+          mergeCovered.add(`${r}:${c}`);
+        }
+      }
+    });
+    const pickEdgeBorder = (cells, edgeName) => {
+      for (const candidate of cells) {
+        const border = candidate?.border?.[edgeName];
+        if (border) return border;
+      }
+      return null;
+    };
+
+    const root = resetCss(document.createElement('div'));
+    root.style.display = 'block';
+    root.style.position = 'fixed';
+    root.style.left = '-100000px';
+    root.style.top = '0';
+    root.style.background = '#fff';
+    root.style.color = '#000';
+    root.style.padding = '0';
+    root.style.zIndex = '-1';
+    root.style.width = `${accW}px`;
+
+    const sheet = resetCss(document.createElement('div'));
+    sheet.style.display = 'block';
+    sheet.style.position = 'relative';
+    sheet.style.width = `${accW}px`;
+    sheet.style.height = `${accH}px`;
+    sheet.style.background = '#fff';
+    sheet.style.color = '#000';
+    sheet.style.fontFamily = "'Meiryo UI', 'Meiryo', sans-serif";
+
+    for (let r = 1; r <= maxRow; r++) {
+      for (let c = 1; c <= maxCol; c++) {
+        const key = `${r}:${c}`;
+        if (mergeCovered.has(key)) continue;
+
+        const row = worksheet.getRow(r);
+        const cell = row.getCell(c);
+        const merge = mergeTopLeft.get(key);
+        const rowSpan = merge?.rowSpan || 1;
+        const colSpan = merge?.colSpan || 1;
+
+        let width = 0;
+        for (let i = 0; i < colSpan; i++) width += colWidths[c + i] || 0;
+        let height = 0;
+        for (let i = 0; i < rowSpan; i++) height += rowHeights[r + i] || 0;
+
+        const border = (() => {
+          if (rowSpan <= 1 && colSpan <= 1) return cell.border || {};
+          const topCells = [];
+          const bottomCells = [];
+          const leftCells = [];
+          const rightCells = [];
+          for (let cc = c; cc < c + colSpan; cc++) {
+            topCells.push(worksheet.getRow(r).getCell(cc));
+            bottomCells.push(worksheet.getRow(r + rowSpan - 1).getCell(cc));
+          }
+          for (let rr = r; rr < r + rowSpan; rr++) {
+            leftCells.push(worksheet.getRow(rr).getCell(c));
+            rightCells.push(worksheet.getRow(rr).getCell(c + colSpan - 1));
+          }
+          return {
+            top: pickEdgeBorder(topCells, 'top') || cell.border?.top,
+            right: pickEdgeBorder(rightCells, 'right') || cell.border?.right,
+            bottom: pickEdgeBorder(bottomCells, 'bottom') || cell.border?.bottom,
+            left: pickEdgeBorder(leftCells, 'left') || cell.border?.left
+          };
+        })();
+        const hasBorder = !!(border.top || border.right || border.bottom || border.left);
+        const fill = cell.fill;
+        const hasSolidFill = fill?.type === 'pattern' && fill?.pattern === 'solid' && !!fill?.fgColor;
+        const text = getCellDisplayText(cell);
+        const richRuns = getCellRichRuns(cell);
+        if (!hasBorder && !hasSolidFill && !text) continue;
+
+        const cellDiv = resetCss(document.createElement('div'));
+        cellDiv.style.position = 'absolute';
+        cellDiv.style.left = `${colLeft[c]}px`;
+        cellDiv.style.top = `${rowTop[r]}px`;
+        cellDiv.style.width = `${width}px`;
+        cellDiv.style.height = `${height}px`;
+        cellDiv.style.boxSizing = 'border-box';
+        if (hasSolidFill) {
+          cellDiv.style.backgroundColor = colorToCss(fill.fgColor, '#ffffff', themeColors);
+        }
+
+        if (border.top) cellDiv.style.borderTop = excelBorderToCss(border.top, themeColors);
+        if (border.right) cellDiv.style.borderRight = excelBorderToCss(border.right, themeColors);
+        if (border.bottom) cellDiv.style.borderBottom = excelBorderToCss(border.bottom, themeColors);
+        if (border.left) cellDiv.style.borderLeft = excelBorderToCss(border.left, themeColors);
+
+        const font = cell.font || {};
+        if (font.name) cellDiv.style.fontFamily = `'${font.name}', 'Meiryo UI', sans-serif`;
+        if (font.size) {
+          const isTitleRow = r === 2 && Number(font.size) >= 24;
+          const fontPx = Math.max(7, pointsToPx(font.size) * (isTitleRow ? 0.94 : 1));
+          cellDiv.style.fontSize = `${fontPx}px`;
+        }
+        if (font.bold) cellDiv.style.fontWeight = '700';
+        if (font.italic) cellDiv.style.fontStyle = 'italic';
+        if (font.underline) cellDiv.style.textDecoration = 'underline';
+        if (font.color) cellDiv.style.color = colorToCss(font.color, '#000000', themeColors);
+
+        const align = cell.alignment || {};
+        const h = align.horizontal || 'left';
+        const hasHorizontalBorders = !!(border.top || border.bottom);
+        const isTitleRow = r === 2;
+        const isCompanyRow = r === 4;
+        const isTradeRow = r === 12 || r === 13;
+        const isTotalRow = r === 17;
+        const isBreakdownRow = r >= 25 && r <= 28;
+        const isLargeHeading = Number(font.size || 0) >= 24;
+        const v = align.vertical || (hasHorizontalBorders ? 'middle' : 'top');
+        let padTopBottom = isLargeHeading ? 1 : (hasHorizontalBorders ? 1 : 0);
+        if (isTitleRow || isTotalRow) padTopBottom = 0;
+        if (isCompanyRow || isTradeRow) padTopBottom = 0;
+        const padLeft = 2;
+        let padRight = h === 'right' ? 6 : (h === 'left' && colSpan >= 10 ? 8 : 2);
+        if (isBreakdownRow && h === 'left' && colSpan >= 10) padRight = Math.max(padRight, 22);
+        cellDiv.style.padding = `${padTopBottom}px ${padRight}px ${padTopBottom}px ${padLeft}px`;
+        const canOverflowHorizontally = rowSpan === 1
+          && colSpan === 1
+          && !align.wrapText
+          && (h === 'left' || !h)
+          && !border.right
+          && !!text
+          && !text.includes('\n');
+        cellDiv.style.overflow = (canOverflowHorizontally || (isLargeHeading && !isTitleRow)) ? 'visible' : 'hidden';
+        cellDiv.style.display = 'flex';
+        cellDiv.style.justifyContent = h === 'center' ? 'center' : h === 'right' ? 'flex-end' : 'flex-start';
+        cellDiv.style.alignItems = v === 'middle' ? 'center' : v === 'bottom' ? 'flex-end' : 'flex-start';
+        cellDiv.style.textAlign = h === 'center' ? 'center' : h === 'right' ? 'right' : 'left';
+        if (isTotalRow && text) {
+          cellDiv.style.alignItems = 'center';
+          cellDiv.style.justifyContent = 'center';
+        }
+        cellDiv.style.whiteSpace = align.wrapText ? 'pre-wrap' : 'pre';
+        cellDiv.style.lineHeight = isTitleRow ? '1' : (isTotalRow ? '1' : (isLargeHeading ? '1.05' : (text.includes('\n') ? '1.12' : '1.03')));
+        if (align.textRotation === 'vertical' || align.textRotation === 255) {
+          cellDiv.style.writingMode = 'vertical-rl';
+          cellDiv.style.textOrientation = 'upright';
+          cellDiv.style.justifyContent = 'center';
+          cellDiv.style.alignItems = 'center';
+          cellDiv.style.whiteSpace = 'normal';
+          cellDiv.style.lineHeight = '1';
+        }
+
+        if (text) {
+          const span = document.createElement('span');
+          span.style.display = 'inline-block';
+          if (canOverflowHorizontally) {
+            let overflowWidth = width;
+            for (let cc = c + 1; cc <= maxCol; cc++) {
+              const key2 = `${r}:${cc}`;
+              const merge2 = mergeTopLeft.get(key2);
+              const isMergeStart = !!merge2;
+              const nextCell = worksheet.getRow(r).getCell(cc);
+              const nextText = getCellDisplayText(nextCell);
+              if (isMergeStart || nextText) break;
+              overflowWidth += colWidths[cc] || 0;
+            }
+            span.style.maxWidth = `${Math.max(0, overflowWidth - 4)}px`;
+          } else if (isBreakdownRow && h === 'left' && colSpan >= 10) {
+            span.style.maxWidth = `${Math.max(0, width - padLeft - padRight - 8)}px`;
+          }
+          if (isCompanyRow || isTradeRow) span.style.transform = 'translateY(-1px)';
+          if (isTitleRow) span.style.transform = 'translateY(-0.5px)';
+          if (richRuns && richRuns.length > 0) {
+            richRuns.forEach((run) => {
+              const runSpan = document.createElement('span');
+              runSpan.textContent = run.text;
+              const rf = run.font || {};
+              if (rf.name) runSpan.style.fontFamily = `'${rf.name}', 'Meiryo UI', sans-serif`;
+              if (rf.size) runSpan.style.fontSize = `${Math.max(7, pointsToPx(rf.size))}px`;
+              if (rf.bold) runSpan.style.fontWeight = '700';
+              if (rf.italic) runSpan.style.fontStyle = 'italic';
+              if (rf.underline) runSpan.style.textDecoration = 'underline';
+              if (rf.color) runSpan.style.color = colorToCss(rf.color, '#000000', themeColors);
+              span.appendChild(runSpan);
+            });
+          } else {
+            span.textContent = text;
+          }
+          cellDiv.appendChild(span);
+        }
+
+        sheet.appendChild(cellDiv);
+      }
+    }
+
+    // ExcelJS再保存で欠落するテキストボックス（代表取締役〜）を明示的に描画
+    const officerBox = resetCss(document.createElement('div'));
+    officerBox.style.display = 'block';
+    const officerCol = Math.min(28, maxCol); // drawing anchor col=27 (0-based)
+    const officerRow = Math.min(9, maxRow);  // drawing anchor row=8 (0-based)
+    const officerEndCol = Math.min(40, maxCol + 1);
+    const officerEndRow = Math.min(17, maxRow + 1);
+    const officerLeft = colLeft[officerCol] || 0;
+    const officerTop = rowTop[officerRow] || 0;
+    const officerRight = colLeft[officerEndCol] || accW;
+    const officerBottom = rowTop[officerEndRow] || accH;
+    officerBox.style.position = 'absolute';
+    officerBox.style.left = `${officerLeft + 2}px`;
+    officerBox.style.top = `${officerTop + 2}px`;
+    officerBox.style.width = `${Math.max(220, officerRight - officerLeft - 6)}px`;
+    officerBox.style.height = `${Math.max(64, officerBottom - officerTop - 4)}px`;
+    officerBox.style.zIndex = '1';
+    officerBox.style.fontFamily = "'Meiryo UI', 'Meiryo', sans-serif";
+    officerBox.style.lineHeight = '1.16';
+    officerBox.style.color = '#000';
+    officerBox.style.whiteSpace = 'normal';
+    const officerLines = [
+      { text: '代表取締役社長　宮武　佳弘', px: pointsToPx(10.5) },
+      { text: '高知県高知市上町2-6-9', px: pointsToPx(8.8) },
+      { text: 'TEL088-831-6087/FAX088-831-6070', px: pointsToPx(8.8) },
+      { text: '登録番号：T4490001002141', px: pointsToPx(8.8) }
+    ];
+    officerLines.forEach(({ text: lineText, px }) => {
+      const line = document.createElement('div');
+      line.style.display = 'block';
+      line.style.margin = '0';
+      line.style.padding = '0';
+      line.style.fontSize = `${Math.max(8, px)}px`;
+      line.style.whiteSpace = 'nowrap';
+      line.textContent = lineText;
+      officerBox.appendChild(line);
+    });
+    sheet.appendChild(officerBox);
+
+    const images = worksheet.getImages ? worksheet.getImages() : [];
+    let stampLeftPx = null;
+    images.forEach((img) => {
+      const media = workbook.media?.[img.imageId];
+      const dataUrl = mediaToDataUrl(media);
+      if (!dataUrl) return;
+
+      const tl = img.range?.tl;
+      const br = img.range?.br;
+      const tlCol = typeof tl?.nativeCol === 'number' ? tl.nativeCol : Math.floor(tl?.col ?? 0);
+      const tlRow = typeof tl?.nativeRow === 'number' ? tl.nativeRow : Math.floor(tl?.row ?? 0);
+      const tlColOffPx = (typeof tl?.nativeColOff === 'number' ? tl.nativeColOff : (tl?.colOff || 0)) / 9525;
+      const tlRowOffPx = (typeof tl?.nativeRowOff === 'number' ? tl.nativeRowOff : (tl?.rowOff || 0)) / 9525;
+
+      let x = (colLeft[tlCol + 1] || 0) + tlColOffPx;
+      let y = (rowTop[tlRow + 1] || 0) + tlRowOffPx;
+      let w = 0;
+      let h = 0;
+
+      if (br) {
+        const brCol = typeof br?.nativeCol === 'number' ? br.nativeCol : Math.floor(br?.col ?? 0);
+        const brRow = typeof br?.nativeRow === 'number' ? br.nativeRow : Math.floor(br?.row ?? 0);
+        const brColOffPx = (typeof br?.nativeColOff === 'number' ? br.nativeColOff : (br?.colOff || 0)) / 9525;
+        const brRowOffPx = (typeof br?.nativeRowOff === 'number' ? br.nativeRowOff : (br?.rowOff || 0)) / 9525;
+        const x2 = (colLeft[brCol + 1] || accW) + brColOffPx;
+        const y2 = (rowTop[brRow + 1] || accH) + brRowOffPx;
+        w = Math.max(1, x2 - x);
+        h = Math.max(1, y2 - y);
+      } else if (img.range?.ext) {
+        w = Math.max(1, (img.range.ext.width || img.range.ext.cx || 0) / 9525);
+        h = Math.max(1, (img.range.ext.height || img.range.ext.cy || 0) / 9525);
+      }
+
+      if (w <= 0 || h <= 0) {
+        w = 120;
+        h = 40;
+      }
+      if (w <= 130 && h <= 130 && y < (rowTop[Math.min(16, maxRow)] || accH)) {
+        stampLeftPx = stampLeftPx === null ? x : Math.min(stampLeftPx, x);
+      }
+
+      const imageEl = resetCss(document.createElement('img'));
+      imageEl.style.display = 'block';
+      imageEl.src = dataUrl;
+      imageEl.style.position = 'absolute';
+      imageEl.style.left = `${x}px`;
+      imageEl.style.top = `${y}px`;
+      imageEl.style.width = `${w}px`;
+      imageEl.style.height = `${h}px`;
+      imageEl.style.objectFit = 'contain';
+      imageEl.style.pointerEvents = 'none';
+      imageEl.style.zIndex = '2';
+      sheet.appendChild(imageEl);
+    });
+    if (stampLeftPx !== null) {
+      const maxTextWidth = Math.max(170, stampLeftPx - (officerLeft + 2) - 10);
+      officerBox.style.width = `${maxTextWidth}px`;
+    }
+
+    root.appendChild(sheet);
+    return root;
+  };
+
+  const downloadInvoicePdfFromWorksheet = async (workbook, worksheet, fileName) => {
+    return downloadInvoicePdfFromWorksheetCanvas(workbook, worksheet, fileName);
+  };
+
+  const withTimeout = (promise, timeoutMs, message) => {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(message)), timeoutMs);
+      })
+    ]);
+  };
+
+  const loadInvoiceTemplateBuffer = async () => {
+    if (invoiceTemplateBufferRef.current) return invoiceTemplateBufferRef.current.slice(0);
+    const templateFileName = '請求書例.xlsx';
+    const baseUrl = import.meta.env.BASE_URL || '/';
+    const templateUrl = `${baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`}${encodeURIComponent(templateFileName)}`;
+    const response = await fetch(templateUrl);
+    if (!response.ok) throw new Error(`テンプレート読込失敗 (${response.status})`);
+    const arrayBuffer = await response.arrayBuffer();
+    invoiceTemplateBufferRef.current = arrayBuffer;
+    return arrayBuffer.slice(0);
+  };
+
+  const buildInvoicePayloadForMaker = async (maker) => {
+    if (!maker || maker.status !== 'confirmed') {
+      throw new Error('参加確定の企業のみ請求書を出力できます。');
+    }
+
+    const eventDate = getFirstEventDate(exhibition.dates);
+    if (!eventDate) {
+      throw new Error('展示会の開催日が未設定のため、請求書を作成できません。');
+    }
+
+    const companyName = getMakerValue(maker, 'companyName') || maker.companyName || '企業名未設定';
+    const boothCountRaw = getMakerValue(maker, 'boothCount') || maker.boothCount || 0;
+    const boothCount = extractNum(boothCountRaw);
+    if (boothCount <= 0) {
+      throw new Error(`希望コマ数が取得できないため、請求書を作成できません。\n企業: ${companyName}`);
+    }
+
+    const paymentMethod = getMakerValue(maker, 'payment') || getMakerValue(maker, 'paymentMethod') || '振り込み';
+    const sheetName = resolveInvoiceSheetName(paymentMethod);
+    const feePerBooth = Number(formConfig?.settings?.feePerBooth || 30000);
+    const totalAmountTaxIncluded = Math.round(boothCount * feePerBooth);
+    const unitPriceWithoutTax = Math.round(feePerBooth / 1.1);
+    const amountWithoutTax = unitPriceWithoutTax * boothCount;
+    const taxAmount = Math.max(0, totalAmountTaxIncluded - amountWithoutTax);
+    const dueDate = getMonthEndByOffset(eventDate, 1);
+
+    const templateBuffer = await loadInvoiceTemplateBuffer();
+    const ExcelJS = (await import('exceljs')).default;
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateBuffer);
+
+    const invoiceSheet = workbook.getWorksheet(sheetName);
+    if (!invoiceSheet) throw new Error(`テンプレートに「${sheetName}」シートが見つかりません`);
+
+    invoiceSheet.getCell('AG1').value = formatJapaneseDate(new Date());
+    invoiceSheet.getCell('B4').value = companyName;
+    invoiceSheet.getCell('G13').value = formatJapaneseMonthEnd(dueDate);
+    invoiceSheet.getCell('M17').value = `\\${totalAmountTaxIncluded.toLocaleString('ja-JP')}（税込）`;
+    invoiceSheet.getCell('D19').value = `${exhibition.title || '展示会'}　出展料\n（${formatJapaneseDate(eventDate)}）`;
+    invoiceSheet.getCell('V19').value = boothCount;
+    invoiceSheet.getCell('Y19').value = `\\${unitPriceWithoutTax}`;
+    invoiceSheet.getCell('AF19').value = `\\${amountWithoutTax}`;
+    invoiceSheet.getCell('AF23').value = null;
+    invoiceSheet.getCell('AF24').value = `\\${taxAmount}`;
+    if (sheetName === '相殺' && dueDate) {
+      const dueMonth = dueDate.getMonth() + 1;
+      invoiceSheet.getCell('D25').value = `　※${dueMonth}月分の仕入より相殺させていただきます。`;
+      invoiceSheet.getCell('D26').value = null;
+      invoiceSheet.getCell('D27').value = null;
+      invoiceSheet.getCell('D28').value = null;
+    }
+
+    const supplierCode = getMakerValue(maker, 'supplierCode') || maker.code || 'コード未設定';
+    const fileName = `【請求書】${sanitizeFileName(supplierCode, 'コード')}＿${sanitizeFileName(companyName, '企業')}_${sanitizeFileName(exhibition.title || '展示会', '展示会')}_${formatDateCompact(new Date())}.pdf`;
+    return { workbook, invoiceSheet, fileName, companyName };
+  };
+
+  const handleDownloadInvoice = async (maker) => {
+    try {
+      const { workbook, invoiceSheet, fileName } = await buildInvoicePayloadForMaker(maker);
+      await downloadInvoicePdfFromWorksheet(workbook, invoiceSheet, fileName);
+    } catch (e) {
+      console.error('請求書出力エラー:', e);
+      alert(`請求書出力エラー: ${e.message}`);
+    }
+  };
+
+  const handleDownloadInvoicesBulk = async () => {
+    const confirmedMakers = makers.filter(m => m.status === 'confirmed');
+    if (confirmedMakers.length === 0) {
+      alert('参加確定の企業がないため、請求書を一括出力できません。');
+      return;
+    }
+    if (!window.confirm(`参加確定 ${confirmedMakers.length} 社の請求書をZIPで一括ダウンロードしますか？`)) return;
+
+    setIsBulkInvoiceDownloading(true);
+    setBulkInvoiceProgress({ done: 0, total: confirmedMakers.length, phase: '作成中' });
+    try {
+      const JSZipModule = await import('jszip');
+      const JSZip = JSZipModule.default || JSZipModule;
+      const zip = new JSZip();
+      const failed = [];
+
+      for (let idx = 0; idx < confirmedMakers.length; idx++) {
+        const maker = confirmedMakers[idx];
+        try {
+          const { workbook, invoiceSheet, fileName } = await buildInvoicePayloadForMaker(maker);
+          const pdfBlob = await withTimeout(
+            downloadInvoicePdfFromWorksheet(workbook, invoiceSheet, null),
+            45000,
+            'PDF生成がタイムアウトしました'
+          );
+          zip.file(fileName, pdfBlob);
+        } catch (err) {
+          const companyName = getMakerValue(maker, 'companyName') || maker.companyName || maker.code || '不明';
+          failed.push(`${companyName}: ${err.message}`);
+        }
+        const done = idx + 1;
+        setBulkInvoiceProgress({ done, total: confirmedMakers.length, phase: '作成中' });
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+
+      const successCount = confirmedMakers.length - failed.length;
+      if (successCount <= 0) {
+        throw new Error('すべての企業で請求書作成に失敗しました。');
+      }
+
+      setBulkInvoiceProgress({ done: confirmedMakers.length, total: confirmedMakers.length, phase: 'ZIP作成中' });
+      const zipBlob = await zip.generateAsync({
+        type: 'blob',
+        compression: 'STORE'
+      });
+      const zipFileName = `【請求書一括】${sanitizeFileName(exhibition.title || '展示会', '展示会')}_${formatDateCompact(new Date())}.zip`;
+      saveAs(zipBlob, zipFileName);
+
+      if (failed.length > 0) {
+        const preview = failed.slice(0, 5).join('\n');
+        const omitted = failed.length > 5 ? `\n...他 ${failed.length - 5} 件` : '';
+        alert(`請求書一括出力が完了しました。\n成功: ${successCount}件 / 失敗: ${failed.length}件\n\n${preview}${omitted}`);
+      } else {
+        alert(`請求書一括出力が完了しました。（${successCount}件）`);
+      }
+    } catch (e) {
+      console.error('請求書一括出力エラー:', e);
+      alert(`請求書一括出力エラー: ${e.message}`);
+    } finally {
+      setIsBulkInvoiceDownloading(false);
+      setBulkInvoiceProgress({ done: 0, total: 0, phase: '' });
     }
   };
 
@@ -2926,6 +3633,17 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
                 <button onClick={handleExportConfirmedExcel} className="flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-green-700 shadow-sm whitespace-nowrap">
                   <Download size={16} /> 回答Excel
                 </button>
+                <button
+                  onClick={handleDownloadInvoicesBulk}
+                  disabled={isBulkInvoiceDownloading}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold shadow-sm whitespace-nowrap ${isBulkInvoiceDownloading ? 'bg-slate-300 text-slate-600 cursor-not-allowed' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`}
+                  title="参加確定企業の請求書をZIPで一括DL"
+                >
+                  {isBulkInvoiceDownloading ? <Loader size={16} className="animate-spin" /> : <FileSpreadsheet size={16} />}
+                  {isBulkInvoiceDownloading
+                    ? `請求書一括 ${bulkInvoiceProgress.phase}${bulkInvoiceProgress.total > 0 ? ` (${bulkInvoiceProgress.done}/${bulkInvoiceProgress.total})` : ''}`
+                    : '請求書一括ZIP'}
+                </button>
               </>
             )}
 
@@ -3018,6 +3736,11 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
                       <button onClick={() => setEditingMaker(m)} className="p-2 text-blue-600 hover:bg-blue-50 rounded" title="編集">
                         <PenTool size={16} />
                       </button>
+                      {activeTab === 'confirmed' && (
+                        <button onClick={() => handleDownloadInvoice(m)} className="p-2 text-emerald-600 hover:bg-emerald-50 rounded" title="請求書DL">
+                          <FileSpreadsheet size={16} />
+                        </button>
+                      )}
                       {/* 詳細ボタン: 参加確定のみ (回答詳細があるため) */}
                       {activeTab === 'confirmed' && (
                         <button onClick={() => setShowDetailModal(m)} className="p-2 text-blue-600 hover:bg-blue-50 rounded" title="詳細"><Eye size={16} /></button>
@@ -7051,7 +7774,7 @@ function ExhibitionDetail({ exhibition, onBack, onNavigate, updateVisitorCount, 
       <div className="bg-white rounded-xl shadow-sm border border-slate-100 min-h-[500px]">
         {activeTab === 'main' && <TabMainBoard exhibition={exhibition} updateMainData={updateMainData} updateBatch={updateMainDataBatch} tasks={exhibition.tasks || []} onNavigate={handleTabChange} />}
         {activeTab === 'schedule' && <TabSchedule scheduleData={exhibition.schedule} updateMainData={updateMainData} staff={exhibition.staff || ''} dates={exhibition.dates || []} preDates={exhibition.preDates || []} />}
-        {activeTab === 'equipment' && <TabEquipment exhibition={exhibition} details={exhibition.venueDetails || {}} setDetails={setVenueDetails} />}
+        {activeTab === 'equipment' && <TabEquipment exhibition={exhibition} details={exhibition.venueDetails || {}} setDetails={setVenueDetails} masterMakers={masterMakers} />}
         {activeTab === 'makers' && <TabMakers exhibition={exhibition} setMakers={setMakers} updateMainData={updateMainData} masterMakers={masterMakers} onNavigate={onNavigate} storage={storage} />}
         {activeTab === 'tasks' && <TabTasks tasks={exhibition.tasks || []} setTasks={setTasks} staff={exhibition.staff || ''} />}
         {activeTab === 'budget' && <TabBudget exhibition={exhibition} updateMainData={updateMainData} />}

@@ -102,8 +102,9 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
         // Pre-calculate colors for categories in enterprises
         if (enterprises) {
             enterprises.forEach(ent => {
-                if (ent.supplierCode && ent.category) {
-                    categoryMap[ent.supplierCode] = ent.category;
+                const entCode = ent.supplierCode || ent.code;
+                if (entCode && ent.category) {
+                    categoryMap[entCode] = ent.category;
                     // Consistent color for category
                     if (!colorMap[ent.category]) {
                         // Use simple hash for HSL

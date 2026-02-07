@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 // import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
-import { initializeApp } from "firebase/app";
+import { initializeApp, getApp, getApps } from "firebase/app";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
 import { getFirestore, collection, updateDoc, doc, deleteDoc, onSnapshot, setDoc, query, limit, orderBy, writeBatch, getDocs } from "firebase/firestore";
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
@@ -3720,7 +3720,7 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
                             <a href={`${window.location.origin}${window.location.pathname}?mode=maker&code=${m.code}`} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline flex items-center gap-1">
                               <LinkIcon size={12} /> ポータル
                             </a>
-                            <button onClick={() => navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?mode=maker&code=${m.code}`)} className="text-slate-400 hover:text-blue-500" title="URLをコピー">
+                            <button onClick={() => { navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?mode=maker&code=${m.code}`); alert('URLをコピーしました'); }} className="text-slate-400 hover:text-blue-500" title="URLをコピー">
                               <Copy size={12} />
                             </button>
                           </div>
@@ -7047,6 +7047,45 @@ function PerformanceAnalysisView({ exhibitions }) {
     }, 0);
   }, [exhibitions]);
 
+  const analysisStatuses = useMemo(() => new Set(['invited', 'confirmed', 'declined']), []);
+  const normalizeCompanyName = (name) => String(name || '')
+    .replace(/[ \t\r\n\u3000]/g, '')
+    .trim()
+    .toLowerCase();
+  const getMakerField = (maker, key) => {
+    if (!maker) return '';
+    if (maker[key] !== undefined && maker[key] !== null && maker[key] !== '') return String(maker[key]).trim();
+    if (maker.response?.[key] !== undefined && maker.response?.[key] !== null && maker.response?.[key] !== '') return String(maker.response[key]).trim();
+    if (maker.formData?.[key] !== undefined && maker.formData?.[key] !== null && maker.formData?.[key] !== '') return String(maker.formData[key]).trim();
+    return '';
+  };
+  const getMakerCode = (maker) => {
+    return getMakerField(maker, 'supplierCode')
+      || getMakerField(maker, 'code')
+      || '';
+  };
+  const getMakerDisplayName = (maker) => {
+    return getMakerField(maker, 'companyName')
+      || getMakerField(maker, 'name')
+      || (getMakerCode(maker) ? `コード:${getMakerCode(maker)}` : '企業名不明');
+  };
+  const getMakerCompanyKey = (maker) => {
+    const code = getMakerCode(maker);
+    if (code) return `code:${code}`;
+    const normalizedName = normalizeCompanyName(getMakerDisplayName(maker));
+    if (normalizedName) return `name:${normalizedName}`;
+    return null;
+  };
+  const normalizeMakerStatusForAnalysis = (rawStatus) => {
+    const s = String(rawStatus || '').trim().toLowerCase();
+    if (!s) return '';
+    if (s === 'confirmed' || s.includes('参加確定') || s.includes('申し込む')) return 'confirmed';
+    if (s === 'declined' || s.includes('辞退') || s.includes('申し込まない')) return 'declined';
+    if (s === 'invited' || s.includes('招待中')) return 'invited';
+    if (s === 'listed' || s.includes('未送付') || s.includes('リスト')) return 'listed';
+    return s;
+  };
+
   // 来場者属性（受付区分）
   const visitorAttributes = useMemo(() => {
     const attributes = {};
@@ -7059,53 +7098,537 @@ function PerformanceAnalysisView({ exhibitions }) {
     return Object.entries(attributes).map(([name, value]) => ({ name, value }));
   }, [exhibitions]);
 
-  // 参加企業ランキング TOP30
-  const companyRanking = useMemo(() => {
-    const companyCounts = {};
-    exhibitions.forEach(ex => {
-      (ex.makers || []).filter(m => m.status === 'confirmed').forEach(m => {
-        const name = m.companyName || '企業名不明';
-        companyCounts[name] = (companyCounts[name] || 0) + 1;
+  // 企業別の実績母集計（展示会単位で重複排除）
+  const companyPerformanceStats = useMemo(() => {
+    const statsByCompany = new globalThis.Map();
+    const pickMostVoted = (votes) => {
+      let picked = '';
+      let max = -1;
+      votes.forEach((count, value) => {
+        if (count > max || (count === max && String(value).length > String(picked).length)) {
+          picked = value;
+          max = count;
+        }
+      });
+      return picked;
+    };
+
+    exhibitions.forEach((ex, exIndex) => {
+      const exhibitionKey = ex.id || `${ex.title || '展示会'}__${ex.dates?.[0] || ''}__${exIndex}`;
+      const perExCompany = new globalThis.Map();
+
+      (ex.makers || []).forEach((maker) => {
+        const status = normalizeMakerStatusForAnalysis(maker?.status);
+        if (!analysisStatuses.has(status)) return;
+
+        const companyKey = getMakerCompanyKey(maker);
+        if (!companyKey) return;
+
+        if (!perExCompany.has(companyKey)) {
+          perExCompany.set(companyKey, { statuses: new Set(), nameVotes: new globalThis.Map(), codeVotes: new globalThis.Map() });
+        }
+        const perEx = perExCompany.get(companyKey);
+        perEx.statuses.add(status);
+
+        const name = getMakerDisplayName(maker);
+        if (name) perEx.nameVotes.set(name, (perEx.nameVotes.get(name) || 0) + 1);
+
+        const code = getMakerCode(maker);
+        if (code) perEx.codeVotes.set(code, (perEx.codeVotes.get(code) || 0) + 1);
+      });
+
+      perExCompany.forEach((perEx, companyKey) => {
+        if (!statsByCompany.has(companyKey)) {
+          statsByCompany.set(companyKey, {
+            key: companyKey,
+            name: '企業名不明',
+            code: '',
+            invitedExhibitions: new Set(),
+            confirmedExhibitions: new Set(),
+            declinedExhibitions: new Set()
+          });
+        }
+        const company = statsByCompany.get(companyKey);
+        const votedName = pickMostVoted(perEx.nameVotes);
+        const votedCode = pickMostVoted(perEx.codeVotes);
+        if (votedName && (company.name === '企業名不明' || votedName.length > company.name.length)) company.name = votedName;
+        if (votedCode && !company.code) company.code = votedCode;
+
+        company.invitedExhibitions.add(exhibitionKey);
+        if (perEx.statuses.has('confirmed')) company.confirmedExhibitions.add(exhibitionKey);
+        if (perEx.statuses.has('declined')) company.declinedExhibitions.add(exhibitionKey);
       });
     });
-    return Object.entries(companyCounts)
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 30);
-  }, [exhibitions]);
+
+    return Array.from(statsByCompany.values()).map((company) => {
+      const invited = company.invitedExhibitions.size;
+      const confirmed = company.confirmedExhibitions.size;
+      const declined = company.declinedExhibitions.size;
+      const declineRate = invited > 0 ? Number(((declined / invited) * 100).toFixed(1)) : 0;
+      const participationRate = invited > 0 ? Number(((confirmed / invited) * 100).toFixed(1)) : 0;
+      return {
+        key: company.key,
+        name: company.name,
+        code: company.code,
+        invited,
+        confirmed,
+        declined,
+        declineRate,
+        participationRate
+      };
+    });
+  }, [analysisStatuses, exhibitions]);
+
+  // 参加企業ランキング TOP30（参加確定回数ベース）
+  const companyRanking = useMemo(() => {
+    return [...companyPerformanceStats]
+      .sort((a, b) => b.confirmed - a.confirmed || b.invited - a.invited || a.name.localeCompare(b.name, 'ja'))
+      .slice(0, 30)
+      .map(company => ({
+        name: company.name,
+        code: company.code,
+        count: company.confirmed,
+        invited: company.invited,
+        declined: company.declined
+      }));
+  }, [companyPerformanceStats]);
 
   // 辞退割合が高い企業ランキング TOP30（招待数3回以上）
-  // ★修正: 展示会ごとにユニークにカウント（同じ展示会で複数回カウントしない）
-  // 辞退割合が高い企業ランキング TOP30（招待数3回以上）
-  // ★修正: 展示会IDではなく、展示会タイトルでユニークカウント（データ重複対策）
   const declineRanking = useMemo(() => {
-    const companyStats = {};
-    exhibitions.forEach(ex => {
-      (ex.makers || []).forEach(m => {
-        const name = m.companyName || m.name || '企業名不明';
-        if (!companyStats[name]) {
-          companyStats[name] = { invitedExhibitions: new Set(), declinedExhibitions: new Set() };
-        }
-        // Count unique exhibitions (by TITLE to avoid data duplication issues) where this company was invited
-        if (['invited', 'confirmed', 'declined', 'listed'].includes(m.status)) {
-          companyStats[name].invitedExhibitions.add(ex.title);
-        }
-        if (m.status === 'declined') {
-          companyStats[name].declinedExhibitions.add(ex.title);
-        }
-      });
-    });
-    return Object.entries(companyStats)
-      .map(([name, stats]) => ({
-        name,
-        invited: stats.invitedExhibitions.size,
-        declined: stats.declinedExhibitions.size,
-        rate: stats.invitedExhibitions.size > 0 ? (stats.declinedExhibitions.size / stats.invitedExhibitions.size * 100).toFixed(1) : 0
-      }))
+    return [...companyPerformanceStats]
       .filter(company => company.invited >= 3)
-      .sort((a, b) => parseFloat(b.rate) - parseFloat(a.rate))
-      .slice(0, 30);
+      .sort((a, b) => b.declineRate - a.declineRate || b.declined - a.declined || b.invited - a.invited || a.name.localeCompare(b.name, 'ja'))
+      .slice(0, 30)
+      .map(company => ({
+        name: company.name,
+        code: company.code,
+        invited: company.invited,
+        declined: company.declined,
+        rate: company.declineRate.toFixed(1)
+      }));
+  }, [companyPerformanceStats]);
+
+  const [aiReportGeneratedAt, setAiReportGeneratedAt] = useState(() => Date.now());
+  const [aiReportRevision, setAiReportRevision] = useState(1);
+  const [isAiRegenerating, setIsAiRegenerating] = useState(false);
+  const aiRegenerateTimerRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (aiRegenerateTimerRef.current) {
+        clearTimeout(aiRegenerateTimerRef.current);
+        aiRegenerateTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const overallExhibitionStats = useMemo(() => {
+    const toInt = (value, fallback = 0) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : fallback;
+    };
+    const parseCount = (value, fallback = 0) => {
+      const m = String(value ?? '').match(/\d+/);
+      return m ? Number(m[0]) : fallback;
+    };
+    const now = new Date();
+
+    const perExhibition = exhibitions.map((ex, exIndex) => {
+      const makers = ex.makers || [];
+      const visitors = ex.visitors || [];
+      const tasks = ex.tasks || [];
+      const scheduleDayBefore = ex.schedule?.dayBefore || [];
+      const scheduleEventDay = ex.schedule?.eventDay || [];
+      const lectures = ex.lectures || [];
+      const scanLogs = ex.scanLogs || [];
+      const hotels = ex.hotelReservations || ex.hotels || [];
+      const staffCount = String(ex.staff || '').split(',').map(s => s.trim()).filter(Boolean).length;
+
+      const statusCounts = { listed: 0, invited: 0, confirmed: 0, declined: 0 };
+      makers.forEach((maker) => {
+        const normalized = normalizeMakerStatusForAnalysis(maker?.status);
+        if (statusCounts[normalized] !== undefined) statusCounts[normalized] += 1;
+      });
+
+      const actionableInvites = statusCounts.invited + statusCounts.confirmed + statusCounts.declined;
+      const answered = statusCounts.confirmed + statusCounts.declined;
+      const responseRate = actionableInvites > 0 ? (answered / actionableInvites) * 100 : 0;
+      const confirmRate = actionableInvites > 0 ? (statusCounts.confirmed / actionableInvites) * 100 : 0;
+      const declineRate = actionableInvites > 0 ? (statusCounts.declined / actionableInvites) * 100 : 0;
+
+      const checkedIn = visitors.filter(v => v.checkedIn || v.status === 'arrived').length;
+      const visitorTarget = toInt(ex.targetVisitors, 0);
+      const makerTarget = toInt(ex.targetMakers, 0);
+      const profitTarget = toInt(ex.targetProfit, 0);
+
+      const taskDone = tasks.filter(t => t.status === 'done').length;
+      const taskRate = tasks.length > 0 ? (taskDone / tasks.length) * 100 : 0;
+      const scheduleCount = scheduleDayBefore.length + scheduleEventDay.length;
+
+      const feePerBooth = toInt(ex.formConfig?.settings?.feePerBooth, 30000);
+      const boothIncome = makers
+        .filter(m => normalizeMakerStatusForAnalysis(m?.status) === 'confirmed')
+        .reduce((sum, maker) => {
+          const boothCountRaw = getMakerField(maker, 'boothCount') || maker.boothCount || 0;
+          return sum + (parseCount(boothCountRaw, 0) * feePerBooth);
+        }, 0);
+      const otherIncomes = (ex.otherBudgets || []).filter(b => b.type === 'income').reduce((sum, b) => sum + toInt(b.amount, 0), 0);
+      const venueCost = toInt(ex.venueDetails?.cost, 0);
+      const equipmentTotal = (ex.venueDetails?.equipment || []).reduce((sum, item) => sum + (toInt(item.count, 0) * toInt(item.price, 0)), 0);
+      const lectureFees = lectures.reduce((sum, l) => sum + toInt(l.speakerFee ?? l.fee, 0) + toInt(l.transportFee, 0), 0);
+      const otherExpenses = (ex.otherBudgets || []).filter(b => b.type === 'expense').reduce((sum, b) => sum + toInt(b.amount, 0), 0);
+      const income = boothIncome + otherIncomes;
+      const expense = venueCost + equipmentTotal + lectureFees + otherExpenses;
+      const profit = income - expense;
+
+      const hasLayout = !!(ex.materials?.venue || ex.documents?.layoutPdf?.url || ex.documents?.layoutPdf?.data);
+      const hasFlyer = !!(ex.materials?.flyer || ex.documents?.flyerPdf?.url || ex.documents?.flyerPdf?.data);
+      const hasOtherMaterial = !!ex.materials?.other;
+      const docScore = (hasLayout ? 1 : 0) + (hasFlyer ? 1 : 0) + (hasOtherMaterial ? 1 : 0);
+
+      const deadlineRaw = ex.formConfig?.settings?.deadline || ex.formConfig?.deadline || null;
+      const deadline = deadlineRaw ? new Date(deadlineRaw) : null;
+      const hasPastDeadlinePending = !!(deadline && !Number.isNaN(deadline.getTime()) && deadline < now && statusCounts.invited > 0);
+
+      const exName = ex.title || `展示会#${exIndex + 1}`;
+      return {
+        id: ex.id || `ex-${exIndex}`,
+        name: exName,
+        date: ex.dates?.[0] || '',
+        visitors: visitors.length,
+        checkedIn,
+        visitorTarget,
+        confirmedMakers: statusCounts.confirmed,
+        makerTarget,
+        listedMakers: statusCounts.listed,
+        invitedMakers: statusCounts.invited,
+        declinedMakers: statusCounts.declined,
+        actionableInvites,
+        responseRate,
+        confirmRate,
+        declineRate,
+        taskCount: tasks.length,
+        taskDone,
+        taskRate,
+        scheduleCount,
+        lecturesCount: lectures.length,
+        scanCount: scanLogs.length,
+        hotelsCount: hotels.length,
+        staffCount,
+        docScore,
+        hasLayout,
+        hasFlyer,
+        hasOtherMaterial,
+        hasPastDeadlinePending,
+        income,
+        expense,
+        profit,
+        profitTarget
+      };
+    });
+
+    const totals = perExhibition.reduce((acc, ex) => {
+      acc.visitors += ex.visitors;
+      acc.checkedIn += ex.checkedIn;
+      acc.confirmedMakers += ex.confirmedMakers;
+      acc.listedMakers += ex.listedMakers;
+      acc.invitedMakers += ex.invitedMakers;
+      acc.declinedMakers += ex.declinedMakers;
+      acc.actionableInvites += ex.actionableInvites;
+      acc.tasks += ex.taskCount;
+      acc.tasksDone += ex.taskDone;
+      acc.scheduleItems += ex.scheduleCount;
+      acc.scanLogs += ex.scanCount;
+      acc.lectures += ex.lecturesCount;
+      acc.staff += ex.staffCount;
+      acc.hotels += ex.hotelsCount;
+      acc.docsScore += ex.docScore;
+      acc.docsComplete += ex.docScore >= 2 ? 1 : 0;
+      acc.pendingAfterDeadline += ex.hasPastDeadlinePending ? 1 : 0;
+      acc.income += ex.income;
+      acc.expense += ex.expense;
+      acc.profit += ex.profit;
+      if (ex.visitorTarget > 0) {
+        acc.targetVisitorsSet += 1;
+        if (ex.checkedIn >= ex.visitorTarget) acc.targetVisitorsAchieved += 1;
+      }
+      if (ex.makerTarget > 0) {
+        acc.targetMakersSet += 1;
+        if (ex.confirmedMakers >= ex.makerTarget) acc.targetMakersAchieved += 1;
+      }
+      if (ex.profitTarget > 0) {
+        acc.targetProfitSet += 1;
+        if (ex.profit >= ex.profitTarget) acc.targetProfitAchieved += 1;
+      }
+      return acc;
+    }, {
+      visitors: 0,
+      checkedIn: 0,
+      confirmedMakers: 0,
+      listedMakers: 0,
+      invitedMakers: 0,
+      declinedMakers: 0,
+      actionableInvites: 0,
+      tasks: 0,
+      tasksDone: 0,
+      scheduleItems: 0,
+      scanLogs: 0,
+      lectures: 0,
+      staff: 0,
+      hotels: 0,
+      docsScore: 0,
+      docsComplete: 0,
+      pendingAfterDeadline: 0,
+      income: 0,
+      expense: 0,
+      profit: 0,
+      targetVisitorsSet: 0,
+      targetVisitorsAchieved: 0,
+      targetMakersSet: 0,
+      targetMakersAchieved: 0,
+      targetProfitSet: 0,
+      targetProfitAchieved: 0
+    });
+
+    const rates = {
+      checkinRate: totals.visitors > 0 ? (totals.checkedIn / totals.visitors) * 100 : 0,
+      responseRate: totals.actionableInvites > 0 ? ((totals.confirmedMakers + totals.declinedMakers) / totals.actionableInvites) * 100 : 0,
+      declineRate: totals.actionableInvites > 0 ? (totals.declinedMakers / totals.actionableInvites) * 100 : 0,
+      confirmRate: totals.actionableInvites > 0 ? (totals.confirmedMakers / totals.actionableInvites) * 100 : 0,
+      taskDoneRate: totals.tasks > 0 ? (totals.tasksDone / totals.tasks) * 100 : 0,
+      docsCompleteRate: exhibitions.length > 0 ? (totals.docsComplete / exhibitions.length) * 100 : 0
+    };
+
+    return { perExhibition, totals, rates };
   }, [exhibitions]);
+
+  // AI統合分析（全展示会データ横断）
+  const aiIntegratedReport = useMemo(() => {
+    const { perExhibition, totals, rates } = overallExhibitionStats;
+    const topProfit = [...perExhibition].sort((a, b) => b.profit - a.profit).slice(0, 3);
+    const weakResponse = [...perExhibition]
+      .filter(ex => ex.actionableInvites >= 3)
+      .sort((a, b) => a.responseRate - b.responseRate)
+      .slice(0, 3);
+
+    const executiveSummary = [
+      `全${exhibitions.length}展示会の統合分析。来場登録${totals.visitors}名、来場済み${totals.checkedIn}名（来場率${rates.checkinRate.toFixed(1)}%）。`,
+      `招待母数${totals.actionableInvites}件に対して、参加確定率${rates.confirmRate.toFixed(1)}%、辞退率${rates.declineRate.toFixed(1)}%、回答率${rates.responseRate.toFixed(1)}%。`,
+      `全体収支は 収入¥${totals.income.toLocaleString()} / 支出¥${totals.expense.toLocaleString()} / 収支¥${totals.profit.toLocaleString()}。`,
+      `主要資料（レイアウト・チラシ）が揃う展示会比率は${rates.docsCompleteRate.toFixed(1)}%（${totals.docsComplete}/${exhibitions.length || 0}件）。`,
+      `タスク完了率は${rates.taskDoneRate.toFixed(1)}%（${totals.tasksDone}/${totals.tasks}件）、期限超過未回答の展示会は${totals.pendingAfterDeadline}件。`
+    ];
+
+    const risks = [];
+    if (totals.pendingAfterDeadline > 0) {
+      risks.push({ score: 95, title: '回答期限超過の未回答企業が残存', detail: `${totals.pendingAfterDeadline}展示会で、期限経過後も「招待中」が残っています。` });
+    }
+    if (rates.responseRate < 60 && totals.actionableInvites >= 10) {
+      risks.push({ score: 88, title: '招待回答率が低い', detail: `回答率が${rates.responseRate.toFixed(1)}%です。回答導線とリマインド間隔の再設計が必要です。` });
+    }
+    if (rates.declineRate >= 35 && totals.actionableInvites >= 10) {
+      risks.push({ score: 82, title: '辞退率が高い', detail: `辞退率が${rates.declineRate.toFixed(1)}%です。対象選定基準の見直し余地があります。` });
+    }
+    if (rates.docsCompleteRate < 65 && exhibitions.length > 0) {
+      risks.push({ score: 74, title: '資料整備のばらつき', detail: `資料整備率が${rates.docsCompleteRate.toFixed(1)}%で、展示会ごとの品質差があります。` });
+    }
+    if (rates.taskDoneRate < 70 && totals.tasks >= 20) {
+      risks.push({ score: 70, title: 'タスク完了率が低い', detail: `全体タスク完了率が${rates.taskDoneRate.toFixed(1)}%です。進行管理の強化が必要です。` });
+    }
+    risks.sort((a, b) => b.score - a.score);
+
+    const opportunities = [];
+    if (topProfit.length > 0) {
+      const lead = topProfit[0];
+      opportunities.push(`最も収支が良い展示会は「${lead.name}」（¥${lead.profit.toLocaleString()}）。同条件（会場/対象企業/出展費）を横展開する価値があります。`);
+    }
+    if (weakResponse.length > 0) {
+      opportunities.push(`回答率が低い展示会（例: ${weakResponse.map(x => x.name).join(' / ')}）は、回答期限前の個別連絡で改善余地があります。`);
+    }
+    if (totals.targetVisitorsSet > 0) {
+      opportunities.push(`来場目標達成は ${totals.targetVisitorsAchieved}/${totals.targetVisitorsSet} 件。未達展示会の集客施策をテンプレ化できます。`);
+    }
+    if (totals.scanLogs > 0 && totals.confirmedMakers > 0) {
+      opportunities.push(`スキャンログ${totals.scanLogs}件が蓄積。企業別の商談量と次回出展率を紐づけると、招待精度が上がります。`);
+    }
+
+    const actions = [];
+    if (totals.pendingAfterDeadline > 0) actions.push('締切当日夜に自動で「招待中」を一括クローズし、辞退確定へ遷移する運用を固定化する。');
+    if (rates.responseRate < 60) actions.push('回答期限7日前/3日前/前日の3段階リマインドを標準化し、未回答企業へ担当者電話を連携する。');
+    if (rates.declineRate >= 35) actions.push('辞退率上位企業は次回招待前に参加条件確認を実施し、対象企業リストを優先度別に再編する。');
+    if (rates.docsCompleteRate < 65) actions.push('資料（レイアウト・チラシ）公開チェックリストを追加し、公開漏れをゼロ化する。');
+    if (rates.taskDoneRate < 70) actions.push('進行タスクを週次で強制棚卸しし、担当未設定・期限未設定タスクを禁止する。');
+    if (actions.length === 0) actions.push('主要KPIは安定。高収支展示会の再現性を高める標準運用書を作成してください。');
+
+    return {
+      generatedAt: aiReportGeneratedAt,
+      executiveSummary,
+      risks: risks.slice(0, 5),
+      opportunities: opportunities.slice(0, 5),
+      actions: actions.slice(0, 7),
+      kpi: {
+        responseRate: rates.responseRate.toFixed(1),
+        declineRate: rates.declineRate.toFixed(1),
+        confirmRate: rates.confirmRate.toFixed(1),
+        taskDoneRate: rates.taskDoneRate.toFixed(1),
+        docsCompleteRate: rates.docsCompleteRate.toFixed(1)
+      }
+    };
+  }, [aiReportGeneratedAt, exhibitions.length, overallExhibitionStats]);
+
+  const makerStrategyReport = useMemo(() => {
+    const companies = [...companyPerformanceStats].filter((company) => company.invited > 0);
+    const totals = companies.reduce((acc, company) => {
+      acc.invited += company.invited;
+      acc.confirmed += company.confirmed;
+      acc.declined += company.declined;
+      return acc;
+    }, { invited: 0, confirmed: 0, declined: 0 });
+
+    const participationRate = totals.invited > 0 ? Number(((totals.confirmed / totals.invited) * 100).toFixed(1)) : 0;
+    const declineRate = totals.invited > 0 ? Number(((totals.declined / totals.invited) * 100).toFixed(1)) : 0;
+
+    const strategyLabel = (company) => {
+      if (company.invited >= 3 && company.declineRate >= 50) return '要因ヒアリング後に再招待';
+      if (company.confirmed >= 3 && company.participationRate >= 70) return '先行招待＋ブース拡張提案';
+      if (company.confirmed === 0 && company.invited >= 3) return '招待優先度を下げて保留';
+      if (company.participationRate >= 50) return '通常招待＋追加提案';
+      return '個別フォローで参加可否確認';
+    };
+
+    const topParticipants = [...companies]
+      .sort((a, b) => b.confirmed - a.confirmed || b.participationRate - a.participationRate || a.name.localeCompare(b.name, 'ja'))
+      .slice(0, 30)
+      .map((company) => ({
+        ...company,
+        strategy: strategyLabel(company)
+      }));
+
+    const highDecliners = [...companies]
+      .filter((company) => company.invited >= 2)
+      .sort((a, b) => b.declineRate - a.declineRate || b.declined - a.declined || b.invited - a.invited || a.name.localeCompare(b.name, 'ja'))
+      .slice(0, 30)
+      .map((company) => ({
+        ...company,
+        strategy: strategyLabel(company)
+      }));
+
+    const segmentCounts = companies.reduce((acc, company) => {
+      if (company.invited >= 3 && company.declineRate >= 50) acc.caution += 1;
+      else if (company.confirmed >= 3 && company.participationRate >= 70 && company.declineRate <= 20) acc.core += 1;
+      else if (company.confirmed > 0) acc.growth += 1;
+      else acc.dormant += 1;
+      return acc;
+    }, { core: 0, growth: 0, caution: 0, dormant: 0 });
+
+    const coreFocus = topParticipants
+      .filter((company) => company.confirmed >= 3 && company.participationRate >= 70 && company.declineRate <= 25)
+      .slice(0, 5);
+    const cautionFocus = highDecliners
+      .filter((company) => company.invited >= 3 && company.declined >= 2)
+      .slice(0, 5);
+    const dormantFocus = [...companies]
+      .filter((company) => company.invited >= 3 && company.confirmed === 0)
+      .sort((a, b) => b.invited - a.invited || b.declined - a.declined || a.name.localeCompare(b.name, 'ja'))
+      .slice(0, 5);
+
+    const executiveSummary = [
+      `対象${companies.length}社の招待実績を分析。招待${totals.invited}回、出展${totals.confirmed}回、辞退${totals.declined}回。`,
+      `全社平均の出展率は${participationRate.toFixed(1)}%、辞退率は${declineRate.toFixed(1)}%。`,
+      `重点育成${segmentCounts.core}社 / 成長余地${segmentCounts.growth}社 / 辞退高リスク${segmentCounts.caution}社 / 休眠${segmentCounts.dormant}社。`
+    ];
+
+    const policyRecommendations = [];
+    if (coreFocus.length > 0) {
+      policyRecommendations.push(`重点育成候補（${coreFocus.map((x) => x.name).join(' / ')}）には先行招待とブース拡張提案を実施する。`);
+    }
+    if (cautionFocus.length > 0) {
+      policyRecommendations.push(`辞退高リスク（${cautionFocus.map((x) => x.name).join(' / ')}）は、次回招待前に不参加要因ヒアリングを必須化する。`);
+    }
+    if (dormantFocus.length > 0) {
+      policyRecommendations.push(`連続未出展（${dormantFocus.map((x) => x.name).join(' / ')}）は、招待頻度と優先度を見直して母集団を再編する。`);
+    }
+    if (policyRecommendations.length === 0) {
+      policyRecommendations.push('現状は分布が安定。出展率上位企業の成功要因をテンプレート化して横展開する。');
+    }
+
+    const nextActions = [];
+    if (segmentCounts.caution > 0) nextActions.push('辞退率50%以上かつ招待3回以上の企業を次回招待前にレビューし、個別連絡で条件調整する。');
+    if (segmentCounts.core > 0) nextActions.push('出展上位企業に対して、次回展示会の先行案内と追加コマ提案を標準運用に組み込む。');
+    if (segmentCounts.dormant > 0) nextActions.push('3回以上招待で未出展の企業は、優先度を下げた再分類リストへ移して招待効率を改善する。');
+    if (nextActions.length === 0) nextActions.push('主要企業群は健全。現行の招待運用を維持しつつ、来場成果データと連携した精度改善を進める。');
+
+    return {
+      generatedAt: aiReportGeneratedAt,
+      totals: {
+        companies: companies.length,
+        invited: totals.invited,
+        confirmed: totals.confirmed,
+        declined: totals.declined
+      },
+      kpi: {
+        participationRate,
+        declineRate
+      },
+      segmentCounts,
+      executiveSummary,
+      policyRecommendations: policyRecommendations.slice(0, 5),
+      nextActions: nextActions.slice(0, 5),
+      topParticipants,
+      highDecliners
+    };
+  }, [aiReportGeneratedAt, companyPerformanceStats]);
+
+  const formatReportTimestamp = (ts) => {
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return '-';
+    return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+  };
+
+  const handleRegenerateAiReport = () => {
+    if (isAiRegenerating) return;
+    setIsAiRegenerating(true);
+    if (aiRegenerateTimerRef.current) {
+      clearTimeout(aiRegenerateTimerRef.current);
+    }
+    aiRegenerateTimerRef.current = setTimeout(() => {
+      setAiReportGeneratedAt(Date.now());
+      setAiReportRevision((prev) => prev + 1);
+      setIsAiRegenerating(false);
+      aiRegenerateTimerRef.current = null;
+    }, 250);
+  };
+
+  const handleExportAiReport = () => {
+    const header = `# AI統合分析レポート\n- 生成日時: ${formatReportTimestamp(aiIntegratedReport.generatedAt)}\n- 対象展示会: ${exhibitions.length}件\n`;
+    const kpi = `\n## KPI\n- 回答率: ${aiIntegratedReport.kpi.responseRate}%\n- 参加確定率: ${aiIntegratedReport.kpi.confirmRate}%\n- 辞退率: ${aiIntegratedReport.kpi.declineRate}%\n- タスク完了率: ${aiIntegratedReport.kpi.taskDoneRate}%\n- 資料整備率: ${aiIntegratedReport.kpi.docsCompleteRate}%\n`;
+    const summary = `\n## サマリー\n${aiIntegratedReport.executiveSummary.map((x) => `- ${x}`).join('\n')}\n`;
+    const risks = `\n## 主要リスク\n${aiIntegratedReport.risks.map((x) => `- [${x.score}] ${x.title}: ${x.detail}`).join('\n')}\n`;
+    const opportunities = `\n## 改善機会\n${aiIntegratedReport.opportunities.map((x) => `- ${x}`).join('\n')}\n`;
+    const actions = `\n## 推奨アクション\n${aiIntegratedReport.actions.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n`;
+    const body = `${header}${kpi}${summary}${risks}${opportunities}${actions}`;
+    const blob = new Blob([body], { type: 'text/markdown;charset=utf-8' });
+    const now = new Date();
+    const fileName = `AI統合分析レポート_${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.md`;
+    saveAs(blob, fileName);
+  };
+
+  const handleExportMakerStrategyReport = () => {
+    const report = makerStrategyReport;
+    const header = `# 出展メーカー戦略レポート\n- 生成日時: ${formatReportTimestamp(report.generatedAt)}\n- 対象企業数: ${report.totals.companies}社\n`;
+    const kpi = `\n## KPI\n- 招待回数合計: ${report.totals.invited}回\n- 出展回数合計: ${report.totals.confirmed}回\n- 辞退回数合計: ${report.totals.declined}回\n- 平均出展率: ${report.kpi.participationRate.toFixed(1)}%\n- 平均辞退率: ${report.kpi.declineRate.toFixed(1)}%\n`;
+    const segments = `\n## セグメント\n- 重点育成: ${report.segmentCounts.core}社\n- 成長余地: ${report.segmentCounts.growth}社\n- 辞退高リスク: ${report.segmentCounts.caution}社\n- 休眠: ${report.segmentCounts.dormant}社\n`;
+    const summary = `\n## サマリー\n${report.executiveSummary.map((x) => `- ${x}`).join('\n')}\n`;
+    const policy = `\n## 方針提案\n${report.policyRecommendations.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n`;
+    const actions = `\n## 次回アクション\n${report.nextActions.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n`;
+    const top = `\n## 出展回数上位企業\n${report.topParticipants.slice(0, 30).map((company, i) => `${i + 1}. ${company.name}${company.code ? ` (code:${company.code})` : ''} / 出展:${company.confirmed} / 招待:${company.invited} / 辞退率:${company.declineRate.toFixed(1)}% / 方針:${company.strategy}`).join('\n')}\n`;
+    const decline = `\n## 辞退率上位企業\n${report.highDecliners.slice(0, 30).map((company, i) => `${i + 1}. ${company.name}${company.code ? ` (code:${company.code})` : ''} / 招待:${company.invited} / 辞退:${company.declined} / 辞退率:${company.declineRate.toFixed(1)}% / 方針:${company.strategy}`).join('\n')}\n`;
+    const body = `${header}${kpi}${segments}${summary}${policy}${actions}${top}${decline}`;
+    const blob = new Blob([body], { type: 'text/markdown;charset=utf-8' });
+    const now = new Date();
+    const fileName = `出展メーカー戦略レポート_${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.md`;
+    saveAs(blob, fileName);
+  };
 
   // 講演会一覧
   const allLectures = useMemo(() => {
@@ -7162,6 +7685,158 @@ function PerformanceAnalysisView({ exhibitions }) {
         </div>
       </div>
 
+      {/* AI Integrated Analysis */}
+      <div className="bg-gradient-to-r from-indigo-50 via-sky-50 to-cyan-50 rounded-xl border border-indigo-100 p-6 shadow-sm">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-4">
+          <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+            <Wand2 className="text-indigo-600" size={20} />
+            AI統合分析レポート
+            <span className="text-xs font-normal text-slate-500">全展示会データ横断（実績・招待・収支・運営）</span>
+          </h3>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleRegenerateAiReport}
+              disabled={isAiRegenerating}
+              className={`px-3 py-1.5 text-xs font-bold rounded-lg border flex items-center gap-1.5 ${isAiRegenerating ? 'border-indigo-100 bg-indigo-50 text-indigo-400 cursor-not-allowed' : 'border-indigo-200 bg-white text-indigo-700 hover:bg-indigo-50'}`}
+            >
+              <RefreshCw size={13} className={isAiRegenerating ? 'animate-spin' : ''} />
+              {isAiRegenerating ? '再生成中...' : '再生成'}
+            </button>
+            <button onClick={handleExportAiReport} className="px-3 py-1.5 text-xs font-bold rounded-lg border border-cyan-200 bg-white text-cyan-700 hover:bg-cyan-50">
+              Markdown出力
+            </button>
+          </div>
+        </div>
+        <p className="text-xs text-slate-500 mb-4">最終生成: {formatReportTimestamp(aiIntegratedReport.generatedAt)} / 生成回数: {aiReportRevision}回</p>
+
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+          <div className="bg-white/80 border border-indigo-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">回答率</p><p className="text-lg font-bold text-slate-800">{aiIntegratedReport.kpi.responseRate}%</p></div>
+          <div className="bg-white/80 border border-indigo-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">参加確定率</p><p className="text-lg font-bold text-slate-800">{aiIntegratedReport.kpi.confirmRate}%</p></div>
+          <div className="bg-white/80 border border-indigo-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">辞退率</p><p className="text-lg font-bold text-slate-800">{aiIntegratedReport.kpi.declineRate}%</p></div>
+          <div className="bg-white/80 border border-indigo-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">タスク完了率</p><p className="text-lg font-bold text-slate-800">{aiIntegratedReport.kpi.taskDoneRate}%</p></div>
+          <div className="bg-white/80 border border-indigo-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">資料整備率</p><p className="text-lg font-bold text-slate-800">{aiIntegratedReport.kpi.docsCompleteRate}%</p></div>
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+          <div className="bg-white/80 rounded-lg border border-indigo-100 p-4">
+            <p className="text-sm font-bold text-slate-700 mb-2">エグゼクティブサマリー</p>
+            <div className="space-y-2">
+              {aiIntegratedReport.executiveSummary.map((line, idx) => (
+                <p key={idx} className="text-sm text-slate-700 leading-relaxed">{line}</p>
+              ))}
+            </div>
+          </div>
+          <div className="bg-white/80 rounded-lg border border-red-100 p-4">
+            <p className="text-sm font-bold text-slate-700 mb-2">主要リスク</p>
+            <div className="space-y-2">
+              {aiIntegratedReport.risks.length === 0 && <p className="text-sm text-slate-500">重大リスクは検知されませんでした。</p>}
+              {aiIntegratedReport.risks.map((risk, idx) => (
+                <div key={idx} className="rounded-md border border-red-100 bg-red-50/60 p-2">
+                  <p className="text-xs font-bold text-red-700">Severity {risk.score}</p>
+                  <p className="text-sm font-bold text-slate-800">{risk.title}</p>
+                  <p className="text-xs text-slate-600 mt-1">{risk.detail}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="bg-white/80 rounded-lg border border-cyan-100 p-4">
+            <p className="text-sm font-bold text-slate-700 mb-2">推奨アクション</p>
+            <div className="space-y-2">
+              {aiIntegratedReport.actions.map((line, idx) => (
+                <p key={idx} className="text-sm text-slate-700 leading-relaxed">{idx + 1}. {line}</p>
+              ))}
+            </div>
+            {aiIntegratedReport.opportunities.length > 0 && (
+              <div className="mt-4 pt-3 border-t border-cyan-100 space-y-2">
+                <p className="text-sm font-bold text-slate-700">改善機会</p>
+                {aiIntegratedReport.opportunities.map((line, idx) => (
+                  <p key={idx} className="text-xs text-slate-600 leading-relaxed">- {line}</p>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Maker Strategy Report */}
+      <div className="bg-gradient-to-r from-emerald-50 via-teal-50 to-cyan-50 rounded-xl border border-emerald-100 p-6 shadow-sm">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-4">
+          <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+            <Building2 className="text-emerald-600" size={20} />
+            出展メーカー戦略レポート
+            <span className="text-xs font-normal text-slate-500">出展回数・辞退率・次回方針</span>
+          </h3>
+          <button onClick={handleExportMakerStrategyReport} className="px-3 py-1.5 text-xs font-bold rounded-lg border border-emerald-200 bg-white text-emerald-700 hover:bg-emerald-50">
+            Markdown出力
+          </button>
+        </div>
+        <p className="text-xs text-slate-500 mb-4">最終生成: {formatReportTimestamp(makerStrategyReport.generatedAt)}</p>
+
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+          <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">対象企業数</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.totals.companies}社</p></div>
+          <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">招待回数合計</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.totals.invited}回</p></div>
+          <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">出展回数合計</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.totals.confirmed}回</p></div>
+          <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">平均出展率</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.kpi.participationRate.toFixed(1)}%</p></div>
+          <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">平均辞退率</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.kpi.declineRate.toFixed(1)}%</p></div>
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-4">
+          <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
+            <p className="text-sm font-bold text-slate-700 mb-2">サマリー</p>
+            <div className="space-y-2">
+              {makerStrategyReport.executiveSummary.map((line, idx) => (
+                <p key={idx} className="text-sm text-slate-700 leading-relaxed">{line}</p>
+              ))}
+            </div>
+          </div>
+          <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
+            <p className="text-sm font-bold text-slate-700 mb-2">方針提案</p>
+            <div className="space-y-2">
+              {makerStrategyReport.policyRecommendations.map((line, idx) => (
+                <p key={idx} className="text-sm text-slate-700 leading-relaxed">{idx + 1}. {line}</p>
+              ))}
+            </div>
+          </div>
+          <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
+            <p className="text-sm font-bold text-slate-700 mb-2">次回アクション</p>
+            <div className="space-y-2">
+              {makerStrategyReport.nextActions.map((line, idx) => (
+                <p key={idx} className="text-sm text-slate-700 leading-relaxed">{idx + 1}. {line}</p>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
+            <p className="text-sm font-bold text-slate-700 mb-3">出展回数 上位10社</p>
+            <div className="space-y-2">
+              {makerStrategyReport.topParticipants.slice(0, 10).map((company, idx) => (
+                <div key={company.key || idx} className="rounded-md border border-slate-100 bg-white p-2">
+                  <p className="text-sm font-bold text-slate-800">{idx + 1}. {company.name}</p>
+                  <p className="text-xs text-slate-600 mt-0.5">出展:{company.confirmed}回 / 招待:{company.invited}回 / 辞退率:{company.declineRate.toFixed(1)}%</p>
+                  <p className="text-xs text-emerald-700 mt-1">方針: {company.strategy}</p>
+                </div>
+              ))}
+              {makerStrategyReport.topParticipants.length === 0 && <p className="text-sm text-slate-500">対象データがありません。</p>}
+            </div>
+          </div>
+          <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
+            <p className="text-sm font-bold text-slate-700 mb-3">辞退率 高位10社（招待2回以上）</p>
+            <div className="space-y-2">
+              {makerStrategyReport.highDecliners.slice(0, 10).map((company, idx) => (
+                <div key={company.key || idx} className="rounded-md border border-slate-100 bg-white p-2">
+                  <p className="text-sm font-bold text-slate-800">{idx + 1}. {company.name}</p>
+                  <p className="text-xs text-slate-600 mt-0.5">招待:{company.invited}回 / 辞退:{company.declined}回 / 辞退率:{company.declineRate.toFixed(1)}%</p>
+                  <p className="text-xs text-emerald-700 mt-1">方針: {company.strategy}</p>
+                </div>
+              ))}
+              {makerStrategyReport.highDecliners.length === 0 && <p className="text-sm text-slate-500">対象データがありません。</p>}
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Yearly Revenue Section */}
       <div className="bg-white rounded-xl border p-6 shadow-sm">
         <h3 className="text-xl font-bold text-slate-800 mb-6 flex items-center gap-2">
@@ -7214,7 +7889,7 @@ function PerformanceAnalysisView({ exhibitions }) {
             <p className="text-slate-400 text-center py-8">データがありません</p>
           ) : (
             <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={240}>
                 <PieChart>
                   <Pie
                     data={visitorAttributes}
@@ -7254,8 +7929,14 @@ function PerformanceAnalysisView({ exhibitions }) {
                     }`}>
                     {idx + 1}
                   </span>
-                  <span className="flex-1 font-medium truncate">{company.name}</span>
-                  <span className="text-blue-600 font-bold">{company.count}回</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium truncate">{company.name}</p>
+                    {company.code && <p className="text-[11px] text-slate-400 font-mono truncate">code: {company.code}</p>}
+                  </div>
+                  <div className="text-right">
+                    <p className="text-blue-600 font-bold">{company.count}回</p>
+                    <p className="text-[11px] text-slate-400">招待:{company.invited} / 辞退:{company.declined}</p>
+                  </div>
                 </div>
               ))}
             </div>
@@ -7292,7 +7973,10 @@ function PerformanceAnalysisView({ exhibitions }) {
                         {idx + 1}
                       </span>
                     </td>
-                    <td className="p-3 font-medium truncate max-w-[200px]">{company.name}</td>
+                    <td className="p-3">
+                      <p className="font-medium truncate max-w-[220px]">{company.name}</p>
+                      {company.code && <p className="text-[11px] text-slate-400 font-mono truncate max-w-[220px]">code: {company.code}</p>}
+                    </td>
                     <td className="p-3 text-right">{company.invited}回</td>
                     <td className="p-3 text-right text-red-600 font-bold">{company.declined}回</td>
                     <td className="p-3 text-right">
@@ -7806,24 +8490,55 @@ function App() {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const [masterMakers, setMasterMakers] = useState([]);
+  const [masterMakersLoaded, setMasterMakersLoaded] = useState(false);
 
   // ★最適化: useRefを使用してonSnapshotコールバック内で最新値を参照（再購読防止）
   const selectedExhibitionRef = useRef(null);
   const masterMakersRef = useRef([]);
 
-  // ★修正: Firestoreからマスターデータをリアルタイム同期
+  const applyMasterMakersData = React.useCallback((data) => {
+    setMasterMakers(data);
+    masterMakersRef.current = data;
+    setMasterMakersLoaded(true);
+  }, []);
+
+  // 通常利用時は1回取得のみ（常時リアルタイム購読を避けて読取コストを抑制）
   useEffect(() => {
     if (!db || !appId) return;
+    let isActive = true;
+
+    const fetchMasterMakers = async () => {
+      try {
+        const makersRef = collection(db, 'artifacts', appId, 'public', 'data', 'masterMakers');
+        const snapshot = await getDocs(makersRef);
+        if (!isActive) return;
+        const data = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+        applyMasterMakersData(data);
+      } catch (error) {
+        console.error('[Firebase] Failed to load masterMakers:', error);
+        if (isActive) setMasterMakersLoaded(true);
+      }
+    };
+
+    fetchMasterMakers();
+    return () => {
+      isActive = false;
+    };
+  }, [db, appId, applyMasterMakersData]);
+
+  // 企業管理画面のみリアルタイム同期を有効化（編集時の即時反映を維持）
+  useEffect(() => {
+    if (!db || !appId || view !== 'enterprise') return;
     const makersRef = collection(db, 'artifacts', appId, 'public', 'data', 'masterMakers');
     const unsubscribe = onSnapshot(makersRef, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      // 固定リスト順、カテゴリ順などでソートする場合はここで
-      // data.sort(...)
-      setMasterMakers(data);
-      masterMakersRef.current = data; // Refも更新
+      const data = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+      applyMasterMakersData(data);
+    }, (error) => {
+      console.error('[Firebase] masterMakers onSnapshot error:', error);
     });
+
     return () => unsubscribe();
-  }, [db, appId]);
+  }, [db, appId, view, applyMasterMakersData]);
 
   // ★最適化: selectedExhibition の変更を Ref に同期（コールバック内で最新値を参照するため）
   useEffect(() => {
@@ -7855,6 +8570,9 @@ function App() {
   };
 
   useEffect(() => {
+    let isMounted = true;
+    let unsubscribeAuth = null;
+
     const init = async () => {
       // ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
       // ここにあなたの Firebase Config を貼り付けてください
@@ -7869,20 +8587,31 @@ function App() {
       // ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
       try {
-        const app = initializeApp(firebaseConfig);
+        const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const firestore = getFirestore(app);
         const storageInstance = getStorage(app); // Initialize storage
+
+        if (!isMounted) return;
+
         setAppId('default-app');
         setDb(firestore);
         setStorage(storageInstance); // Set storage state
         await signInAnonymously(auth);
-        onAuthStateChanged(auth, (u) => setUser(u));
+        unsubscribeAuth = onAuthStateChanged(auth, (u) => {
+          if (!isMounted) return;
+          setUser(u);
+        });
       } catch (e) {
         console.error("Firebase init failed:", e);
       }
     };
     init();
+
+    return () => {
+      isMounted = false;
+      if (unsubscribeAuth) unsubscribeAuth();
+    };
   }, []);
 
   useEffect(() => {
@@ -7962,6 +8691,12 @@ function App() {
   useEffect(() => {
     // Wait for exhibitions to be loaded (not null)
     if (exhibitions === null) {
+      return;
+    }
+
+    // ポータル系はマスター企業の読込完了を待ってから判定（早期not_foundを防止）
+    const needsMasterMakers = urlMode === 'demo_portal' || urlMode === 'maker';
+    if (needsMasterMakers && !masterMakersLoaded) {
       return;
     }
 
@@ -8104,7 +8839,7 @@ function App() {
     } else {
       setView(prev => prev === 'loading' ? 'dashboard' : prev);
     }
-  }, [exhibitions, urlMode, targetExhibitionId]); // Simplified - removed user/db as they rarely change after init
+  }, [exhibitions, urlMode, targetExhibitionId, masterMakersLoaded]); // Simplified - removed user/db as they rarely change after init
 
   const handleCreate = async () => {
     if (!user || !db) return;

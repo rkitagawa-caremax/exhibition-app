@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useRef, useLayoutEffect, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useLayoutEffect, useMemo } from 'react';
 import {
   Calendar, MapPin, Users, Target, LayoutDashboard,
   FileText, Plus, CheckSquare, Upload, Building2,
@@ -15,10 +15,8 @@ import {
 } from 'lucide-react';
 // import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
-import { initializeApp, getApp, getApps } from "firebase/app";
-import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
-import { getFirestore, collection, updateDoc, doc, deleteDoc, onSnapshot, setDoc, query, limit, orderBy, writeBatch, getDocs } from "firebase/firestore";
-import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
+import { collection, updateDoc, doc, deleteDoc, onSnapshot, setDoc } from "firebase/firestore";
+import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 // QRコード用ライブラリ
 import { QRCodeCanvas } from 'qrcode.react';
 import { Scanner } from '@yudiel/react-qr-scanner';
@@ -26,7 +24,29 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, L
 import EnterpriseConsole from './components/EnterpriseConsole';
 import OperationalManualView from './components/OperationalManualView';
 import LayoutBuilderModal from './components/LayoutBuilderModal';
-import { downloadInvoicePdfFromWorksheetCanvas } from './invoicePdfRenderer';
+import MakerDetailModal from './components/makers/MakerDetailModal';
+import {
+  buildAiIntegratedReport,
+  buildCheckedInVisitors,
+  buildCompanyPerformanceStats,
+  buildCompanyRanking,
+  buildDeclineRanking,
+  buildMakerStrategyReport,
+  buildOverallExhibitionStats,
+  buildTotalVisitors,
+  buildVisitorAttributes,
+  buildYearlyStats,
+  formatReportTimestamp
+} from './features/performanceAnalysis/analysisEngine';
+import {
+  exportConfirmedMakersExcel,
+  exportInvitedMakersExcel
+} from './features/makers/makerExcelExports';
+import { useMakerActions } from './features/makers/useMakerActions';
+import { useMakerViewModel } from './features/makers/useMakerViewModel';
+import { useInvoiceDownloads } from './features/invoice/useInvoiceDownloads';
+import { useFirebaseInit } from './hooks/useFirebaseInit';
+import { useMasterMakersSync } from './hooks/useMasterMakersSync';
 
 // ============================================================================
 // 1. 定数・ヘルパー関数・初期データ
@@ -2172,13 +2192,22 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
   const [showDetailModal, setShowDetailModal] = useState(null); // For Maker Detail Modal
   const [confirmedFilter, setConfirmedFilter] = useState('all'); // 'all', 'power', 'lunch'
   const [editingMaker, setEditingMaker] = useState(null); // 編集中のメーカー
+  const [selectedMakerIds, setSelectedMakerIds] = useState(new Set());
 
   const makers = exhibition.makers || [];
   const formConfig = exhibition.formConfig || DEFAULT_FORM_CONFIG;
   const [isSendingDocs, setIsSendingDocs] = useState(false);
-  const [isBulkInvoiceDownloading, setIsBulkInvoiceDownloading] = useState(false);
-  const [bulkInvoiceProgress, setBulkInvoiceProgress] = useState({ done: 0, total: 0, phase: '' });
-  const invoiceTemplateBufferRef = useRef(null);
+  const {
+    isBulkInvoiceDownloading,
+    bulkInvoiceProgress,
+    handleDownloadInvoice,
+    handleDownloadInvoicesBulk
+  } = useInvoiceDownloads({
+    makers,
+    exhibition,
+    formConfig,
+    extractNum
+  });
 
   // Send Documents Notification Handler
   const handleSendDocuments = async () => {
@@ -2224,156 +2253,27 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
     }
   };
 
-  // Filter Makers by Tab & Search
-  const filteredMakers = makers.filter(m => {
-    const matchesSearch = (m.companyName?.includes(searchTerm) || m.code?.includes(searchTerm));
-    if (!matchesSearch) return false;
-
-    if (activeTab === 'invited') return m.status === 'listed' || m.status === 'invited' || m.status === 'confirmed' || m.status === 'declined'; // 招待中リストにも確定済み・辞退を表示
-    if (activeTab === 'confirmed') {
-      if (m.status !== 'confirmed') return false;
-      // Additional Filters
-      const getVal = (key) => {
-        if (m.response && m.response[key] !== undefined && m.response[key] !== '') return m.response[key];
-        if (m[key] !== undefined && m[key] !== '') return m[key];
-        return null;
-      };
-
-      if (confirmedFilter === 'power') {
-        const powerVal = getVal('power');
-        const rawRes = m.response || {};
-        return (powerVal && parseInt(powerVal) > 0) ||
-          JSON.stringify(rawRes).includes('電源') ||
-          JSON.stringify(m).includes('電源');
-      }
-      if (confirmedFilter === 'lunch') {
-        const lunch1 = getVal('lunch');
-        const lunch2 = getVal('lunchCount');
-        const rawRes = m.response || {};
-        return (parseInt(lunch1 || 0) > 0) || (parseInt(lunch2 || 0) > 0) ||
-          JSON.stringify(rawRes).includes('弁当') ||
-          JSON.stringify(m).includes('弁当');
-      }
-      return true;
-    }
-    if (activeTab === 'declined') return m.status === 'declined';
-    if (activeTab === 'unanswered') return m.status === 'invited' && !m.respondedAt;
-
-    return false;
+  const { filteredMakers, stats, aggregates } = useMakerViewModel({
+    makers,
+    searchTerm,
+    activeTab,
+    confirmedFilter
   });
 
-  // Calculate Stats
-  const stats = {
-    total: makers.length,
-    invited: makers.length,
 
-    confirmed: makers.filter(m => m.status === 'confirmed').length,
-    declined: makers.filter(m => m.status === 'declined').length,
-    unanswered: makers.filter(m => m.status === 'invited' && !m.respondedAt).length
-  };
-
-  // Calculate Aggregates for Confirmed Tab
-  const aggregates = useMemo(() => {
-    const confirmed = makers.filter(m => m.status === 'confirmed');
-    let totalBooths = 0;
-    let totalPeople = 0;
-    let totalLunch = 0;
-    let totalDesks = 0;
-    let totalChairs = 0;
-    let totalPower = 0;
-
-    confirmed.forEach(m => {
-      // ★修正: データが m.response (ネスト) にある場合と、m (直下) にある場合の両方を考慮
-      // m.response が空オブジェクト {} の場合、以前の m.response || m ロジックでは {} が優先され
-      // 直下のデータが読まれないバグがあったため、明示的に両方チェックするヘルパーを使用
-      const getVal = (key) => {
-        // 1. Try m.response[key]
-        if (m.response && m.response[key] !== undefined && m.response[key] !== '') return m.response[key];
-        // 2. Try m[key]
-        if (m[key] !== undefined && m[key] !== '') return m[key];
-        return null;
-      };
-
-      // Booths
-      const boothVal = getVal('boothCount');
-      if (boothVal) {
-        const match = String(boothVal).match(/(\d+)/);
-        if (match) totalBooths += parseInt(match[1], 10);
-      }
-
-      // People
-      const attendees = getVal('attendees') || getVal('staffCount');
-      if (attendees) totalPeople += parseInt(attendees, 10) || 0;
-
-      // Lunch (Handle 'lunch' or 'lunchCount')
-      const lunch1 = getVal('lunch');
-      const lunch2 = getVal('lunchCount');
-      if (lunch1) totalLunch += parseInt(lunch1, 10) || 0;
-      else if (lunch2) totalLunch += parseInt(lunch2, 10) || 0;
-
-      // Equipment
-      const desk = getVal('desk') || getVal('itemsDesk');
-      if (desk) totalDesks += parseInt(desk, 10) || 0;
-      const chair = getVal('chair') || getVal('itemsChair');
-      if (chair) totalChairs += parseInt(chair, 10) || 0;
-
-      // Power
-      const powerVal = getVal('power') || getVal('itemsPower');
-      const rawRes = m.response || {};
-      const isPower = (powerVal && (parseInt(powerVal) > 0 || powerVal === '必要')) ||
-        JSON.stringify(rawRes).includes('電源利用：あり') ||
-        JSON.stringify(m).includes('電源利用：あり');
-
-      if (isPower) totalPower += 1;
-    });
-
-    return { totalBooths, totalPeople, totalLunch, totalDesks, totalChairs, totalPower };
-  }, [makers]);
-
-
-  const handleSendInvitations = async () => {
-    const targets = makers.filter(m => (m.status === 'listed' || m.status === 'invited') && !m.invitationSentAt);
-    if (targets.length === 0) { alert('送付対象の企業がありません'); return; }
-    if (!window.confirm(`${targets.length}件の企業に招待状を一斉送付しますか？`)) return;
-
-    // Must check required settings
-    const settings = formConfig.settings || {};
-    // ★修正: 必須項目のチェックを強化 (出展費用、会場電話、搬入情報)
-    const missingSettings = [];
-    if (!settings.venuePhone) missingSettings.push('会場電話番号');
-    if (!settings.moveInInfo) missingSettings.push('搬入案内');
-    if (!settings.feePerBooth) missingSettings.push('出展費用');
-    if (!settings.deadline) missingSettings.push('回答期限');
-
-    if (missingSettings.length > 0) {
-      alert(`【送信できません】\n招待を送る前に「フォーム編集」＞「基本設定」から以下の項目を設定してください。\n\n未設定: ${missingSettings.join(', ')}`);
-      return;
-    }
-
-    const updatedMakers = makers.map(m => {
-      if ((m.status === 'listed' || m.status === 'invited') && !m.invitationSentAt) {
-        return { ...m, status: 'invited', invitationSentAt: Date.now() };
-      }
-      return m;
-    });
-    setMakers(updatedMakers);
-    alert('招待状を送付しました');
-  };
-
-  const handleCloseReception = async () => {
-    const targets = makers.filter(m => m.status === 'listed' || m.status === 'invited');
-    if (targets.length === 0) return;
-    if (!window.confirm(`現在「招待中（未回答）」の${targets.length}件を「辞退（締切）」に変更しますか？\n※参加確定の企業は変更されません。`)) return;
-
-    const updatedMakers = makers.map(m => {
-      if (m.status === 'listed' || m.status === 'invited') {
-        return { ...m, status: 'declined', note: (m.note || '') + '\n[システム] 受付締切により自動辞退' };
-      }
-      return m;
-    });
-    setMakers(updatedMakers);
-    alert('受付を締め切りました');
-  };
+  const {
+    handleSendInvitations,
+    handleCloseReception,
+    handleDeleteInvitation,
+    handleBulkDelete,
+    handleNormalizeMakers
+  } = useMakerActions({
+    makers,
+    setMakers,
+    formConfig,
+    selectedMakerIds,
+    setSelectedMakerIds
+  });
 
   const handleAddMaker = (newMaker) => {
     // Verify if the code exists in masterMakers
@@ -2429,30 +2329,7 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
 
   const handleExportConfirmedExcel = async () => {
     try {
-      const confirmed = makers.filter(m => m.status === 'confirmed');
-      const ExcelJS = (await import('exceljs')).default;
-      const wb = new ExcelJS.Workbook();
-      const ws = wb.addWorksheet('ConfirmedMakers');
-      ws.addRow(['会社名', '担当者名', '電話番号', '搬入日', 'コマ数', '人数', '特記事項']);
-
-      confirmed.forEach(m => {
-        const getVal = (key) => {
-          if (m.response && m.response[key] !== undefined && m.response[key] !== '') return m.response[key];
-          if (m[key] !== undefined && m[key] !== '') return m[key];
-          return '';
-        };
-
-        ws.addRow([
-          m.companyName,
-          getVal('repName'),
-          getVal('phone'),
-          getVal('moveInDate'),
-          getVal('boothCount'),
-          getVal('attendees'),
-          getVal('note')
-        ]);
-      });
-      wb.xlsx.writeBuffer().then(buffer => saveAs(new Blob([buffer]), 'confirmed_makers.xlsx'));
+      await exportConfirmedMakersExcel({ makers });
     } catch (e) {
       console.error(e);
       alert('Excel出力エラー: ' + e.message);
@@ -2460,746 +2337,23 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
   };
 
   const handleExportInvitedExcel = async () => {
-    // 招待タブに表示される対象（招待中、リスト、確定、辞退など全て含むが、ユーザー要望は「招待リスト」なので招待・リスト・確定などを出力対象とする）
-    const targets = filteredMakers; // 現在のフィルタ結果（検索含む）を出力するのが親切だが、要件は「招待リストを」なので招待済み一覧を出すべきか。filteredMakersを使うとタブのフィルタが効いてしまう。
-    // ユーザーは「招待メーカータブの招待リスト」と言っている。
-    // 安全のため、全招待者（status: listed, invited, confirmed, declined）を出力するが、フィルタは無視する、あるいは招待タブで見ているなら招待タブのフィルタを使う。
-    // ここでは「全招待者（listed, invited, confirmed, declined）」を出力する。
-    const allInvited = makers.filter(m => ['listed', 'invited', 'confirmed', 'declined'].includes(m.status));
-
-    if (allInvited.length === 0) {
-      alert('出力対象のデータがありません');
-      return;
-    }
-
     try {
-      const ExcelJS = (await import('exceljs')).default;
-      const wb = new ExcelJS.Workbook();
-      const ws = wb.addWorksheet('InvitedMakers');
-      ws.addRow(['仕入先コード', '企業名', 'ポータルサイトURL', 'ステータス']);
-
-      allInvited.forEach(m => {
-        const portalUrl = `${window.location.origin}/?mode=maker&id=${exhibition.id}&code=${m.code}`;
-        ws.addRow([
-          m.code || '',
-          m.companyName || '',
-          portalUrl,
-          m.status === 'confirmed' ? '参加確定' :
-            m.status === 'declined' ? '辞退' :
-              m.status === 'invited' ? '招待中' : 'リスト'
-        ]);
+      const result = await exportInvitedMakersExcel({
+        makers,
+        exhibitionId: exhibition.id,
+        exhibitionTitle: exhibition.title,
+        origin: window.location.origin
       });
-
-      wb.xlsx.writeBuffer().then(buffer => saveAs(new Blob([buffer]), `invited_makers_${exhibition.title}.xlsx`));
+      if (!result.exported) {
+        alert('出力対象のデータがありません');
+      }
     } catch (e) {
       console.error(e);
       alert('Excel出力エラー: ' + e.message);
     }
   };
 
-  const getMakerValue = (maker, key) => {
-    if (maker?.response && maker.response[key] !== undefined && maker.response[key] !== '') return maker.response[key];
-    if (maker && maker[key] !== undefined && maker[key] !== '') return maker[key];
-    return null;
-  };
-
-  const formatJapaneseDate = (date) => {
-    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
-    return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
-  };
-
-  const formatJapaneseMonthEnd = (date) => {
-    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
-    return `${date.getFullYear()}年${date.getMonth() + 1}月末日`;
-  };
-
-  const getFirstEventDate = (dates) => {
-    if (!Array.isArray(dates) || dates.length === 0) return null;
-    const sorted = [...dates].filter(Boolean).sort();
-    if (sorted.length === 0) return null;
-    const parsed = new Date(`${sorted[0]}T00:00:00`);
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
-  };
-
-  const getMonthEndByOffset = (baseDate, monthOffset) => {
-    if (!(baseDate instanceof Date) || Number.isNaN(baseDate.getTime())) return null;
-    return new Date(baseDate.getFullYear(), baseDate.getMonth() + monthOffset + 1, 0);
-  };
-
-  const resolveInvoiceSheetName = (paymentMethod) => {
-    const normalized = String(paymentMethod || '').replace(/\s+/g, '');
-    return normalized.includes('相殺') ? '相殺' : '振込';
-  };
-
-  const sanitizeFileName = (value, fallback) => {
-    const cleaned = String(value || '')
-      .replace(/[\\/:*?"<>|]/g, '_')
-      .replace(/\s+/g, '_')
-      .trim();
-    return cleaned || fallback;
-  };
-
-  const formatDateCompact = (date) => {
-    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
-    const yyyy = date.getFullYear();
-    const mm = String(date.getMonth() + 1).padStart(2, '0');
-    const dd = String(date.getDate()).padStart(2, '0');
-    return `${yyyy}${mm}${dd}`;
-  };
-
-  const colLettersToNumber = (letters) => {
-    let num = 0;
-    for (let i = 0; i < letters.length; i++) {
-      num = (num * 26) + (letters.charCodeAt(i) - 64);
-    }
-    return num;
-  };
-
-  const parseMergeRange = (range) => {
-    const m = String(range || '').match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
-    if (!m) return null;
-    return {
-      startCol: colLettersToNumber(m[1]),
-      startRow: parseInt(m[2], 10),
-      endCol: colLettersToNumber(m[3]),
-      endRow: parseInt(m[4], 10)
-    };
-  };
-
-  const excelColumnWidthToPx = (width) => {
-    const w = Number(width);
-    if (!Number.isFinite(w) || w <= 0) return 0;
-    if (w < 1) return Math.floor(w * 12 + 0.5);
-    return Math.floor(((256 * w + Math.floor(128 / 7)) / 256) * 7);
-  };
-
-  const pointsToPx = (pt) => {
-    const p = Number(pt);
-    if (!Number.isFinite(p) || p <= 0) return 0;
-    return p * (96 / 72);
-  };
-
-  const parseWorkbookThemeColors = (workbook) => {
-    const xml = workbook?._themes?.theme1;
-    if (!xml || typeof xml !== 'string') return {};
-    const getClr = (tag) => {
-      const rgx = new RegExp(`<a:${tag}>[\\s\\S]*?(?:<a:srgbClr[^>]*val=\"([0-9A-Fa-f]{6})\"|<a:sysClr[^>]*lastClr=\"([0-9A-Fa-f]{6})\")`, 'i');
-      const m = xml.match(rgx);
-      return (m?.[1] || m?.[2] || '').toUpperCase();
-    };
-    return {
-      0: getClr('lt1'),
-      1: getClr('dk1'),
-      2: getClr('lt2'),
-      3: getClr('dk2'),
-      4: getClr('accent1'),
-      5: getClr('accent2'),
-      6: getClr('accent3'),
-      7: getClr('accent4'),
-      8: getClr('accent5'),
-      9: getClr('accent6'),
-      10: getClr('hlink'),
-      11: getClr('folHlink')
-    };
-  };
-
-  const applyTintToHex = (hex, tint) => {
-    if (!hex) return hex;
-    if (tint === undefined || tint === null || Number.isNaN(Number(tint))) return hex;
-    const t = Number(tint);
-    const clamp = (n) => Math.max(0, Math.min(255, Math.round(n)));
-    const r = parseInt(hex.slice(0, 2), 16);
-    const g = parseInt(hex.slice(2, 4), 16);
-    const b = parseInt(hex.slice(4, 6), 16);
-    if (t < 0) {
-      const f = 1 + t;
-      return `${clamp(r * f).toString(16).padStart(2, '0')}${clamp(g * f).toString(16).padStart(2, '0')}${clamp(b * f).toString(16).padStart(2, '0')}`.toUpperCase();
-    }
-    return `${clamp(r + (255 - r) * t).toString(16).padStart(2, '0')}${clamp(g + (255 - g) * t).toString(16).padStart(2, '0')}${clamp(b + (255 - b) * t).toString(16).padStart(2, '0')}`.toUpperCase();
-  };
-
-  const colorToCss = (color, fallback = '#000000', themeColors = {}) => {
-    if (!color) return fallback;
-    if (color.argb) {
-      const argb = String(color.argb);
-      if (argb.length === 8) return `#${argb.slice(2)}`;
-      if (argb.length === 6) return `#${argb}`;
-    }
-    if (color.indexed !== undefined) {
-      const indexedMap = {
-        9: '#FFFFFF',
-        64: '#000000'
-      };
-      return indexedMap[color.indexed] || fallback;
-    }
-    if (color.theme !== undefined) {
-      const themeHex = themeColors[color.theme];
-      if (themeHex) {
-        const tinted = applyTintToHex(themeHex, color.tint);
-        return `#${tinted}`;
-      }
-    }
-    return fallback;
-  };
-
-  const normalizeInvoiceCellText = (text) => {
-    if (text === null || text === undefined) return '';
-    const s = String(text);
-    // Excel numFmt由来の "\" を日本円マークとして表示
-    return s.replace(/^\\(?=\d)/, '¥');
-  };
-
-  const getCellDisplayText = (cell) => {
-    if (!cell) return '';
-    if (cell.text !== undefined && cell.text !== null && cell.text !== '') return normalizeInvoiceCellText(cell.text);
-    const v = cell.value;
-    if (v === null || v === undefined) return '';
-    if (typeof v === 'object') {
-      if (v.richText) return normalizeInvoiceCellText(v.richText.map(t => t.text).join(''));
-      if (v.formula) return normalizeInvoiceCellText(v.result ?? '');
-      if (v.text) return normalizeInvoiceCellText(v.text);
-      return normalizeInvoiceCellText(JSON.stringify(v));
-    }
-    return normalizeInvoiceCellText(v);
-  };
-
-  const getCellRichRuns = (cell) => {
-    const v = cell?.value;
-    if (!v || typeof v !== 'object' || !Array.isArray(v.richText)) return null;
-    return v.richText.map((run) => ({
-      text: normalizeInvoiceCellText(run?.text ?? ''),
-      font: run?.font || {}
-    }));
-  };
-
-  const excelBorderToCss = (edge, themeColors) => {
-    if (!edge) return '';
-    const style = edge.style || 'thin';
-    const cssStyle = style === 'dashed' ? 'dashed' : style === 'dotted' ? 'dotted' : style === 'double' ? 'double' : 'solid';
-    const cssWidth = style === 'thick' ? 2 : style === 'medium' ? 1.5 : style === 'double' ? 3 : style === 'hair' ? 0.5 : 1;
-    const color = colorToCss(edge.color, '#000000', themeColors);
-    return `${cssWidth}px ${cssStyle} ${color}`;
-  };
-
-  const mediaToDataUrl = (media) => {
-    if (!media || !media.buffer) return null;
-    let bytes;
-    if (media.buffer instanceof ArrayBuffer) {
-      bytes = new Uint8Array(media.buffer);
-    } else if (ArrayBuffer.isView(media.buffer)) {
-      bytes = new Uint8Array(media.buffer.buffer, media.buffer.byteOffset, media.buffer.byteLength);
-    } else if (media.buffer?.data) {
-      bytes = Uint8Array.from(media.buffer.data);
-    } else {
-      return null;
-    }
-
-    let binary = '';
-    const chunkSize = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-    }
-    const ext = String(media.extension || 'png').toLowerCase();
-    return `data:image/${ext};base64,${btoa(binary)}`;
-  };
-
-  const createInvoicePreviewElement = (workbook, worksheet) => {
-    const maxCol = Math.max(45, worksheet.columnCount || 45);
-    const maxRow = Math.max(28, worksheet.rowCount || 28);
-    const defaultColWidth = Number(worksheet.properties?.defaultColWidth || 8.43);
-    const defaultRowHeight = Number(worksheet.properties?.defaultRowHeight || 13.5);
-    const themeColors = parseWorkbookThemeColors(workbook);
-    const resetCss = (el) => {
-      el.style.all = 'initial';
-      el.style.boxSizing = 'border-box';
-      return el;
-    };
-
-    const colWidths = new Array(maxCol + 1).fill(excelColumnWidthToPx(defaultColWidth));
-    for (let c = 1; c <= maxCol; c++) {
-      const w = worksheet.getColumn(c)?.width;
-      colWidths[c] = w ? excelColumnWidthToPx(w) : excelColumnWidthToPx(defaultColWidth);
-    }
-    const rowHeights = new Array(maxRow + 1).fill(pointsToPx(defaultRowHeight));
-    for (let r = 1; r <= maxRow; r++) {
-      const h = worksheet.getRow(r)?.height;
-      rowHeights[r] = h ? pointsToPx(h) : pointsToPx(defaultRowHeight);
-    }
-
-    const colLeft = new Array(maxCol + 2).fill(0);
-    const rowTop = new Array(maxRow + 2).fill(0);
-    let accW = 0;
-    for (let c = 1; c <= maxCol; c++) {
-      colLeft[c] = accW;
-      accW += colWidths[c];
-    }
-    let accH = 0;
-    for (let r = 1; r <= maxRow; r++) {
-      rowTop[r] = accH;
-      accH += rowHeights[r];
-    }
-
-    const mergeTopLeft = new globalThis.Map();
-    const mergeCovered = new Set();
-    const merges = worksheet.model?.merges || [];
-    merges.forEach((m) => {
-      const parsed = parseMergeRange(m);
-      if (!parsed) return;
-      mergeTopLeft.set(`${parsed.startRow}:${parsed.startCol}`, {
-        rowSpan: parsed.endRow - parsed.startRow + 1,
-        colSpan: parsed.endCol - parsed.startCol + 1
-      });
-      for (let r = parsed.startRow; r <= parsed.endRow; r++) {
-        for (let c = parsed.startCol; c <= parsed.endCol; c++) {
-          if (r === parsed.startRow && c === parsed.startCol) continue;
-          mergeCovered.add(`${r}:${c}`);
-        }
-      }
-    });
-    const pickEdgeBorder = (cells, edgeName) => {
-      for (const candidate of cells) {
-        const border = candidate?.border?.[edgeName];
-        if (border) return border;
-      }
-      return null;
-    };
-
-    const root = resetCss(document.createElement('div'));
-    root.style.display = 'block';
-    root.style.position = 'fixed';
-    root.style.left = '-100000px';
-    root.style.top = '0';
-    root.style.background = '#fff';
-    root.style.color = '#000';
-    root.style.padding = '0';
-    root.style.zIndex = '-1';
-    root.style.width = `${accW}px`;
-
-    const sheet = resetCss(document.createElement('div'));
-    sheet.style.display = 'block';
-    sheet.style.position = 'relative';
-    sheet.style.width = `${accW}px`;
-    sheet.style.height = `${accH}px`;
-    sheet.style.background = '#fff';
-    sheet.style.color = '#000';
-    sheet.style.fontFamily = "'Meiryo UI', 'Meiryo', sans-serif";
-
-    for (let r = 1; r <= maxRow; r++) {
-      for (let c = 1; c <= maxCol; c++) {
-        const key = `${r}:${c}`;
-        if (mergeCovered.has(key)) continue;
-
-        const row = worksheet.getRow(r);
-        const cell = row.getCell(c);
-        const merge = mergeTopLeft.get(key);
-        const rowSpan = merge?.rowSpan || 1;
-        const colSpan = merge?.colSpan || 1;
-
-        let width = 0;
-        for (let i = 0; i < colSpan; i++) width += colWidths[c + i] || 0;
-        let height = 0;
-        for (let i = 0; i < rowSpan; i++) height += rowHeights[r + i] || 0;
-
-        const border = (() => {
-          if (rowSpan <= 1 && colSpan <= 1) return cell.border || {};
-          const topCells = [];
-          const bottomCells = [];
-          const leftCells = [];
-          const rightCells = [];
-          for (let cc = c; cc < c + colSpan; cc++) {
-            topCells.push(worksheet.getRow(r).getCell(cc));
-            bottomCells.push(worksheet.getRow(r + rowSpan - 1).getCell(cc));
-          }
-          for (let rr = r; rr < r + rowSpan; rr++) {
-            leftCells.push(worksheet.getRow(rr).getCell(c));
-            rightCells.push(worksheet.getRow(rr).getCell(c + colSpan - 1));
-          }
-          return {
-            top: pickEdgeBorder(topCells, 'top') || cell.border?.top,
-            right: pickEdgeBorder(rightCells, 'right') || cell.border?.right,
-            bottom: pickEdgeBorder(bottomCells, 'bottom') || cell.border?.bottom,
-            left: pickEdgeBorder(leftCells, 'left') || cell.border?.left
-          };
-        })();
-        const hasBorder = !!(border.top || border.right || border.bottom || border.left);
-        const fill = cell.fill;
-        const hasSolidFill = fill?.type === 'pattern' && fill?.pattern === 'solid' && !!fill?.fgColor;
-        const text = getCellDisplayText(cell);
-        const richRuns = getCellRichRuns(cell);
-        if (!hasBorder && !hasSolidFill && !text) continue;
-
-        const cellDiv = resetCss(document.createElement('div'));
-        cellDiv.style.position = 'absolute';
-        cellDiv.style.left = `${colLeft[c]}px`;
-        cellDiv.style.top = `${rowTop[r]}px`;
-        cellDiv.style.width = `${width}px`;
-        cellDiv.style.height = `${height}px`;
-        cellDiv.style.boxSizing = 'border-box';
-        if (hasSolidFill) {
-          cellDiv.style.backgroundColor = colorToCss(fill.fgColor, '#ffffff', themeColors);
-        }
-
-        if (border.top) cellDiv.style.borderTop = excelBorderToCss(border.top, themeColors);
-        if (border.right) cellDiv.style.borderRight = excelBorderToCss(border.right, themeColors);
-        if (border.bottom) cellDiv.style.borderBottom = excelBorderToCss(border.bottom, themeColors);
-        if (border.left) cellDiv.style.borderLeft = excelBorderToCss(border.left, themeColors);
-
-        const font = cell.font || {};
-        if (font.name) cellDiv.style.fontFamily = `'${font.name}', 'Meiryo UI', sans-serif`;
-        if (font.size) {
-          const isTitleRow = r === 2 && Number(font.size) >= 24;
-          const fontPx = Math.max(7, pointsToPx(font.size) * (isTitleRow ? 0.94 : 1));
-          cellDiv.style.fontSize = `${fontPx}px`;
-        }
-        if (font.bold) cellDiv.style.fontWeight = '700';
-        if (font.italic) cellDiv.style.fontStyle = 'italic';
-        if (font.underline) cellDiv.style.textDecoration = 'underline';
-        if (font.color) cellDiv.style.color = colorToCss(font.color, '#000000', themeColors);
-
-        const align = cell.alignment || {};
-        const h = align.horizontal || 'left';
-        const hasHorizontalBorders = !!(border.top || border.bottom);
-        const isTitleRow = r === 2;
-        const isCompanyRow = r === 4;
-        const isTradeRow = r === 12 || r === 13;
-        const isTotalRow = r === 17;
-        const isBreakdownRow = r >= 25 && r <= 28;
-        const isLargeHeading = Number(font.size || 0) >= 24;
-        const v = align.vertical || (hasHorizontalBorders ? 'middle' : 'top');
-        let padTopBottom = isLargeHeading ? 1 : (hasHorizontalBorders ? 1 : 0);
-        if (isTitleRow || isTotalRow) padTopBottom = 0;
-        if (isCompanyRow || isTradeRow) padTopBottom = 0;
-        const padLeft = 2;
-        let padRight = h === 'right' ? 6 : (h === 'left' && colSpan >= 10 ? 8 : 2);
-        if (isBreakdownRow && h === 'left' && colSpan >= 10) padRight = Math.max(padRight, 22);
-        cellDiv.style.padding = `${padTopBottom}px ${padRight}px ${padTopBottom}px ${padLeft}px`;
-        const canOverflowHorizontally = rowSpan === 1
-          && colSpan === 1
-          && !align.wrapText
-          && (h === 'left' || !h)
-          && !border.right
-          && !!text
-          && !text.includes('\n');
-        cellDiv.style.overflow = (canOverflowHorizontally || (isLargeHeading && !isTitleRow)) ? 'visible' : 'hidden';
-        cellDiv.style.display = 'flex';
-        cellDiv.style.justifyContent = h === 'center' ? 'center' : h === 'right' ? 'flex-end' : 'flex-start';
-        cellDiv.style.alignItems = v === 'middle' ? 'center' : v === 'bottom' ? 'flex-end' : 'flex-start';
-        cellDiv.style.textAlign = h === 'center' ? 'center' : h === 'right' ? 'right' : 'left';
-        if (isTotalRow && text) {
-          cellDiv.style.alignItems = 'center';
-          cellDiv.style.justifyContent = 'center';
-        }
-        cellDiv.style.whiteSpace = align.wrapText ? 'pre-wrap' : 'pre';
-        cellDiv.style.lineHeight = isTitleRow ? '1' : (isTotalRow ? '1' : (isLargeHeading ? '1.05' : (text.includes('\n') ? '1.12' : '1.03')));
-        if (align.textRotation === 'vertical' || align.textRotation === 255) {
-          cellDiv.style.writingMode = 'vertical-rl';
-          cellDiv.style.textOrientation = 'upright';
-          cellDiv.style.justifyContent = 'center';
-          cellDiv.style.alignItems = 'center';
-          cellDiv.style.whiteSpace = 'normal';
-          cellDiv.style.lineHeight = '1';
-        }
-
-        if (text) {
-          const span = document.createElement('span');
-          span.style.display = 'inline-block';
-          if (canOverflowHorizontally) {
-            let overflowWidth = width;
-            for (let cc = c + 1; cc <= maxCol; cc++) {
-              const key2 = `${r}:${cc}`;
-              const merge2 = mergeTopLeft.get(key2);
-              const isMergeStart = !!merge2;
-              const nextCell = worksheet.getRow(r).getCell(cc);
-              const nextText = getCellDisplayText(nextCell);
-              if (isMergeStart || nextText) break;
-              overflowWidth += colWidths[cc] || 0;
-            }
-            span.style.maxWidth = `${Math.max(0, overflowWidth - 4)}px`;
-          } else if (isBreakdownRow && h === 'left' && colSpan >= 10) {
-            span.style.maxWidth = `${Math.max(0, width - padLeft - padRight - 8)}px`;
-          }
-          if (isCompanyRow || isTradeRow) span.style.transform = 'translateY(-1px)';
-          if (isTitleRow) span.style.transform = 'translateY(-0.5px)';
-          if (richRuns && richRuns.length > 0) {
-            richRuns.forEach((run) => {
-              const runSpan = document.createElement('span');
-              runSpan.textContent = run.text;
-              const rf = run.font || {};
-              if (rf.name) runSpan.style.fontFamily = `'${rf.name}', 'Meiryo UI', sans-serif`;
-              if (rf.size) runSpan.style.fontSize = `${Math.max(7, pointsToPx(rf.size))}px`;
-              if (rf.bold) runSpan.style.fontWeight = '700';
-              if (rf.italic) runSpan.style.fontStyle = 'italic';
-              if (rf.underline) runSpan.style.textDecoration = 'underline';
-              if (rf.color) runSpan.style.color = colorToCss(rf.color, '#000000', themeColors);
-              span.appendChild(runSpan);
-            });
-          } else {
-            span.textContent = text;
-          }
-          cellDiv.appendChild(span);
-        }
-
-        sheet.appendChild(cellDiv);
-      }
-    }
-
-    // ExcelJS再保存で欠落するテキストボックス（代表取締役〜）を明示的に描画
-    const officerBox = resetCss(document.createElement('div'));
-    officerBox.style.display = 'block';
-    const officerCol = Math.min(28, maxCol); // drawing anchor col=27 (0-based)
-    const officerRow = Math.min(9, maxRow);  // drawing anchor row=8 (0-based)
-    const officerEndCol = Math.min(40, maxCol + 1);
-    const officerEndRow = Math.min(17, maxRow + 1);
-    const officerLeft = colLeft[officerCol] || 0;
-    const officerTop = rowTop[officerRow] || 0;
-    const officerRight = colLeft[officerEndCol] || accW;
-    const officerBottom = rowTop[officerEndRow] || accH;
-    officerBox.style.position = 'absolute';
-    officerBox.style.left = `${officerLeft + 2}px`;
-    officerBox.style.top = `${officerTop + 2}px`;
-    officerBox.style.width = `${Math.max(220, officerRight - officerLeft - 6)}px`;
-    officerBox.style.height = `${Math.max(64, officerBottom - officerTop - 4)}px`;
-    officerBox.style.zIndex = '1';
-    officerBox.style.fontFamily = "'Meiryo UI', 'Meiryo', sans-serif";
-    officerBox.style.lineHeight = '1.16';
-    officerBox.style.color = '#000';
-    officerBox.style.whiteSpace = 'normal';
-    const officerLines = [
-      { text: '代表取締役社長　宮武　佳弘', px: pointsToPx(10.5) },
-      { text: '高知県高知市上町2-6-9', px: pointsToPx(8.8) },
-      { text: 'TEL088-831-6087/FAX088-831-6070', px: pointsToPx(8.8) },
-      { text: '登録番号：T4490001002141', px: pointsToPx(8.8) }
-    ];
-    officerLines.forEach(({ text: lineText, px }) => {
-      const line = document.createElement('div');
-      line.style.display = 'block';
-      line.style.margin = '0';
-      line.style.padding = '0';
-      line.style.fontSize = `${Math.max(8, px)}px`;
-      line.style.whiteSpace = 'nowrap';
-      line.textContent = lineText;
-      officerBox.appendChild(line);
-    });
-    sheet.appendChild(officerBox);
-
-    const images = worksheet.getImages ? worksheet.getImages() : [];
-    let stampLeftPx = null;
-    images.forEach((img) => {
-      const media = workbook.media?.[img.imageId];
-      const dataUrl = mediaToDataUrl(media);
-      if (!dataUrl) return;
-
-      const tl = img.range?.tl;
-      const br = img.range?.br;
-      const tlCol = typeof tl?.nativeCol === 'number' ? tl.nativeCol : Math.floor(tl?.col ?? 0);
-      const tlRow = typeof tl?.nativeRow === 'number' ? tl.nativeRow : Math.floor(tl?.row ?? 0);
-      const tlColOffPx = (typeof tl?.nativeColOff === 'number' ? tl.nativeColOff : (tl?.colOff || 0)) / 9525;
-      const tlRowOffPx = (typeof tl?.nativeRowOff === 'number' ? tl.nativeRowOff : (tl?.rowOff || 0)) / 9525;
-
-      let x = (colLeft[tlCol + 1] || 0) + tlColOffPx;
-      let y = (rowTop[tlRow + 1] || 0) + tlRowOffPx;
-      let w = 0;
-      let h = 0;
-
-      if (br) {
-        const brCol = typeof br?.nativeCol === 'number' ? br.nativeCol : Math.floor(br?.col ?? 0);
-        const brRow = typeof br?.nativeRow === 'number' ? br.nativeRow : Math.floor(br?.row ?? 0);
-        const brColOffPx = (typeof br?.nativeColOff === 'number' ? br.nativeColOff : (br?.colOff || 0)) / 9525;
-        const brRowOffPx = (typeof br?.nativeRowOff === 'number' ? br.nativeRowOff : (br?.rowOff || 0)) / 9525;
-        const x2 = (colLeft[brCol + 1] || accW) + brColOffPx;
-        const y2 = (rowTop[brRow + 1] || accH) + brRowOffPx;
-        w = Math.max(1, x2 - x);
-        h = Math.max(1, y2 - y);
-      } else if (img.range?.ext) {
-        w = Math.max(1, (img.range.ext.width || img.range.ext.cx || 0) / 9525);
-        h = Math.max(1, (img.range.ext.height || img.range.ext.cy || 0) / 9525);
-      }
-
-      if (w <= 0 || h <= 0) {
-        w = 120;
-        h = 40;
-      }
-      if (w <= 130 && h <= 130 && y < (rowTop[Math.min(16, maxRow)] || accH)) {
-        stampLeftPx = stampLeftPx === null ? x : Math.min(stampLeftPx, x);
-      }
-
-      const imageEl = resetCss(document.createElement('img'));
-      imageEl.style.display = 'block';
-      imageEl.src = dataUrl;
-      imageEl.style.position = 'absolute';
-      imageEl.style.left = `${x}px`;
-      imageEl.style.top = `${y}px`;
-      imageEl.style.width = `${w}px`;
-      imageEl.style.height = `${h}px`;
-      imageEl.style.objectFit = 'contain';
-      imageEl.style.pointerEvents = 'none';
-      imageEl.style.zIndex = '2';
-      sheet.appendChild(imageEl);
-    });
-    if (stampLeftPx !== null) {
-      const maxTextWidth = Math.max(170, stampLeftPx - (officerLeft + 2) - 10);
-      officerBox.style.width = `${maxTextWidth}px`;
-    }
-
-    root.appendChild(sheet);
-    return root;
-  };
-
-  const downloadInvoicePdfFromWorksheet = async (workbook, worksheet, fileName) => {
-    return downloadInvoicePdfFromWorksheetCanvas(workbook, worksheet, fileName);
-  };
-
-  const withTimeout = (promise, timeoutMs, message) => {
-    return Promise.race([
-      promise,
-      new Promise((_, reject) => {
-        setTimeout(() => reject(new Error(message)), timeoutMs);
-      })
-    ]);
-  };
-
-  const loadInvoiceTemplateBuffer = async () => {
-    if (invoiceTemplateBufferRef.current) return invoiceTemplateBufferRef.current.slice(0);
-    const templateFileName = '請求書例.xlsx';
-    const baseUrl = import.meta.env.BASE_URL || '/';
-    const templateUrl = `${baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`}${encodeURIComponent(templateFileName)}`;
-    const response = await fetch(templateUrl);
-    if (!response.ok) throw new Error(`テンプレート読込失敗 (${response.status})`);
-    const arrayBuffer = await response.arrayBuffer();
-    invoiceTemplateBufferRef.current = arrayBuffer;
-    return arrayBuffer.slice(0);
-  };
-
-  const buildInvoicePayloadForMaker = async (maker) => {
-    if (!maker || maker.status !== 'confirmed') {
-      throw new Error('参加確定の企業のみ請求書を出力できます。');
-    }
-
-    const eventDate = getFirstEventDate(exhibition.dates);
-    if (!eventDate) {
-      throw new Error('展示会の開催日が未設定のため、請求書を作成できません。');
-    }
-
-    const companyName = getMakerValue(maker, 'companyName') || maker.companyName || '企業名未設定';
-    const boothCountRaw = getMakerValue(maker, 'boothCount') || maker.boothCount || 0;
-    const boothCount = extractNum(boothCountRaw);
-    if (boothCount <= 0) {
-      throw new Error(`希望コマ数が取得できないため、請求書を作成できません。\n企業: ${companyName}`);
-    }
-
-    const paymentMethod = getMakerValue(maker, 'payment') || getMakerValue(maker, 'paymentMethod') || '振り込み';
-    const sheetName = resolveInvoiceSheetName(paymentMethod);
-    const feePerBooth = Number(formConfig?.settings?.feePerBooth || 30000);
-    const totalAmountTaxIncluded = Math.round(boothCount * feePerBooth);
-    const unitPriceWithoutTax = Math.round(feePerBooth / 1.1);
-    const amountWithoutTax = unitPriceWithoutTax * boothCount;
-    const taxAmount = Math.max(0, totalAmountTaxIncluded - amountWithoutTax);
-    const dueDate = getMonthEndByOffset(eventDate, 1);
-
-    const templateBuffer = await loadInvoiceTemplateBuffer();
-    const ExcelJS = (await import('exceljs')).default;
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(templateBuffer);
-
-    const invoiceSheet = workbook.getWorksheet(sheetName);
-    if (!invoiceSheet) throw new Error(`テンプレートに「${sheetName}」シートが見つかりません`);
-
-    invoiceSheet.getCell('AG1').value = formatJapaneseDate(new Date());
-    invoiceSheet.getCell('B4').value = companyName;
-    invoiceSheet.getCell('G13').value = formatJapaneseMonthEnd(dueDate);
-    invoiceSheet.getCell('M17').value = `\\${totalAmountTaxIncluded.toLocaleString('ja-JP')}（税込）`;
-    invoiceSheet.getCell('D19').value = `${exhibition.title || '展示会'}　出展料\n（${formatJapaneseDate(eventDate)}）`;
-    invoiceSheet.getCell('V19').value = boothCount;
-    invoiceSheet.getCell('Y19').value = `\\${unitPriceWithoutTax}`;
-    invoiceSheet.getCell('AF19').value = `\\${amountWithoutTax}`;
-    invoiceSheet.getCell('AF23').value = null;
-    invoiceSheet.getCell('AF24').value = `\\${taxAmount}`;
-    if (sheetName === '相殺' && dueDate) {
-      const dueMonth = dueDate.getMonth() + 1;
-      invoiceSheet.getCell('D25').value = `　※${dueMonth}月分の仕入より相殺させていただきます。`;
-      invoiceSheet.getCell('D26').value = null;
-      invoiceSheet.getCell('D27').value = null;
-      invoiceSheet.getCell('D28').value = null;
-    }
-
-    const supplierCode = getMakerValue(maker, 'supplierCode') || maker.code || 'コード未設定';
-    const fileName = `【請求書】${sanitizeFileName(supplierCode, 'コード')}＿${sanitizeFileName(companyName, '企業')}_${sanitizeFileName(exhibition.title || '展示会', '展示会')}_${formatDateCompact(new Date())}.pdf`;
-    return { workbook, invoiceSheet, fileName, companyName };
-  };
-
-  const handleDownloadInvoice = async (maker) => {
-    try {
-      const { workbook, invoiceSheet, fileName } = await buildInvoicePayloadForMaker(maker);
-      await downloadInvoicePdfFromWorksheet(workbook, invoiceSheet, fileName);
-    } catch (e) {
-      console.error('請求書出力エラー:', e);
-      alert(`請求書出力エラー: ${e.message}`);
-    }
-  };
-
-  const handleDownloadInvoicesBulk = async () => {
-    const confirmedMakers = makers.filter(m => m.status === 'confirmed');
-    if (confirmedMakers.length === 0) {
-      alert('参加確定の企業がないため、請求書を一括出力できません。');
-      return;
-    }
-    if (!window.confirm(`参加確定 ${confirmedMakers.length} 社の請求書をZIPで一括ダウンロードしますか？`)) return;
-
-    setIsBulkInvoiceDownloading(true);
-    setBulkInvoiceProgress({ done: 0, total: confirmedMakers.length, phase: '作成中' });
-    try {
-      const JSZipModule = await import('jszip');
-      const JSZip = JSZipModule.default || JSZipModule;
-      const zip = new JSZip();
-      const failed = [];
-
-      for (let idx = 0; idx < confirmedMakers.length; idx++) {
-        const maker = confirmedMakers[idx];
-        try {
-          const { workbook, invoiceSheet, fileName } = await buildInvoicePayloadForMaker(maker);
-          const pdfBlob = await withTimeout(
-            downloadInvoicePdfFromWorksheet(workbook, invoiceSheet, null),
-            45000,
-            'PDF生成がタイムアウトしました'
-          );
-          zip.file(fileName, pdfBlob);
-        } catch (err) {
-          const companyName = getMakerValue(maker, 'companyName') || maker.companyName || maker.code || '不明';
-          failed.push(`${companyName}: ${err.message}`);
-        }
-        const done = idx + 1;
-        setBulkInvoiceProgress({ done, total: confirmedMakers.length, phase: '作成中' });
-        await new Promise(resolve => setTimeout(resolve, 0));
-      }
-
-      const successCount = confirmedMakers.length - failed.length;
-      if (successCount <= 0) {
-        throw new Error('すべての企業で請求書作成に失敗しました。');
-      }
-
-      setBulkInvoiceProgress({ done: confirmedMakers.length, total: confirmedMakers.length, phase: 'ZIP作成中' });
-      const zipBlob = await zip.generateAsync({
-        type: 'blob',
-        compression: 'STORE'
-      });
-      const zipFileName = `【請求書一括】${sanitizeFileName(exhibition.title || '展示会', '展示会')}_${formatDateCompact(new Date())}.zip`;
-      saveAs(zipBlob, zipFileName);
-
-      if (failed.length > 0) {
-        const preview = failed.slice(0, 5).join('\n');
-        const omitted = failed.length > 5 ? `\n...他 ${failed.length - 5} 件` : '';
-        alert(`請求書一括出力が完了しました。\n成功: ${successCount}件 / 失敗: ${failed.length}件\n\n${preview}${omitted}`);
-      } else {
-        alert(`請求書一括出力が完了しました。（${successCount}件）`);
-      }
-    } catch (e) {
-      console.error('請求書一括出力エラー:', e);
-      alert(`請求書一括出力エラー: ${e.message}`);
-    } finally {
-      setIsBulkInvoiceDownloading(false);
-      setBulkInvoiceProgress({ done: 0, total: 0, phase: '' });
-    }
-  };
+  // Invoice download handlers are provided by src/features/invoice/useInvoiceDownloads.js
 
   const handleSaveMakerData = (newData) => {
     // ★修正: コードが変更された場合、既存の招待データとの重複チェックとマージを行う
@@ -3268,16 +2422,6 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
     });
   };
 
-  const handleDeleteInvitation = (maker) => {
-    if (!window.confirm(`「${maker.companyName}」をリストから削除しますか？`)) return;
-    if (!window.confirm('【警告】\n削除すると参加確定・招待中・辞退済みに関わらず、企業ポータルからこの展示会の情報は完全に削除されます。\n\n本当に削除してよろしいですか？')) return;
-
-    const updatedMakers = makers.filter(x => x.id !== maker.id);
-    setMakers(updatedMakers);
-  };
-
-  const [selectedMakerIds, setSelectedMakerIds] = useState(new Set());
-
   // Reset selection when tab changes
   useEffect(() => {
     setSelectedMakerIds(new Set());
@@ -3296,72 +2440,6 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
     } else {
       setSelectedMakerIds(new Set(filteredMakers.map(m => m.id)));
     }
-  };
-
-  const handleBulkDelete = () => {
-    if (selectedMakerIds.size === 0) return;
-    if (!window.confirm(`選択した ${selectedMakerIds.size} 件の企業を削除しますか？`)) return;
-    if (!window.confirm('【警告】\n削除するとこれらのデータは完全に失われます。\n本当によろしいですか？')) return;
-
-    const updatedMakers = makers.filter(m => !selectedMakerIds.has(m.id));
-    setMakers(updatedMakers);
-    setSelectedMakerIds(new Set());
-    alert(`削除しました`);
-  };
-
-  const handleNormalizeMakers = () => {
-    // Group by code
-    const groups = {};
-    makers.forEach(m => {
-      if (!m.code) return;
-      if (!groups[m.code]) groups[m.code] = [];
-      groups[m.code].push(m);
-    });
-
-    const toRemoveIds = new Set();
-    let fixedCount = 0;
-
-    const STATUS_PRIORITY = {
-      'confirmed': 4,
-      'declined': 3,
-      'invited': 2,
-      'listed': 1
-    };
-
-    Object.entries(groups).forEach(([code, groupMakers]) => {
-      if (groupMakers.length < 2) return;
-
-      // Sort by priority desc
-      groupMakers.sort((a, b) => {
-        const scoreA = STATUS_PRIORITY[a.status] || 0;
-        const scoreB = STATUS_PRIORITY[b.status] || 0;
-
-        // If status score is same, prefer one with response data
-        if (scoreA === scoreB) {
-          const hasResA = a.response && Object.keys(a.response).length > 0 ? 1 : 0;
-          const hasResB = b.response && Object.keys(b.response).length > 0 ? 1 : 0;
-          return hasResB - hasResA;
-        }
-        return scoreB - scoreA;
-      });
-
-      // Keep index 0, remove others
-      for (let i = 1; i < groupMakers.length; i++) {
-        toRemoveIds.add(groupMakers[i].id);
-      }
-      fixedCount++;
-    });
-
-    if (toRemoveIds.size === 0) {
-      alert('重複データは見つかりませんでした。');
-      return;
-    }
-
-    if (!window.confirm(`重複する仕入先コードを持つデータが ${fixedCount} グループ見つかりました。\n合計 ${toRemoveIds.size} 件の不要な重複データを削除し、最もステータスの高い（または情報の多い）データを残します。\n\n「参加確定」＞「辞退」＞「招待中」の優先順位で残します。\n実行してもよろしいですか？`)) return;
-
-    const updatedMakers = makers.filter(m => !toRemoveIds.has(m.id));
-    setMakers(updatedMakers);
-    alert(`${toRemoveIds.size} 件の重複データを削除し、整理しました。`);
   };
 
   return (
@@ -3655,10 +2733,10 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
           <div className="bg-emerald-50 p-4 border-b border-emerald-100 flex flex-wrap gap-6 text-sm text-emerald-800 animate-fade-in shadow-inner">
             <div className="font-bold flex items-center gap-2 bg-white/50 px-3 py-1 rounded-lg"><LayoutGrid size={16} /> コマ数合計: <span className="text-xl text-emerald-700">{aggregates.totalBooths}</span></div>
             <div className="font-bold flex items-center gap-2 bg-white/50 px-3 py-1 rounded-lg"><Users size={16} /> 参加人数: <span className="text-xl text-emerald-700">{aggregates.totalPeople}</span></div>
-            <div className="flex items-center gap-2 bg-white/50 px-3 py-1 rounded-lg"><span className="text-emerald-600">🍱 弁当:</span> <strong>{aggregates.totalLunch}</strong></div>
-            <div className="flex items-center gap-2 bg-white/50 px-3 py-1 rounded-lg"><span className="text-emerald-600">🪑 長机:</span> <strong>{aggregates.totalDesks}</strong></div>
-            <div className="flex items-center gap-2 bg-white/50 px-3 py-1 rounded-lg"><span className="text-emerald-600">🪑 椅子:</span> <strong>{aggregates.totalChairs}</strong></div>
-            <div className="flex items-center gap-2 bg-white/50 px-3 py-1 rounded-lg"><span className="text-emerald-600">⚡ 電源:</span> <strong>{aggregates.totalPower}</strong></div>
+            <div className="flex items-center gap-2 bg-white/50 px-3 py-1 rounded-lg"><span className="text-emerald-600">弁当:</span> <strong>{aggregates.totalLunch}</strong></div>
+            <div className="flex items-center gap-2 bg-white/50 px-3 py-1 rounded-lg"><span className="text-emerald-600">長机:</span> <strong>{aggregates.totalDesks}</strong></div>
+            <div className="flex items-center gap-2 bg-white/50 px-3 py-1 rounded-lg"><span className="text-emerald-600">椅子:</span> <strong>{aggregates.totalChairs}</strong></div>
+            <div className="flex items-center gap-2 bg-white/50 px-3 py-1 rounded-lg"><span className="text-emerald-600">電源:</span> <strong>{aggregates.totalPower}</strong></div>
           </div>
         )}
 
@@ -3782,158 +2860,11 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
 
       {/* Maker Detail Modal */}
       {showDetailModal && (
-        <div className="fixed inset-0 bg-black/50 z-[70] flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl p-6 w-full max-w-2xl shadow-2xl max-h-[90vh] overflow-y-auto animate-fade-in">
-            <div className="flex justify-between items-center mb-6 border-b pb-4">
-              <div>
-                <h3 className="text-2xl font-bold text-slate-800">{showDetailModal.companyName}</h3>
-                <div className="flex items-center gap-2 mt-1">
-                  <span className="bg-slate-100 text-slate-600 px-2 py-0.5 rounded text-xs font-mono">{showDetailModal.code}</span>
-                  <span className="text-slate-500 text-sm">回答日時: {new Date(showDetailModal.respondedAt).toLocaleString()}</span>
-                </div>
-              </div>
-              <button onClick={() => setShowDetailModal(null)} className="p-2 hover:bg-slate-100 rounded-full"><X size={24} /></button>
-            </div>
-
-            <div className="space-y-6">
-              {(() => {
-                const m = showDetailModal;
-                const getVal = (key) => {
-                  if (m.response && m.response[key] !== undefined && m.response[key] !== '') return m.response[key];
-                  if (m[key] !== undefined && m[key] !== '') return m[key];
-                  return null;
-                };
-
-                return (
-                  <div className="px-2">
-                    <div className="flex items-center justify-end mb-4">
-                      <button onClick={() => setEditingMaker(m)} className="bg-blue-600 text-white px-4 py-1.5 rounded-lg text-sm font-bold flex items-center gap-2 shadow-sm hover:bg-blue-700 transition-colors">
-                        <PenTool size={14} /> 編集
-                      </button>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
-                      {/* Left Column: Basic Info */}
-                      <div>
-                        <h4 className="font-bold text-slate-500 border-b border-slate-300 pb-2 mb-4">基本情報</h4>
-                        <div className="space-y-6">
-                          <div>
-                            <p className="text-xs font-bold text-slate-500 mb-1">会社名</p>
-                            <p className="text-base text-slate-800 font-medium">{m.companyName}</p>
-                          </div>
-                          <div>
-                            <p className="text-xs font-bold text-slate-500 mb-1">フリガナ</p>
-                            <p className="text-base text-slate-800 font-medium">{getVal('companyNameKana') || getVal('kana') || '-'}</p>
-                          </div>
-                          <div>
-                            <p className="text-xs font-bold text-slate-500 mb-1">担当者名</p>
-                            <p className="text-base text-slate-800 font-medium">{getVal('repName') || '-'}</p>
-                          </div>
-                          <div>
-                            <p className="text-xs font-bold text-slate-500 mb-1">電話番号</p>
-                            <p className="text-base text-slate-800 font-medium font-mono">{getVal('phone') || '-'}</p>
-                          </div>
-                          <div>
-                            <p className="text-xs font-bold text-slate-500 mb-1">メールアドレス</p>
-                            <p className="text-base text-slate-800 font-medium font-mono">{getVal('email') || '-'}</p>
-                          </div>
-                          {/* Payment Method - Assuming field or default */}
-                          <div>
-                            <p className="text-xs font-bold text-slate-500 mb-1">支払い方法</p>
-                            <p className="text-base text-slate-800 font-medium">{getVal('payment') || getVal('paymentMethod') || '-'}</p>
-                          </div>
-                          <div>
-                            <p className="text-xs font-bold text-slate-500 mb-1">請求書発行</p>
-                            <p className="text-base text-slate-800 font-medium">{getVal('billIssue') || getVal('invoice') || '-'}</p>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Right Column: Exhibit Details */}
-                      <div>
-                        <h4 className="font-bold text-slate-500 border-b border-slate-300 pb-2 mb-4">出展詳細</h4>
-                        <div className="space-y-6">
-                          <div>
-                            <p className="text-xs font-bold text-slate-500 mb-1">搬入日時</p>
-                            <p className="text-base text-slate-800 font-medium">{getVal('moveInDate') || '-'}</p>
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-4">
-                            <div>
-                              <p className="text-xs font-bold text-slate-500 mb-1">希望コマ数</p>
-                              <p className="text-base text-slate-800 font-medium">{getVal('boothCount') || '-'}</p>
-                            </div>
-                            <div>
-                              <p className="text-xs font-bold text-slate-500 mb-1">参加人数</p>
-                              <p className="text-base text-slate-800 font-medium">{getVal('staffCount') || getVal('attendees') || '0'}</p>
-                            </div>
-                          </div>
-
-                          <div>
-                            <p className="text-xs font-bold text-slate-500 mb-1">昼食(必要数)</p>
-                            <p className="text-base text-slate-800 font-medium">{getVal('lunchCount') || getVal('lunch') || '0'}</p>
-                          </div>
-
-                          {/* Equipment Box */}
-                          <div className="bg-slate-50 rounded-lg p-5">
-                            <h5 className="font-bold text-slate-700 mb-4">備品・設備</h5>
-                            <div className="space-y-4">
-                              <div>
-                                <p className="text-xs font-bold text-slate-500 mb-1">長机</p>
-                                <p className="text-base text-slate-800 font-medium">{getVal('itemsDesk') || getVal('desk') || '0'}</p>
-                              </div>
-                              <div>
-                                <p className="text-xs font-bold text-slate-500 mb-1">椅子</p>
-                                <p className="text-base text-slate-800 font-medium">{getVal('itemsChair') || getVal('chair') || '0'}</p>
-                              </div>
-                              <div>
-                                <p className="text-xs font-bold text-slate-500 mb-1">電源</p>
-                                <p className="text-base text-slate-800 font-medium">
-                                  {(getVal('itemsPower') === '必要' || getVal('power') > 0 || String(getVal('power')) === 'あり' || JSON.stringify(m).includes('電源利用：あり')) ? '必要' : '不要'}
-                                </p>
-                              </div>
-                              <div>
-                                <p className="text-xs font-bold text-slate-500 mb-1">電源詳細</p>
-                                <p className="text-base text-slate-800 font-medium">{getVal('powerDetail') || getVal('powerDetails') || getVal('powerVol') || '-'}</p>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Bottom Section */}
-                    <div className="mt-8">
-                      <h4 className="font-bold text-slate-500 border-b border-slate-300 pb-2 mb-4">搬出・展示品・その他</h4>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
-                        <div>
-                          <p className="text-xs font-bold text-slate-500 mb-1">運送便利用</p>
-                          <p className="text-base text-slate-800 font-medium">{getVal('transport') || getVal('shipping') || '-'}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs font-bold text-slate-500 mb-1">出荷個口数</p>
-                          <p className="text-base text-slate-800 font-medium">{getVal('packages') || getVal('packageCount') || getVal('shippingCount') || '0'}</p>
-                        </div>
-                        <div className="md:col-span-2">
-                          <p className="text-xs font-bold text-slate-500 mb-1">展示予定品</p>
-                          <p className="text-base text-slate-800 font-medium whitespace-pre-wrap">{getVal('products') || getVal('exhibitItems') || '-'}</p>
-                        </div>
-                        <div className="md:col-span-2">
-                          <p className="text-xs font-bold text-slate-500 mb-1">特記事項</p>
-                          <p className="text-base text-slate-800 font-medium whitespace-pre-wrap">{getVal('note') || '-'}</p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-
-            <div className="mt-8 flex justify-end pt-4 border-t">
-              <button onClick={() => setShowDetailModal(null)} className="bg-slate-800 text-white px-8 py-3 rounded-lg font-bold hover:bg-slate-700 shadow-lg">閉じる</button>
-            </div>
-          </div>
-        </div>
+        <MakerDetailModal
+          maker={showDetailModal}
+          onClose={() => setShowDetailModal(null)}
+          onEdit={(maker) => setEditingMaker(maker)}
+        />
       )}
 
       {/* Edit Modal */}
@@ -4085,7 +3016,7 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
             <div className="flex-1 w-full">
               <h4 className="font-bold text-white mb-1 flex items-center gap-2"><QrCode size={18} /> 事前登録用フォーム</h4>
               <div className="bg-yellow-900/30 border border-yellow-700/50 p-2 rounded mb-2 text-[10px] text-yellow-200">
-                <p>⚠️ スマホで読み取る場合、URLが <strong>localhost</strong> だとアクセスできません。</p>
+                <p>注意: スマホで読み取る場合、URLが <strong>localhost</strong> だとアクセスできません。</p>
                 <p>PCのIPアドレス（例: 192.168.x.x）に変更してください。</p>
               </div>
               <div className="mt-2 flex gap-2">
@@ -6298,7 +5229,7 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
           </button>
         </nav>
         <div className="p-4 border-t border-slate-700 text-xs text-slate-500">
-          © Kaientai-X
+          c Kaientai-X
         </div>
       </div>
 
@@ -6989,223 +5920,37 @@ function MakerDashboard({ maker, exhibitionName, scanLogs, onScan, exhibitions, 
 function PerformanceAnalysisView({ exhibitions }) {
   // 年度別収支計算
   const getYearlyStats = useMemo(() => {
-    const yearlyData = {};
-
-    exhibitions.forEach(ex => {
-      // 開催日から年度を算出（4月始まり）
-      const dateStr = ex.dates?.[0];
-      if (!dateStr) return;
-
-      const date = new Date(dateStr);
-      const month = date.getMonth() + 1;
-      const year = month >= 4 ? date.getFullYear() : date.getFullYear() - 1;
-      const fiscalYear = `${year}年度`;
-
-      if (!yearlyData[fiscalYear]) {
-        yearlyData[fiscalYear] = { income: 0, expense: 0, exhibitions: 0, visitors: 0 };
-      }
-
-      // 収入計算
-      const makers = ex.makers || [];
-      const confirmedMakers = makers.filter(m => m.status === 'confirmed');
-      const feePerBooth = ex.formConfig?.settings?.feePerBooth || 30000;
-      const boothIncome = confirmedMakers.reduce((sum, m) => {
-        const boothCount = parseInt(String(m.boothCount || '1').match(/\d+/)?.[0] || '1');
-        return sum + (boothCount * feePerBooth);
-      }, 0);
-      const otherIncomes = (ex.otherBudgets || []).filter(b => b.type === 'income').reduce((s, i) => s + (i.amount || 0), 0);
-
-      // 支出計算
-      const venueCost = ex.venueDetails?.cost || 0;
-      const equipmentTotal = (ex.venueDetails?.equipment || []).reduce((sum, item) => sum + (item.count * item.price), 0);
-      const lectureFees = (ex.lectures || []).reduce((sum, l) => sum + Number(l.speakerFee || 0) + Number(l.transportFee || 0), 0);
-      const otherExpenses = (ex.otherBudgets || []).filter(b => b.type === 'expense').reduce((s, i) => s + (i.amount || 0), 0);
-
-      yearlyData[fiscalYear].income += boothIncome + otherIncomes;
-      yearlyData[fiscalYear].expense += venueCost + equipmentTotal + lectureFees + otherExpenses;
-      yearlyData[fiscalYear].exhibitions += 1;
-      yearlyData[fiscalYear].visitors += (ex.visitors || []).length;
-    });
-
-    return Object.entries(yearlyData).map(([year, data]) => ({
-      year,
-      ...data,
-      profit: data.income - data.expense
-    })).sort((a, b) => b.year.localeCompare(a.year));
+    return buildYearlyStats(exhibitions);
   }, [exhibitions]);
 
   // 総来場者数
   const totalVisitors = useMemo(() => {
-    return exhibitions.reduce((sum, ex) => sum + (ex.visitors || []).length, 0);
+    return buildTotalVisitors(exhibitions);
   }, [exhibitions]);
 
   // 来場済み数
   const checkedInVisitors = useMemo(() => {
-    return exhibitions.reduce((sum, ex) => {
-      const visitors = ex.visitors || [];
-      return sum + visitors.filter(v => v.checkedIn || v.status === 'arrived').length;
-    }, 0);
+    return buildCheckedInVisitors(exhibitions);
   }, [exhibitions]);
-
-  const analysisStatuses = useMemo(() => new Set(['invited', 'confirmed', 'declined']), []);
-  const normalizeCompanyName = (name) => String(name || '')
-    .replace(/[ \t\r\n\u3000]/g, '')
-    .trim()
-    .toLowerCase();
-  const getMakerField = (maker, key) => {
-    if (!maker) return '';
-    if (maker[key] !== undefined && maker[key] !== null && maker[key] !== '') return String(maker[key]).trim();
-    if (maker.response?.[key] !== undefined && maker.response?.[key] !== null && maker.response?.[key] !== '') return String(maker.response[key]).trim();
-    if (maker.formData?.[key] !== undefined && maker.formData?.[key] !== null && maker.formData?.[key] !== '') return String(maker.formData[key]).trim();
-    return '';
-  };
-  const getMakerCode = (maker) => {
-    return getMakerField(maker, 'supplierCode')
-      || getMakerField(maker, 'code')
-      || '';
-  };
-  const getMakerDisplayName = (maker) => {
-    return getMakerField(maker, 'companyName')
-      || getMakerField(maker, 'name')
-      || (getMakerCode(maker) ? `コード:${getMakerCode(maker)}` : '企業名不明');
-  };
-  const getMakerCompanyKey = (maker) => {
-    const code = getMakerCode(maker);
-    if (code) return `code:${code}`;
-    const normalizedName = normalizeCompanyName(getMakerDisplayName(maker));
-    if (normalizedName) return `name:${normalizedName}`;
-    return null;
-  };
-  const normalizeMakerStatusForAnalysis = (rawStatus) => {
-    const s = String(rawStatus || '').trim().toLowerCase();
-    if (!s) return '';
-    if (s === 'confirmed' || s.includes('参加確定') || s.includes('申し込む')) return 'confirmed';
-    if (s === 'declined' || s.includes('辞退') || s.includes('申し込まない')) return 'declined';
-    if (s === 'invited' || s.includes('招待中')) return 'invited';
-    if (s === 'listed' || s.includes('未送付') || s.includes('リスト')) return 'listed';
-    return s;
-  };
 
   // 来場者属性（受付区分）
   const visitorAttributes = useMemo(() => {
-    const attributes = {};
-    exhibitions.forEach(ex => {
-      (ex.visitors || []).forEach(v => {
-        const category = v.receptionType || v.category || v.type || '未分類';
-        attributes[category] = (attributes[category] || 0) + 1;
-      });
-    });
-    return Object.entries(attributes).map(([name, value]) => ({ name, value }));
+    return buildVisitorAttributes(exhibitions);
   }, [exhibitions]);
 
   // 企業別の実績母集計（展示会単位で重複排除）
   const companyPerformanceStats = useMemo(() => {
-    const statsByCompany = new globalThis.Map();
-    const pickMostVoted = (votes) => {
-      let picked = '';
-      let max = -1;
-      votes.forEach((count, value) => {
-        if (count > max || (count === max && String(value).length > String(picked).length)) {
-          picked = value;
-          max = count;
-        }
-      });
-      return picked;
-    };
-
-    exhibitions.forEach((ex, exIndex) => {
-      const exhibitionKey = ex.id || `${ex.title || '展示会'}__${ex.dates?.[0] || ''}__${exIndex}`;
-      const perExCompany = new globalThis.Map();
-
-      (ex.makers || []).forEach((maker) => {
-        const status = normalizeMakerStatusForAnalysis(maker?.status);
-        if (!analysisStatuses.has(status)) return;
-
-        const companyKey = getMakerCompanyKey(maker);
-        if (!companyKey) return;
-
-        if (!perExCompany.has(companyKey)) {
-          perExCompany.set(companyKey, { statuses: new Set(), nameVotes: new globalThis.Map(), codeVotes: new globalThis.Map() });
-        }
-        const perEx = perExCompany.get(companyKey);
-        perEx.statuses.add(status);
-
-        const name = getMakerDisplayName(maker);
-        if (name) perEx.nameVotes.set(name, (perEx.nameVotes.get(name) || 0) + 1);
-
-        const code = getMakerCode(maker);
-        if (code) perEx.codeVotes.set(code, (perEx.codeVotes.get(code) || 0) + 1);
-      });
-
-      perExCompany.forEach((perEx, companyKey) => {
-        if (!statsByCompany.has(companyKey)) {
-          statsByCompany.set(companyKey, {
-            key: companyKey,
-            name: '企業名不明',
-            code: '',
-            invitedExhibitions: new Set(),
-            confirmedExhibitions: new Set(),
-            declinedExhibitions: new Set()
-          });
-        }
-        const company = statsByCompany.get(companyKey);
-        const votedName = pickMostVoted(perEx.nameVotes);
-        const votedCode = pickMostVoted(perEx.codeVotes);
-        if (votedName && (company.name === '企業名不明' || votedName.length > company.name.length)) company.name = votedName;
-        if (votedCode && !company.code) company.code = votedCode;
-
-        company.invitedExhibitions.add(exhibitionKey);
-        if (perEx.statuses.has('confirmed')) company.confirmedExhibitions.add(exhibitionKey);
-        if (perEx.statuses.has('declined')) company.declinedExhibitions.add(exhibitionKey);
-      });
-    });
-
-    return Array.from(statsByCompany.values()).map((company) => {
-      const invited = company.invitedExhibitions.size;
-      const confirmed = company.confirmedExhibitions.size;
-      const declined = company.declinedExhibitions.size;
-      const declineRate = invited > 0 ? Number(((declined / invited) * 100).toFixed(1)) : 0;
-      const participationRate = invited > 0 ? Number(((confirmed / invited) * 100).toFixed(1)) : 0;
-      return {
-        key: company.key,
-        name: company.name,
-        code: company.code,
-        invited,
-        confirmed,
-        declined,
-        declineRate,
-        participationRate
-      };
-    });
-  }, [analysisStatuses, exhibitions]);
+    return buildCompanyPerformanceStats(exhibitions);
+  }, [exhibitions]);
 
   // 参加企業ランキング TOP30（参加確定回数ベース）
   const companyRanking = useMemo(() => {
-    return [...companyPerformanceStats]
-      .sort((a, b) => b.confirmed - a.confirmed || b.invited - a.invited || a.name.localeCompare(b.name, 'ja'))
-      .slice(0, 30)
-      .map(company => ({
-        name: company.name,
-        code: company.code,
-        count: company.confirmed,
-        invited: company.invited,
-        declined: company.declined
-      }));
+    return buildCompanyRanking(companyPerformanceStats);
   }, [companyPerformanceStats]);
 
   // 辞退割合が高い企業ランキング TOP30（招待数3回以上）
   const declineRanking = useMemo(() => {
-    return [...companyPerformanceStats]
-      .filter(company => company.invited >= 3)
-      .sort((a, b) => b.declineRate - a.declineRate || b.declined - a.declined || b.invited - a.invited || a.name.localeCompare(b.name, 'ja'))
-      .slice(0, 30)
-      .map(company => ({
-        name: company.name,
-        code: company.code,
-        invited: company.invited,
-        declined: company.declined,
-        rate: company.declineRate.toFixed(1)
-      }));
+    return buildDeclineRanking(companyPerformanceStats);
   }, [companyPerformanceStats]);
 
   const [aiReportGeneratedAt, setAiReportGeneratedAt] = useState(() => Date.now());
@@ -7223,367 +5968,24 @@ function PerformanceAnalysisView({ exhibitions }) {
   }, []);
 
   const overallExhibitionStats = useMemo(() => {
-    const toInt = (value, fallback = 0) => {
-      const n = Number(value);
-      return Number.isFinite(n) ? n : fallback;
-    };
-    const parseCount = (value, fallback = 0) => {
-      const m = String(value ?? '').match(/\d+/);
-      return m ? Number(m[0]) : fallback;
-    };
-    const now = new Date();
-
-    const perExhibition = exhibitions.map((ex, exIndex) => {
-      const makers = ex.makers || [];
-      const visitors = ex.visitors || [];
-      const tasks = ex.tasks || [];
-      const scheduleDayBefore = ex.schedule?.dayBefore || [];
-      const scheduleEventDay = ex.schedule?.eventDay || [];
-      const lectures = ex.lectures || [];
-      const scanLogs = ex.scanLogs || [];
-      const hotels = ex.hotelReservations || ex.hotels || [];
-      const staffCount = String(ex.staff || '').split(',').map(s => s.trim()).filter(Boolean).length;
-
-      const statusCounts = { listed: 0, invited: 0, confirmed: 0, declined: 0 };
-      makers.forEach((maker) => {
-        const normalized = normalizeMakerStatusForAnalysis(maker?.status);
-        if (statusCounts[normalized] !== undefined) statusCounts[normalized] += 1;
-      });
-
-      const actionableInvites = statusCounts.invited + statusCounts.confirmed + statusCounts.declined;
-      const answered = statusCounts.confirmed + statusCounts.declined;
-      const responseRate = actionableInvites > 0 ? (answered / actionableInvites) * 100 : 0;
-      const confirmRate = actionableInvites > 0 ? (statusCounts.confirmed / actionableInvites) * 100 : 0;
-      const declineRate = actionableInvites > 0 ? (statusCounts.declined / actionableInvites) * 100 : 0;
-
-      const checkedIn = visitors.filter(v => v.checkedIn || v.status === 'arrived').length;
-      const visitorTarget = toInt(ex.targetVisitors, 0);
-      const makerTarget = toInt(ex.targetMakers, 0);
-      const profitTarget = toInt(ex.targetProfit, 0);
-
-      const taskDone = tasks.filter(t => t.status === 'done').length;
-      const taskRate = tasks.length > 0 ? (taskDone / tasks.length) * 100 : 0;
-      const scheduleCount = scheduleDayBefore.length + scheduleEventDay.length;
-
-      const feePerBooth = toInt(ex.formConfig?.settings?.feePerBooth, 30000);
-      const boothIncome = makers
-        .filter(m => normalizeMakerStatusForAnalysis(m?.status) === 'confirmed')
-        .reduce((sum, maker) => {
-          const boothCountRaw = getMakerField(maker, 'boothCount') || maker.boothCount || 0;
-          return sum + (parseCount(boothCountRaw, 0) * feePerBooth);
-        }, 0);
-      const otherIncomes = (ex.otherBudgets || []).filter(b => b.type === 'income').reduce((sum, b) => sum + toInt(b.amount, 0), 0);
-      const venueCost = toInt(ex.venueDetails?.cost, 0);
-      const equipmentTotal = (ex.venueDetails?.equipment || []).reduce((sum, item) => sum + (toInt(item.count, 0) * toInt(item.price, 0)), 0);
-      const lectureFees = lectures.reduce((sum, l) => sum + toInt(l.speakerFee ?? l.fee, 0) + toInt(l.transportFee, 0), 0);
-      const otherExpenses = (ex.otherBudgets || []).filter(b => b.type === 'expense').reduce((sum, b) => sum + toInt(b.amount, 0), 0);
-      const income = boothIncome + otherIncomes;
-      const expense = venueCost + equipmentTotal + lectureFees + otherExpenses;
-      const profit = income - expense;
-
-      const hasLayout = !!(ex.materials?.venue || ex.documents?.layoutPdf?.url || ex.documents?.layoutPdf?.data);
-      const hasFlyer = !!(ex.materials?.flyer || ex.documents?.flyerPdf?.url || ex.documents?.flyerPdf?.data);
-      const hasOtherMaterial = !!ex.materials?.other;
-      const docScore = (hasLayout ? 1 : 0) + (hasFlyer ? 1 : 0) + (hasOtherMaterial ? 1 : 0);
-
-      const deadlineRaw = ex.formConfig?.settings?.deadline || ex.formConfig?.deadline || null;
-      const deadline = deadlineRaw ? new Date(deadlineRaw) : null;
-      const hasPastDeadlinePending = !!(deadline && !Number.isNaN(deadline.getTime()) && deadline < now && statusCounts.invited > 0);
-
-      const exName = ex.title || `展示会#${exIndex + 1}`;
-      return {
-        id: ex.id || `ex-${exIndex}`,
-        name: exName,
-        date: ex.dates?.[0] || '',
-        visitors: visitors.length,
-        checkedIn,
-        visitorTarget,
-        confirmedMakers: statusCounts.confirmed,
-        makerTarget,
-        listedMakers: statusCounts.listed,
-        invitedMakers: statusCounts.invited,
-        declinedMakers: statusCounts.declined,
-        actionableInvites,
-        responseRate,
-        confirmRate,
-        declineRate,
-        taskCount: tasks.length,
-        taskDone,
-        taskRate,
-        scheduleCount,
-        lecturesCount: lectures.length,
-        scanCount: scanLogs.length,
-        hotelsCount: hotels.length,
-        staffCount,
-        docScore,
-        hasLayout,
-        hasFlyer,
-        hasOtherMaterial,
-        hasPastDeadlinePending,
-        income,
-        expense,
-        profit,
-        profitTarget
-      };
-    });
-
-    const totals = perExhibition.reduce((acc, ex) => {
-      acc.visitors += ex.visitors;
-      acc.checkedIn += ex.checkedIn;
-      acc.confirmedMakers += ex.confirmedMakers;
-      acc.listedMakers += ex.listedMakers;
-      acc.invitedMakers += ex.invitedMakers;
-      acc.declinedMakers += ex.declinedMakers;
-      acc.actionableInvites += ex.actionableInvites;
-      acc.tasks += ex.taskCount;
-      acc.tasksDone += ex.taskDone;
-      acc.scheduleItems += ex.scheduleCount;
-      acc.scanLogs += ex.scanCount;
-      acc.lectures += ex.lecturesCount;
-      acc.staff += ex.staffCount;
-      acc.hotels += ex.hotelsCount;
-      acc.docsScore += ex.docScore;
-      acc.docsComplete += ex.docScore >= 2 ? 1 : 0;
-      acc.pendingAfterDeadline += ex.hasPastDeadlinePending ? 1 : 0;
-      acc.income += ex.income;
-      acc.expense += ex.expense;
-      acc.profit += ex.profit;
-      if (ex.visitorTarget > 0) {
-        acc.targetVisitorsSet += 1;
-        if (ex.checkedIn >= ex.visitorTarget) acc.targetVisitorsAchieved += 1;
-      }
-      if (ex.makerTarget > 0) {
-        acc.targetMakersSet += 1;
-        if (ex.confirmedMakers >= ex.makerTarget) acc.targetMakersAchieved += 1;
-      }
-      if (ex.profitTarget > 0) {
-        acc.targetProfitSet += 1;
-        if (ex.profit >= ex.profitTarget) acc.targetProfitAchieved += 1;
-      }
-      return acc;
-    }, {
-      visitors: 0,
-      checkedIn: 0,
-      confirmedMakers: 0,
-      listedMakers: 0,
-      invitedMakers: 0,
-      declinedMakers: 0,
-      actionableInvites: 0,
-      tasks: 0,
-      tasksDone: 0,
-      scheduleItems: 0,
-      scanLogs: 0,
-      lectures: 0,
-      staff: 0,
-      hotels: 0,
-      docsScore: 0,
-      docsComplete: 0,
-      pendingAfterDeadline: 0,
-      income: 0,
-      expense: 0,
-      profit: 0,
-      targetVisitorsSet: 0,
-      targetVisitorsAchieved: 0,
-      targetMakersSet: 0,
-      targetMakersAchieved: 0,
-      targetProfitSet: 0,
-      targetProfitAchieved: 0
-    });
-
-    const rates = {
-      checkinRate: totals.visitors > 0 ? (totals.checkedIn / totals.visitors) * 100 : 0,
-      responseRate: totals.actionableInvites > 0 ? ((totals.confirmedMakers + totals.declinedMakers) / totals.actionableInvites) * 100 : 0,
-      declineRate: totals.actionableInvites > 0 ? (totals.declinedMakers / totals.actionableInvites) * 100 : 0,
-      confirmRate: totals.actionableInvites > 0 ? (totals.confirmedMakers / totals.actionableInvites) * 100 : 0,
-      taskDoneRate: totals.tasks > 0 ? (totals.tasksDone / totals.tasks) * 100 : 0,
-      docsCompleteRate: exhibitions.length > 0 ? (totals.docsComplete / exhibitions.length) * 100 : 0
-    };
-
-    return { perExhibition, totals, rates };
+    return buildOverallExhibitionStats(exhibitions);
   }, [exhibitions]);
 
   // AI統合分析（全展示会データ横断）
   const aiIntegratedReport = useMemo(() => {
-    const { perExhibition, totals, rates } = overallExhibitionStats;
-    const topProfit = [...perExhibition].sort((a, b) => b.profit - a.profit).slice(0, 3);
-    const weakResponse = [...perExhibition]
-      .filter(ex => ex.actionableInvites >= 3)
-      .sort((a, b) => a.responseRate - b.responseRate)
-      .slice(0, 3);
-
-    const executiveSummary = [
-      `全${exhibitions.length}展示会の統合分析。来場登録${totals.visitors}名、来場済み${totals.checkedIn}名（来場率${rates.checkinRate.toFixed(1)}%）。`,
-      `招待母数${totals.actionableInvites}件に対して、参加確定率${rates.confirmRate.toFixed(1)}%、辞退率${rates.declineRate.toFixed(1)}%、回答率${rates.responseRate.toFixed(1)}%。`,
-      `全体収支は 収入¥${totals.income.toLocaleString()} / 支出¥${totals.expense.toLocaleString()} / 収支¥${totals.profit.toLocaleString()}。`,
-      `主要資料（レイアウト・チラシ）が揃う展示会比率は${rates.docsCompleteRate.toFixed(1)}%（${totals.docsComplete}/${exhibitions.length || 0}件）。`,
-      `タスク完了率は${rates.taskDoneRate.toFixed(1)}%（${totals.tasksDone}/${totals.tasks}件）、期限超過未回答の展示会は${totals.pendingAfterDeadline}件。`
-    ];
-
-    const risks = [];
-    if (totals.pendingAfterDeadline > 0) {
-      risks.push({ score: 95, title: '回答期限超過の未回答企業が残存', detail: `${totals.pendingAfterDeadline}展示会で、期限経過後も「招待中」が残っています。` });
-    }
-    if (rates.responseRate < 60 && totals.actionableInvites >= 10) {
-      risks.push({ score: 88, title: '招待回答率が低い', detail: `回答率が${rates.responseRate.toFixed(1)}%です。回答導線とリマインド間隔の再設計が必要です。` });
-    }
-    if (rates.declineRate >= 35 && totals.actionableInvites >= 10) {
-      risks.push({ score: 82, title: '辞退率が高い', detail: `辞退率が${rates.declineRate.toFixed(1)}%です。対象選定基準の見直し余地があります。` });
-    }
-    if (rates.docsCompleteRate < 65 && exhibitions.length > 0) {
-      risks.push({ score: 74, title: '資料整備のばらつき', detail: `資料整備率が${rates.docsCompleteRate.toFixed(1)}%で、展示会ごとの品質差があります。` });
-    }
-    if (rates.taskDoneRate < 70 && totals.tasks >= 20) {
-      risks.push({ score: 70, title: 'タスク完了率が低い', detail: `全体タスク完了率が${rates.taskDoneRate.toFixed(1)}%です。進行管理の強化が必要です。` });
-    }
-    risks.sort((a, b) => b.score - a.score);
-
-    const opportunities = [];
-    if (topProfit.length > 0) {
-      const lead = topProfit[0];
-      opportunities.push(`最も収支が良い展示会は「${lead.name}」（¥${lead.profit.toLocaleString()}）。同条件（会場/対象企業/出展費）を横展開する価値があります。`);
-    }
-    if (weakResponse.length > 0) {
-      opportunities.push(`回答率が低い展示会（例: ${weakResponse.map(x => x.name).join(' / ')}）は、回答期限前の個別連絡で改善余地があります。`);
-    }
-    if (totals.targetVisitorsSet > 0) {
-      opportunities.push(`来場目標達成は ${totals.targetVisitorsAchieved}/${totals.targetVisitorsSet} 件。未達展示会の集客施策をテンプレ化できます。`);
-    }
-    if (totals.scanLogs > 0 && totals.confirmedMakers > 0) {
-      opportunities.push(`スキャンログ${totals.scanLogs}件が蓄積。企業別の商談量と次回出展率を紐づけると、招待精度が上がります。`);
-    }
-
-    const actions = [];
-    if (totals.pendingAfterDeadline > 0) actions.push('締切当日夜に自動で「招待中」を一括クローズし、辞退確定へ遷移する運用を固定化する。');
-    if (rates.responseRate < 60) actions.push('回答期限7日前/3日前/前日の3段階リマインドを標準化し、未回答企業へ担当者電話を連携する。');
-    if (rates.declineRate >= 35) actions.push('辞退率上位企業は次回招待前に参加条件確認を実施し、対象企業リストを優先度別に再編する。');
-    if (rates.docsCompleteRate < 65) actions.push('資料（レイアウト・チラシ）公開チェックリストを追加し、公開漏れをゼロ化する。');
-    if (rates.taskDoneRate < 70) actions.push('進行タスクを週次で強制棚卸しし、担当未設定・期限未設定タスクを禁止する。');
-    if (actions.length === 0) actions.push('主要KPIは安定。高収支展示会の再現性を高める標準運用書を作成してください。');
-
-    return {
-      generatedAt: aiReportGeneratedAt,
-      executiveSummary,
-      risks: risks.slice(0, 5),
-      opportunities: opportunities.slice(0, 5),
-      actions: actions.slice(0, 7),
-      kpi: {
-        responseRate: rates.responseRate.toFixed(1),
-        declineRate: rates.declineRate.toFixed(1),
-        confirmRate: rates.confirmRate.toFixed(1),
-        taskDoneRate: rates.taskDoneRate.toFixed(1),
-        docsCompleteRate: rates.docsCompleteRate.toFixed(1)
-      }
-    };
+    return buildAiIntegratedReport({
+      overallExhibitionStats,
+      exhibitionsCount: exhibitions.length,
+      generatedAt: aiReportGeneratedAt
+    });
   }, [aiReportGeneratedAt, exhibitions.length, overallExhibitionStats]);
 
   const makerStrategyReport = useMemo(() => {
-    const companies = [...companyPerformanceStats].filter((company) => company.invited > 0);
-    const totals = companies.reduce((acc, company) => {
-      acc.invited += company.invited;
-      acc.confirmed += company.confirmed;
-      acc.declined += company.declined;
-      return acc;
-    }, { invited: 0, confirmed: 0, declined: 0 });
-
-    const participationRate = totals.invited > 0 ? Number(((totals.confirmed / totals.invited) * 100).toFixed(1)) : 0;
-    const declineRate = totals.invited > 0 ? Number(((totals.declined / totals.invited) * 100).toFixed(1)) : 0;
-
-    const strategyLabel = (company) => {
-      if (company.invited >= 3 && company.declineRate >= 50) return '要因ヒアリング後に再招待';
-      if (company.confirmed >= 3 && company.participationRate >= 70) return '先行招待＋ブース拡張提案';
-      if (company.confirmed === 0 && company.invited >= 3) return '招待優先度を下げて保留';
-      if (company.participationRate >= 50) return '通常招待＋追加提案';
-      return '個別フォローで参加可否確認';
-    };
-
-    const topParticipants = [...companies]
-      .sort((a, b) => b.confirmed - a.confirmed || b.participationRate - a.participationRate || a.name.localeCompare(b.name, 'ja'))
-      .slice(0, 30)
-      .map((company) => ({
-        ...company,
-        strategy: strategyLabel(company)
-      }));
-
-    const highDecliners = [...companies]
-      .filter((company) => company.invited >= 2)
-      .sort((a, b) => b.declineRate - a.declineRate || b.declined - a.declined || b.invited - a.invited || a.name.localeCompare(b.name, 'ja'))
-      .slice(0, 30)
-      .map((company) => ({
-        ...company,
-        strategy: strategyLabel(company)
-      }));
-
-    const segmentCounts = companies.reduce((acc, company) => {
-      if (company.invited >= 3 && company.declineRate >= 50) acc.caution += 1;
-      else if (company.confirmed >= 3 && company.participationRate >= 70 && company.declineRate <= 20) acc.core += 1;
-      else if (company.confirmed > 0) acc.growth += 1;
-      else acc.dormant += 1;
-      return acc;
-    }, { core: 0, growth: 0, caution: 0, dormant: 0 });
-
-    const coreFocus = topParticipants
-      .filter((company) => company.confirmed >= 3 && company.participationRate >= 70 && company.declineRate <= 25)
-      .slice(0, 5);
-    const cautionFocus = highDecliners
-      .filter((company) => company.invited >= 3 && company.declined >= 2)
-      .slice(0, 5);
-    const dormantFocus = [...companies]
-      .filter((company) => company.invited >= 3 && company.confirmed === 0)
-      .sort((a, b) => b.invited - a.invited || b.declined - a.declined || a.name.localeCompare(b.name, 'ja'))
-      .slice(0, 5);
-
-    const executiveSummary = [
-      `対象${companies.length}社の招待実績を分析。招待${totals.invited}回、出展${totals.confirmed}回、辞退${totals.declined}回。`,
-      `全社平均の出展率は${participationRate.toFixed(1)}%、辞退率は${declineRate.toFixed(1)}%。`,
-      `重点育成${segmentCounts.core}社 / 成長余地${segmentCounts.growth}社 / 辞退高リスク${segmentCounts.caution}社 / 休眠${segmentCounts.dormant}社。`
-    ];
-
-    const policyRecommendations = [];
-    if (coreFocus.length > 0) {
-      policyRecommendations.push(`重点育成候補（${coreFocus.map((x) => x.name).join(' / ')}）には先行招待とブース拡張提案を実施する。`);
-    }
-    if (cautionFocus.length > 0) {
-      policyRecommendations.push(`辞退高リスク（${cautionFocus.map((x) => x.name).join(' / ')}）は、次回招待前に不参加要因ヒアリングを必須化する。`);
-    }
-    if (dormantFocus.length > 0) {
-      policyRecommendations.push(`連続未出展（${dormantFocus.map((x) => x.name).join(' / ')}）は、招待頻度と優先度を見直して母集団を再編する。`);
-    }
-    if (policyRecommendations.length === 0) {
-      policyRecommendations.push('現状は分布が安定。出展率上位企業の成功要因をテンプレート化して横展開する。');
-    }
-
-    const nextActions = [];
-    if (segmentCounts.caution > 0) nextActions.push('辞退率50%以上かつ招待3回以上の企業を次回招待前にレビューし、個別連絡で条件調整する。');
-    if (segmentCounts.core > 0) nextActions.push('出展上位企業に対して、次回展示会の先行案内と追加コマ提案を標準運用に組み込む。');
-    if (segmentCounts.dormant > 0) nextActions.push('3回以上招待で未出展の企業は、優先度を下げた再分類リストへ移して招待効率を改善する。');
-    if (nextActions.length === 0) nextActions.push('主要企業群は健全。現行の招待運用を維持しつつ、来場成果データと連携した精度改善を進める。');
-
-    return {
-      generatedAt: aiReportGeneratedAt,
-      totals: {
-        companies: companies.length,
-        invited: totals.invited,
-        confirmed: totals.confirmed,
-        declined: totals.declined
-      },
-      kpi: {
-        participationRate,
-        declineRate
-      },
-      segmentCounts,
-      executiveSummary,
-      policyRecommendations: policyRecommendations.slice(0, 5),
-      nextActions: nextActions.slice(0, 5),
-      topParticipants,
-      highDecliners
-    };
+    return buildMakerStrategyReport({
+      companyPerformanceStats,
+      generatedAt: aiReportGeneratedAt
+    });
   }, [aiReportGeneratedAt, companyPerformanceStats]);
-
-  const formatReportTimestamp = (ts) => {
-    const d = new Date(ts);
-    if (Number.isNaN(d.getTime())) return '-';
-    return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
-  };
 
   const handleRegenerateAiReport = () => {
     if (isAiRegenerating) return;
@@ -8358,7 +6760,7 @@ function CreateExhibitionForm({ data, setData, onCancel, onSubmit }) {
 
         <section><h3 className="text-lg font-bold text-slate-800 border-b pb-2 mb-4 flex items-center gap-2"><FileText className="text-blue-600" /> 基本情報</h3><div className="grid grid-cols-1 md:grid-cols-2 gap-6"><div className="col-span-2"><RequiredLabel>展示会タイトル</RequiredLabel><input type="text" name="title" value={data.title} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="例：2026 未来技術展" /></div><div><RequiredLabel>開催日 (複数可)</RequiredLabel><div className="flex gap-2 mb-2"><input type="date" value={tempDate} onChange={e => setTempDate(e.target.value)} className="flex-1 p-2 border border-slate-200 rounded-lg" /><button onClick={() => addDate('main')} className="bg-blue-100 text-blue-600 p-2 rounded-lg hover:bg-blue-200"><Plus size={20} /></button></div><div className="flex flex-wrap gap-2">{data.dates.map((d, i) => (<span key={i} className="bg-blue-50 text-blue-700 px-2 py-1 rounded text-sm flex items-center gap-1">{d} <button onClick={() => removeDate('main', i)}><X size={12} /></button></span>))}</div></div><div><label className="block text-sm font-medium text-slate-600 mb-1">事前準備日 (複数可)</label><div className="flex gap-2 mb-2"><input type="date" value={tempPreDate} onChange={e => setTempPreDate(e.target.value)} className="flex-1 p-2 border border-slate-200 rounded-lg" /><button onClick={() => addDate('pre')} className="bg-amber-100 text-amber-600 p-2 rounded-lg hover:bg-amber-200"><Plus size={20} /></button></div><div className="flex flex-wrap gap-2">{data.preDates.map((d, i) => (<span key={i} className="bg-amber-50 text-amber-700 px-2 py-1 rounded text-sm flex items-center gap-1">{d} <button onClick={() => removeDate('pre', i)}><X size={12} /></button></span>))}</div></div></div></section>
 
-        <section><h3 className="text-lg font-bold text-slate-800 border-b pb-2 mb-4 flex items-center gap-2"><MapPin className="text-blue-600" /> エリア・会場・Web</h3><div className="grid grid-cols-1 md:grid-cols-2 gap-6"><div><label className="block text-sm font-medium text-slate-600 mb-1">エリア選択</label><select name="prefecture" value={data.prefecture} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg bg-white"><option value="">都道府県を選択...</option>{PREFECTURES.map(group => (<optgroup key={group.region} label={group.region}>{group.prefs.map(p => <option key={p} value={p}>{p}</option>)}</optgroup>))}</select></div><div><label className="block text-sm font-medium text-slate-600 mb-1">会場名（予定）</label><input type="text" name="place" value={data.place} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" placeholder="例：福岡国際センター" /></div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1">会場住所</label><input type="text" name="venueAddress" value={data.venueAddress} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" placeholder="例：福岡県福岡市博多区石城町２−１" /></div><div><label className="block text-sm font-medium text-slate-600 mb-1">開場時間</label><input type="time" name="openTime" value={data.openTime} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" /></div><div><label className="block text-sm font-medium text-slate-600 mb-1">閉場時間</label><input type="time" name="closeTime" value={data.closeTime} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" /></div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1">展示会場URL</label><div className="flex gap-2"><input type="text" name="venueUrl" value={data.venueUrl} onChange={handleChange} className="flex-1 p-3 border border-slate-200 rounded-lg" placeholder="https://..." /><button onClick={simulateFetchImage} disabled={!data.venueUrl || isFetchingImg} className="bg-slate-800 text-white px-4 rounded-lg text-sm font-bold hover:bg-slate-700 disabled:opacity-50 flex items-center gap-2 whitespace-nowrap">{isFetchingImg ? <RefreshCw className="animate-spin" size={16} /> : <LinkIcon size={16} />} 画像を取得</button></div>{data.imageUrl && (<div className="mt-2 p-2 border border-slate-200 rounded-lg bg-slate-50 flex items-center gap-4"><img src={data.imageUrl} alt="Preview" className="w-20 h-14 object-cover rounded" /><span className="text-xs text-green-600 font-bold">✓ 画像を取得しました</span></div>)}</div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1 flex items-center gap-2"><Map size={16} /> GoogleマップURL</label><input type="text" name="googleMapsUrl" value={data.googleMapsUrl || ''} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" placeholder="https://maps.google.com/..." /></div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1">コンセプト</label><textarea name="concept" value={data.concept} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" rows="3" placeholder="展示会のテーマや狙いを記入" /></div></div></section>
+        <section><h3 className="text-lg font-bold text-slate-800 border-b pb-2 mb-4 flex items-center gap-2"><MapPin className="text-blue-600" /> エリア・会場・Web</h3><div className="grid grid-cols-1 md:grid-cols-2 gap-6"><div><label className="block text-sm font-medium text-slate-600 mb-1">エリア選択</label><select name="prefecture" value={data.prefecture} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg bg-white"><option value="">都道府県を選択...</option>{PREFECTURES.map(group => (<optgroup key={group.region} label={group.region}>{group.prefs.map(p => <option key={p} value={p}>{p}</option>)}</optgroup>))}</select></div><div><label className="block text-sm font-medium text-slate-600 mb-1">会場名（予定）</label><input type="text" name="place" value={data.place} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" placeholder="例：福岡国際センター" /></div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1">会場住所</label><input type="text" name="venueAddress" value={data.venueAddress} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" placeholder="例：福岡県福岡市博多区石城町２?１" /></div><div><label className="block text-sm font-medium text-slate-600 mb-1">開場時間</label><input type="time" name="openTime" value={data.openTime} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" /></div><div><label className="block text-sm font-medium text-slate-600 mb-1">閉場時間</label><input type="time" name="closeTime" value={data.closeTime} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" /></div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1">展示会場URL</label><div className="flex gap-2"><input type="text" name="venueUrl" value={data.venueUrl} onChange={handleChange} className="flex-1 p-3 border border-slate-200 rounded-lg" placeholder="https://..." /><button onClick={simulateFetchImage} disabled={!data.venueUrl || isFetchingImg} className="bg-slate-800 text-white px-4 rounded-lg text-sm font-bold hover:bg-slate-700 disabled:opacity-50 flex items-center gap-2 whitespace-nowrap">{isFetchingImg ? <RefreshCw className="animate-spin" size={16} /> : <LinkIcon size={16} />} 画像を取得</button></div>{data.imageUrl && (<div className="mt-2 p-2 border border-slate-200 rounded-lg bg-slate-50 flex items-center gap-4"><img src={data.imageUrl} alt="Preview" className="w-20 h-14 object-cover rounded" /><span className="text-xs text-green-600 font-bold">? 画像を取得しました</span></div>)}</div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1 flex items-center gap-2"><Map size={16} /> GoogleマップURL</label><input type="text" name="googleMapsUrl" value={data.googleMapsUrl || ''} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" placeholder="https://maps.google.com/..." /></div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1">コンセプト</label><textarea name="concept" value={data.concept} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" rows="3" placeholder="展示会のテーマや狙いを記入" /></div></div></section>
 
         <section><h3 className="text-lg font-bold text-slate-800 border-b pb-2 mb-4 flex items-center gap-2"><Target className="text-blue-600" /> 目標設定・チーム</h3><div className="grid grid-cols-1 md:grid-cols-3 gap-6"><div><RequiredLabel>集客目標 (人)</RequiredLabel><input type="number" name="targetVisitors" value={data.targetVisitors} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" /></div><div><RequiredLabel>招致メーカー目標 (社)</RequiredLabel><input type="number" name="targetMakers" value={data.targetMakers} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" /></div><div><RequiredLabel>目標利益額 (円)</RequiredLabel><input type="number" name="targetProfit" value={data.targetProfit} onChange={handleChange} className="w-full p-3 border border-blue-300 bg-blue-50 rounded-lg font-bold text-blue-800" placeholder="1000000" /></div><div className="col-span-1 md:col-span-3"><RequiredLabel>運営スタッフ</RequiredLabel><div className="flex gap-2 mb-2"><input type="text" value={staffName} onChange={e => setStaffName(e.target.value)} className="flex-1 p-3 border border-slate-200 rounded-lg" placeholder="スタッフ名" /><button onClick={addStaff} className="bg-slate-800 text-white px-4 rounded-lg"><Plus /></button></div><div className="flex flex-wrap gap-2">{data.staff && data.staff.split(',').filter(s => s).map((s, i) => (<span key={i} className="bg-slate-100 text-slate-700 px-3 py-1 rounded-full flex items-center gap-2 text-sm">{s.trim()} <button onClick={() => removeStaff(s.trim())}><X size={14} /></button></span>))}</div></div></div></section>
 
@@ -8476,69 +6878,21 @@ function App() {
   const [selectedExhibition, setSelectedExhibition] = useState(null);
   const [newExhibition, setNewExhibition] = useState({ title: '', dates: [], preDates: [], place: '', prefecture: '', venueAddress: '', openTime: '10:00', closeTime: '17:00', concept: '', targetVisitors: 0, targetMakers: 0, targetProfit: 0, venueUrl: '', googleMapsUrl: '', imageUrl: '', staff: '' });
   const [exhibitionTabs, setExhibitionTabs] = useState({}); // { [exhibitionId]: 'activeTabName' }
-
-
-
-
-  const [user, setUser] = useState(null);
-  const [db, setDb] = useState(null);
-  const [storage, setStorage] = useState(null);
-  const [appId, setAppId] = useState(null);
+  const { user, db, storage, appId } = useFirebaseInit();
   const [urlMode, setUrlMode] = useState('dashboard');
   const [targetExhibitionId, setTargetExhibitionId] = useState(null);
   const [dashboardMaker, setDashboardMaker] = useState(null);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
-  const [masterMakers, setMasterMakers] = useState([]);
-  const [masterMakersLoaded, setMasterMakersLoaded] = useState(false);
+  const {
+    masterMakers,
+    setMasterMakers,
+    masterMakersLoaded,
+    masterMakersRef
+  } = useMasterMakersSync({ db, appId, view });
 
   // ★最適化: useRefを使用してonSnapshotコールバック内で最新値を参照（再購読防止）
   const selectedExhibitionRef = useRef(null);
-  const masterMakersRef = useRef([]);
-
-  const applyMasterMakersData = React.useCallback((data) => {
-    setMasterMakers(data);
-    masterMakersRef.current = data;
-    setMasterMakersLoaded(true);
-  }, []);
-
-  // 通常利用時は1回取得のみ（常時リアルタイム購読を避けて読取コストを抑制）
-  useEffect(() => {
-    if (!db || !appId) return;
-    let isActive = true;
-
-    const fetchMasterMakers = async () => {
-      try {
-        const makersRef = collection(db, 'artifacts', appId, 'public', 'data', 'masterMakers');
-        const snapshot = await getDocs(makersRef);
-        if (!isActive) return;
-        const data = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
-        applyMasterMakersData(data);
-      } catch (error) {
-        console.error('[Firebase] Failed to load masterMakers:', error);
-        if (isActive) setMasterMakersLoaded(true);
-      }
-    };
-
-    fetchMasterMakers();
-    return () => {
-      isActive = false;
-    };
-  }, [db, appId, applyMasterMakersData]);
-
-  // 企業管理画面のみリアルタイム同期を有効化（編集時の即時反映を維持）
-  useEffect(() => {
-    if (!db || !appId || view !== 'enterprise') return;
-    const makersRef = collection(db, 'artifacts', appId, 'public', 'data', 'masterMakers');
-    const unsubscribe = onSnapshot(makersRef, (snapshot) => {
-      const data = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
-      applyMasterMakersData(data);
-    }, (error) => {
-      console.error('[Firebase] masterMakers onSnapshot error:', error);
-    });
-
-    return () => unsubscribe();
-  }, [db, appId, view, applyMasterMakersData]);
 
   // ★最適化: selectedExhibition の変更を Ref に同期（コールバック内で最新値を参照するため）
   useEffect(() => {
@@ -8568,51 +6922,6 @@ function App() {
     localStorage.removeItem('exhibition_auth');
     setIsAuthenticated(false);
   };
-
-  useEffect(() => {
-    let isMounted = true;
-    let unsubscribeAuth = null;
-
-    const init = async () => {
-      // ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-      // ここにあなたの Firebase Config を貼り付けてください
-      const firebaseConfig = {
-        apiKey: "AIzaSyDsIpXihZp7hQE2yeNcGxgPH-2iU-Obt-s",
-        authDomain: "exhibition-app-891e0.firebaseapp.com",
-        projectId: "exhibition-app-891e0",
-        storageBucket: "exhibition-app-891e0.firebasestorage.app",
-        messagingSenderId: "374193547856",
-        appId: "1:374193547856:web:1e71260bfe402d626cbf55"
-      };
-      // ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-
-      try {
-        const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const firestore = getFirestore(app);
-        const storageInstance = getStorage(app); // Initialize storage
-
-        if (!isMounted) return;
-
-        setAppId('default-app');
-        setDb(firestore);
-        setStorage(storageInstance); // Set storage state
-        await signInAnonymously(auth);
-        unsubscribeAuth = onAuthStateChanged(auth, (u) => {
-          if (!isMounted) return;
-          setUser(u);
-        });
-      } catch (e) {
-        console.error("Firebase init failed:", e);
-      }
-    };
-    init();
-
-    return () => {
-      isMounted = false;
-      if (unsubscribeAuth) unsubscribeAuth();
-    };
-  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -9261,4 +7570,5 @@ function App() {
 }
 
 export default App;
+
 

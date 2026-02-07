@@ -34,6 +34,7 @@ import {
   buildMakerStrategyReport,
   buildOverallExhibitionStats,
   buildTotalVisitors,
+  buildVisitorCheckinHeatmap,
   buildVisitorAttributes,
   buildYearlyStats,
   formatReportTimestamp
@@ -315,6 +316,11 @@ function FormEditorModal({ config, exhibition, onSave, onClose }) {
   const [activeTab, setActiveTab] = useState('settings');
   const [expandedItems, setExpandedItems] = useState({});
 
+  const getCurrentItems = () => localConfig[activeTab]?.items || [];
+  const findItemById = (id) => getCurrentItems().find(item => item.id === id);
+  const isFixedQuestion = (item) => !!item?.isFixed || !String(item?.id || '').startsWith('custom_');
+  const isPaymentQuestion = (item) => item?.id === 'payment';
+
   const toggleItem = (id) => {
     setExpandedItems(prev => ({ ...prev, [id]: !prev[id] }));
   };
@@ -329,6 +335,9 @@ function FormEditorModal({ config, exhibition, onSave, onClose }) {
   };
 
   const updateItem = (id, field, value) => {
+    const targetItem = findItemById(id);
+    if (!targetItem) return;
+    if (isPaymentQuestion(targetItem)) return;
     const updatedItems = localConfig[activeTab].items.map(i => {
       if (i.id === id) {
         if (field === 'options') return { ...i, options: value.split(',').map(s => s.trim()) };
@@ -340,6 +349,9 @@ function FormEditorModal({ config, exhibition, onSave, onClose }) {
   };
 
   const addOption = (itemId) => {
+    const targetItem = findItemById(itemId);
+    if (!targetItem) return;
+    if (isPaymentQuestion(targetItem)) return;
     const updatedItems = localConfig[activeTab].items.map(i => {
       if (i.id === itemId) return { ...i, options: [...(i.options || []), '新しい選択肢'] };
       return i;
@@ -348,6 +360,9 @@ function FormEditorModal({ config, exhibition, onSave, onClose }) {
   };
 
   const removeOption = (itemId, index) => {
+    const targetItem = findItemById(itemId);
+    if (!targetItem) return;
+    if (isPaymentQuestion(targetItem)) return;
     const updatedItems = localConfig[activeTab].items.map(i => {
       if (i.id === itemId) {
         const newOpts = [...(i.options || [])];
@@ -360,6 +375,9 @@ function FormEditorModal({ config, exhibition, onSave, onClose }) {
   };
 
   const updateOptionText = (itemId, index, val) => {
+    const targetItem = findItemById(itemId);
+    if (!targetItem) return;
+    if (isPaymentQuestion(targetItem)) return;
     const updatedItems = localConfig[activeTab].items.map(i => {
       if (i.id === itemId) {
         const newOpts = [...(i.options || [])];
@@ -386,6 +404,12 @@ function FormEditorModal({ config, exhibition, onSave, onClose }) {
   };
 
   const deleteItem = (id) => {
+    const targetItem = findItemById(id);
+    if (!targetItem) return;
+    if (isFixedQuestion(targetItem)) {
+      alert('固定質問は削除できません。');
+      return;
+    }
     if (window.confirm('この質問を削除してもよろしいですか？')) {
       const updatedItems = localConfig[activeTab].items.filter(i => i.id !== id);
       updateSection('items', updatedItems);
@@ -393,6 +417,9 @@ function FormEditorModal({ config, exhibition, onSave, onClose }) {
   };
 
   const updateCondition = (itemId, field, value) => {
+    const targetItem = findItemById(itemId);
+    if (!targetItem) return;
+    if (isPaymentQuestion(targetItem)) return;
     const updatedItems = localConfig[activeTab].items.map(i => {
       if (i.id === itemId) {
         // If toggling condition off (value === null/false), remove it
@@ -585,7 +612,10 @@ ${place}
                 <div>
                   <h4 className="font-bold text-slate-700 mb-4 flex items-center gap-2"><List size={18} /> 質問項目設定</h4>
                   <div className="space-y-3">
-                    {localConfig[activeTab].items.map(item => (
+                    {localConfig[activeTab].items.map(item => {
+                      const itemIsFixed = isFixedQuestion(item);
+                      const itemIsPaymentLocked = isPaymentQuestion(item);
+                      return (
                       <div key={item.id} className="bg-white border border-slate-200 rounded-lg overflow-hidden">
                         <div
                           className="p-4 flex items-center justify-between cursor-pointer hover:bg-slate-50 transition-colors"
@@ -595,10 +625,19 @@ ${place}
                             <span className={`text-xs font-bold px-2 py-1 rounded border ${item.type === 'radio' ? 'bg-blue-50 text-blue-600 border-blue-200' : 'bg-slate-100 text-slate-500 border-slate-200'}`}>{item.type === 'text' ? 'テキスト' : item.type === 'radio' ? 'ラジオボタン' : item.type === 'select' ? 'プルダウン' : item.type === 'checkbox' ? 'チェックボックス' : item.type === 'textarea' ? '長文' : item.type}</span>
                             <span className="font-bold text-slate-700">{item.label}</span>
                             {item.required && <span className="text-xs bg-red-100 text-red-600 px-1.5 py-0.5 rounded font-bold">必須</span>}
+                            {itemIsFixed && <span className="text-xs bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-bold">固定</span>}
+                            {itemIsPaymentLocked && <span className="text-xs bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded font-bold">編集不可</span>}
                             {item.condition && <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-bold flex items-center gap-1"><GitBranch size={10} /> 分岐あり</span>}
                           </div>
                           <div className="flex items-center gap-2">
-                            <button onClick={(e) => { e.stopPropagation(); deleteItem(item.id); }} className="p-2 text-slate-300 hover:text-red-500 rounded hover:bg-red-50 transition-colors"><Trash2 size={16} /></button>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); deleteItem(item.id); }}
+                              disabled={itemIsFixed}
+                              title={itemIsFixed ? '固定質問は削除できません' : '削除'}
+                              className={`p-2 rounded transition-colors ${itemIsFixed ? 'text-slate-300 cursor-not-allowed' : 'text-slate-300 hover:text-red-500 hover:bg-red-50'}`}
+                            >
+                              <Trash2 size={16} />
+                            </button>
                             {expandedItems[item.id] ? <ChevronUp size={16} className="text-slate-400" /> : <ChevronDown size={16} className="text-slate-400" />}
                           </div>
                         </div>
@@ -607,11 +646,21 @@ ${place}
                           <div className="p-4 bg-slate-50 border-t border-slate-100 grid grid-cols-1 md:grid-cols-2 gap-4 animate-fade-in">
                             <div className="md:col-span-2">
                               <label className="block text-xs font-bold text-slate-400 mb-1">質問ラベル</label>
-                              <input className="w-full border p-2 rounded text-sm" value={item.label} onChange={e => updateItem(item.id, 'label', e.target.value)} />
+                              <input
+                                className={`w-full border p-2 rounded text-sm ${itemIsPaymentLocked ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
+                                value={item.label}
+                                onChange={e => updateItem(item.id, 'label', e.target.value)}
+                                disabled={itemIsPaymentLocked}
+                              />
                             </div>
                             <div>
                               <label className="block text-xs font-bold text-slate-400 mb-1">回答タイプ</label>
-                              <select className="w-full border p-2 rounded text-sm bg-white" value={item.type} onChange={e => updateItem(item.id, 'type', e.target.value)}>
+                              <select
+                                className={`w-full border p-2 rounded text-sm bg-white ${itemIsPaymentLocked ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
+                                value={item.type}
+                                onChange={e => updateItem(item.id, 'type', e.target.value)}
+                                disabled={itemIsPaymentLocked}
+                              >
                                 <option value="text">テキスト入力 (1行)</option>
                                 <option value="textarea">テキスト入力 (複数行)</option>
                                 <option value="radio">ラジオボタン (1つ選択)</option>
@@ -623,13 +672,24 @@ ${place}
                             <div>
                               <label className="block text-xs font-bold text-slate-400 mb-1">必須設定</label>
                               <div className="flex items-center gap-2 mt-2">
-                                <input type="checkbox" checked={item.required || false} onChange={e => updateItem(item.id, 'required', e.target.checked)} className="w-4 h-4 text-blue-600 rounded" />
+                                <input
+                                  type="checkbox"
+                                  checked={item.required || false}
+                                  onChange={e => updateItem(item.id, 'required', e.target.checked)}
+                                  className="w-4 h-4 text-blue-600 rounded"
+                                  disabled={itemIsPaymentLocked}
+                                />
                                 <span className="text-sm font-bold text-slate-700">必須にする</span>
                               </div>
                             </div>
                             <div className="md:col-span-2">
                               <label className="block text-xs font-bold text-slate-400 mb-1">補足説明 (Help Text)</label>
-                              <input className="w-full border p-2 rounded text-sm" value={item.help || ''} onChange={e => updateItem(item.id, 'help', e.target.value)} />
+                              <input
+                                className={`w-full border p-2 rounded text-sm ${itemIsPaymentLocked ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
+                                value={item.help || ''}
+                                onChange={e => updateItem(item.id, 'help', e.target.value)}
+                                disabled={itemIsPaymentLocked}
+                              />
                             </div>
                             {(item.type === 'select' || item.type === 'radio' || item.type === 'checkbox') && (
                               <div className="md:col-span-2 bg-white p-4 rounded border border-slate-200">
@@ -638,14 +698,16 @@ ${place}
                                   {(item.options || []).map((opt, idx) => (
                                     <div key={idx} className="flex gap-2">
                                       <input
-                                        className="flex-1 border p-2 rounded text-sm"
+                                        className={`flex-1 border p-2 rounded text-sm ${itemIsPaymentLocked ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
                                         value={opt}
                                         onChange={e => updateOptionText(item.id, idx, e.target.value)}
+                                        disabled={itemIsPaymentLocked}
                                       />
                                       <button
                                         onClick={() => removeOption(item.id, idx)}
-                                        className="bg-red-50 text-red-500 p-2 rounded hover:bg-red-100"
+                                        className={`p-2 rounded ${itemIsPaymentLocked ? 'bg-slate-100 text-slate-300 cursor-not-allowed' : 'bg-red-50 text-red-500 hover:bg-red-100'}`}
                                         title="削除"
+                                        disabled={itemIsPaymentLocked}
                                       >
                                         <Trash2 size={16} />
                                       </button>
@@ -653,7 +715,8 @@ ${place}
                                   ))}
                                   <button
                                     onClick={() => addOption(item.id)}
-                                    className="w-full py-2 border-2 border-dashed border-slate-300 rounded text-slate-400 text-sm font-bold hover:bg-slate-50 hover:border-slate-400 flex items-center justify-center gap-2 transition-colors"
+                                    className={`w-full py-2 border-2 border-dashed rounded text-sm font-bold flex items-center justify-center gap-2 transition-colors ${itemIsPaymentLocked ? 'border-slate-200 text-slate-300 cursor-not-allowed bg-slate-50' : 'border-slate-300 text-slate-400 hover:bg-slate-50 hover:border-slate-400'}`}
+                                    disabled={itemIsPaymentLocked}
                                   >
                                     <Plus size={16} /> 選択肢を追加
                                   </button>
@@ -671,6 +734,7 @@ ${place}
                                     checked={!!item.condition}
                                     onChange={e => updateCondition(item.id, 'enabled', e.target.checked)}
                                     className="w-4 h-4 text-amber-600 rounded"
+                                    disabled={itemIsPaymentLocked}
                                   />
                                   <span className="text-xs font-bold text-amber-700">条件を有効にする</span>
                                 </div>
@@ -681,9 +745,10 @@ ${place}
                                   <div>
                                     <label className="block text-[10px] font-bold text-amber-600 mb-1">この質問の回答が...</label>
                                     <select
-                                      className="w-full border p-2 rounded text-xs bg-white"
+                                      className={`w-full border p-2 rounded text-xs bg-white ${itemIsPaymentLocked ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
                                       value={item.condition.targetId}
                                       onChange={e => updateCondition(item.id, 'targetId', e.target.value)}
+                                      disabled={itemIsPaymentLocked}
                                     >
                                       <option value="">(質問を選択)</option>
                                       {getOtherItems(item.id).map(opt => (
@@ -694,9 +759,10 @@ ${place}
                                   <div>
                                     <label className="block text-[10px] font-bold text-amber-600 mb-1">条件 (一致/不一致)</label>
                                     <select
-                                      className="w-full border p-2 rounded text-xs bg-white"
+                                      className={`w-full border p-2 rounded text-xs bg-white ${itemIsPaymentLocked ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
                                       value={item.condition.operator}
                                       onChange={e => updateCondition(item.id, 'operator', e.target.value)}
+                                      disabled={itemIsPaymentLocked}
                                     >
                                       <option value="eq">と等しい時 (Equals)</option>
                                       <option value="neq">と異なる時 (Not Equals)</option>
@@ -706,9 +772,10 @@ ${place}
                                     <label className="block text-[10px] font-bold text-amber-600 mb-1">対象の値</label>
                                     {item.condition.targetId && (getOptionsForTarget(item.condition.targetId).length > 0) ? (
                                       <select
-                                        className="w-full border p-2 rounded text-xs bg-white"
+                                        className={`w-full border p-2 rounded text-xs bg-white ${itemIsPaymentLocked ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
                                         value={item.condition.value}
                                         onChange={e => updateCondition(item.id, 'value', e.target.value)}
+                                        disabled={itemIsPaymentLocked}
                                       >
                                         <option value="">(値を選択)</option>
                                         {getOptionsForTarget(item.condition.targetId).map(val => (
@@ -717,10 +784,11 @@ ${place}
                                       </select>
                                     ) : (
                                       <input
-                                        className="w-full border p-2 rounded text-xs"
+                                        className={`w-full border p-2 rounded text-xs ${itemIsPaymentLocked ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
                                         placeholder="値を入力"
                                         value={item.condition.value}
                                         onChange={e => updateCondition(item.id, 'value', e.target.value)}
+                                        disabled={itemIsPaymentLocked}
                                       />
                                     )}
                                   </div>
@@ -730,7 +798,7 @@ ${place}
                           </div>
                         )}
                       </div>
-                    ))}
+                    )})}
                     <button
                       onClick={addItem}
                       className="w-full py-3 bg-blue-50 border-2 border-blue-200 border-dashed rounded-xl text-blue-600 font-bold hover:bg-blue-100 hover:border-blue-300 transition-colors flex items-center justify-center gap-2"
@@ -1352,6 +1420,9 @@ function TabSchedule({ scheduleData, updateMainData, staff, dates, preDates }) {
   const [editingItem, setEditingItem] = useState(null);
   const [originalItem, setOriginalItem] = useState(null); // For unsaved changes detection
   const [targetType, setTargetType] = useState('eventDay');
+  const [isAssigneeFilterEnabled, setIsAssigneeFilterEnabled] = useState(false);
+  const [selectedAssignee, setSelectedAssignee] = useState('');
+  const UNASSIGNED_FILTER_VALUE = '__unassigned__';
 
   // Constants
   const START_HOUR = 6;
@@ -1361,6 +1432,10 @@ function TabSchedule({ scheduleData, updateMainData, staff, dates, preDates }) {
 
   const hourHeight = BASE_HOUR_HEIGHT * zoomLevel;
   const totalHeight = hourHeight * HOURS_COUNT;
+  const staffMembers = useMemo(
+    () => (staff || '').split(',').map(s => s.trim()).filter(Boolean),
+    [staff]
+  );
 
   useEffect(() => {
     if (scheduleData) setActiveSchedule(scheduleData);
@@ -1393,6 +1468,53 @@ function TabSchedule({ scheduleData, updateMainData, staff, dates, preDates }) {
     const snappedMinutes = Math.round(totalMinutes / 15) * 15;
     return minutesToTime(snappedMinutes);
   };
+
+  const splitAssignees = (assigneeRaw) =>
+    String(assigneeRaw || '')
+      .split(',')
+      .map(name => name.trim())
+      .filter(Boolean);
+
+  const unassignedTaskCount = useMemo(() => {
+    const dayBeforeItems = activeSchedule.dayBefore || [];
+    const eventDayItems = activeSchedule.eventDay || [];
+    return [...dayBeforeItems, ...eventDayItems].filter(item => splitAssignees(item?.assignee).length === 0).length;
+  }, [activeSchedule]);
+
+  const hasUnassignedItems = unassignedTaskCount > 0;
+
+  const assigneeFilterOptions = useMemo(() => {
+    const options = staffMembers.map(member => ({ value: member, label: member }));
+    if (hasUnassignedItems) {
+      options.unshift({ value: UNASSIGNED_FILTER_VALUE, label: `未割当 (${unassignedTaskCount})` });
+    }
+    return options;
+  }, [staffMembers, hasUnassignedItems, unassignedTaskCount]);
+
+  useEffect(() => {
+    if (!isAssigneeFilterEnabled) return;
+    if (assigneeFilterOptions.length === 0) {
+      setSelectedAssignee('');
+      return;
+    }
+    const hasSelectedOption = assigneeFilterOptions.some(option => option.value === selectedAssignee);
+    if (!selectedAssignee || !hasSelectedOption) {
+      setSelectedAssignee(assigneeFilterOptions[0].value);
+    }
+  }, [isAssigneeFilterEnabled, selectedAssignee, assigneeFilterOptions]);
+
+  const shouldShowByAssigneeFilter = (item) => {
+    if (!isAssigneeFilterEnabled) return true;
+    if (!selectedAssignee) return false;
+    const assignees = splitAssignees(item?.assignee);
+    if (selectedAssignee === UNASSIGNED_FILTER_VALUE) {
+      return assignees.length === 0;
+    }
+    return assignees.includes(selectedAssignee);
+  };
+
+  const filteredDayBeforeItems = (activeSchedule.dayBefore || []).filter(shouldShowByAssigneeFilter);
+  const filteredEventDayItems = (activeSchedule.eventDay || []).filter(shouldShowByAssigneeFilter);
 
   // CRUD
   const saveItem = () => {
@@ -1505,6 +1627,7 @@ function TabSchedule({ scheduleData, updateMainData, staff, dates, preDates }) {
 
             {/* Items */}
             {items?.map(item => {
+              const isUnassignedItem = splitAssignees(item?.assignee).length === 0;
               const top = getTopPosition(item.time);
               // Calculate height from endTime if set, otherwise default to 45 min
               const startMinutes = timeToMinutes(item.time);
@@ -1517,13 +1640,21 @@ function TabSchedule({ scheduleData, updateMainData, staff, dates, preDates }) {
                   key={item.id}
                   onClick={(e) => { e.stopPropagation(); openEditModal(item, type); }}
                   style={{ top, height: Math.max(height, 30) }}
-                  className="schedule-item absolute left-10 right-2 rounded-lg bg-blue-100 border border-blue-300 shadow-sm p-1 px-2 cursor-pointer hover:bg-blue-200 hover:shadow-md transition-all z-10 overflow-hidden"
+                  className={`schedule-item absolute left-10 right-2 rounded-lg border shadow-sm p-1 px-2 cursor-pointer hover:shadow-md transition-all z-10 overflow-hidden ${
+                    isUnassignedItem
+                      ? 'bg-rose-100 border-rose-300 hover:bg-rose-200'
+                      : 'bg-blue-100 border-blue-300 hover:bg-blue-200'
+                  }`}
                 >
                   <div className="flex justify-between items-start">
-                    <span className="font-bold text-xs text-blue-800">{item.time}{item.endTime && ` - ${item.endTime}`}</span>
+                    <span className={`font-bold text-xs ${isUnassignedItem ? 'text-rose-800' : 'text-blue-800'}`}>
+                      {item.time}{item.endTime && ` - ${item.endTime}`}
+                    </span>
                   </div>
                   <div className="font-bold text-sm text-slate-800 leading-tight truncate">{item.title}</div>
-                  {item.assignee && <div className="text-[10px] text-slate-500 truncate flex items-center gap-1"><Users size={10} /> {item.assignee}</div>}
+                  <div className={`text-[10px] truncate flex items-center gap-1 font-bold ${isUnassignedItem ? 'text-rose-700' : 'text-slate-500'}`}>
+                    <Users size={10} className={isUnassignedItem ? 'text-rose-600' : ''} /> {item.assignee || '未割当'}
+                  </div>
                 </div>
               );
             })}
@@ -1543,6 +1674,49 @@ function TabSchedule({ scheduleData, updateMainData, staff, dates, preDates }) {
             <button onClick={() => setZoomLevel(0.6)} className={`px-3 py-1 text-xs font-bold rounded ${zoomLevel === 0.6 ? 'bg-white shadow text-blue-600' : 'text-slate-500'}`}>縮小</button>
             <button onClick={() => setZoomLevel(1)} className={`px-3 py-1 text-xs font-bold rounded ${zoomLevel === 1 ? 'bg-white shadow text-blue-600' : 'text-slate-500'}`}>標準</button>
             <button onClick={() => setZoomLevel(1.5)} className={`px-3 py-1 text-xs font-bold rounded ${zoomLevel === 1.5 ? 'bg-white shadow text-blue-600' : 'text-slate-500'}`}>拡大</button>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                if (assigneeFilterOptions.length === 0) return;
+                setIsAssigneeFilterEnabled(prev => {
+                  const next = !prev;
+                  if (next && !selectedAssignee) setSelectedAssignee(assigneeFilterOptions[0]?.value || '');
+                  return next;
+                });
+              }}
+              disabled={assigneeFilterOptions.length === 0}
+              className={`px-3 py-1 text-xs font-bold rounded-lg border transition-colors ${
+                assigneeFilterOptions.length === 0
+                  ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                  : isAssigneeFilterEnabled
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'
+              }`}
+              title={assigneeFilterOptions.length === 0 ? '担当者を設定したタスクがあると利用できます' : '担当者で絞り込み'}
+            >
+              {isAssigneeFilterEnabled ? '担当者のみ表示' : '全体表示'}
+            </button>
+            {hasUnassignedItems && (
+              <span className="px-2 py-1 text-[11px] font-bold rounded-full bg-rose-100 text-rose-700 border border-rose-200">
+                未割当 {unassignedTaskCount}件
+              </span>
+            )}
+            {isAssigneeFilterEnabled && (
+              <select
+                value={selectedAssignee}
+                onChange={(e) => setSelectedAssignee(e.target.value)}
+                className={`px-2 py-1 text-xs font-bold border rounded-lg outline-none ${
+                  selectedAssignee === UNASSIGNED_FILTER_VALUE
+                    ? 'border-rose-300 bg-rose-50 text-rose-700'
+                    : 'border-blue-200 bg-blue-50 text-blue-700'
+                }`}
+              >
+                {assigneeFilterOptions.map(option => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            )}
           </div>
           <div className="text-xs text-slate-500 flex items-center gap-2">
             <span className="bg-slate-100 text-blue-600 px-2 py-1 rounded font-bold border">{zoomLevel >= 1.5 ? '30分単位' : zoomLevel >= 1 ? '1時間単位' : '2時間単位'}</span>
@@ -1572,7 +1746,7 @@ function TabSchedule({ scheduleData, updateMainData, staff, dates, preDates }) {
           <TimelineColumn
             title="前日搬入 / 準備"
             type="dayBefore"
-            items={activeSchedule.dayBefore}
+            items={filteredDayBeforeItems}
             dateLabel={preDates?.join(', ')}
             colorClass="border-amber-400 text-amber-700 bg-amber-50"
           />
@@ -1581,7 +1755,7 @@ function TabSchedule({ scheduleData, updateMainData, staff, dates, preDates }) {
           <TimelineColumn
             title="開催当日"
             type="eventDay"
-            items={activeSchedule.eventDay}
+            items={filteredEventDayItems}
             dateLabel={dates?.join(', ')}
             colorClass="border-blue-500 text-blue-700 bg-blue-50"
           />
@@ -2973,10 +3147,11 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
 
       if (exists) {
         if (exists.status !== 'checked-in') {
-          const updated = visitors.map(v => v.id === data.id ? { ...v, status: 'checked-in' } : v);
+          const checkedInAt = Date.now();
+          const updated = visitors.map(v => v.id === data.id ? { ...v, status: 'checked-in', checkedIn: true, checkedInAt } : v);
           updateMainData('visitors', updated);
           updateVisitorCount(exhibition.id, exhibition.currentVisitors + 1);
-          setLastScannedVisitor({ ...exists, status: 'checked-in', isNew: false });
+          setLastScannedVisitor({ ...exists, status: 'checked-in', checkedIn: true, checkedInAt, isNew: false });
         } else {
           setLastScannedVisitor({ ...exists, msg: '既に入場済みです' });
         }
@@ -5938,6 +6113,10 @@ function PerformanceAnalysisView({ exhibitions }) {
     return buildVisitorAttributes(exhibitions);
   }, [exhibitions]);
 
+  const visitorCheckinHeatmap = useMemo(() => {
+    return buildVisitorCheckinHeatmap(exhibitions);
+  }, [exhibitions]);
+
   // 企業別の実績母集計（展示会単位で重複排除）
   const companyPerformanceStats = useMemo(() => {
     return buildCompanyPerformanceStats(exhibitions);
@@ -5956,6 +6135,7 @@ function PerformanceAnalysisView({ exhibitions }) {
   const [aiReportGeneratedAt, setAiReportGeneratedAt] = useState(() => Date.now());
   const [aiReportRevision, setAiReportRevision] = useState(1);
   const [isAiRegenerating, setIsAiRegenerating] = useState(false);
+  const [isMakerStrategyOpen, setIsMakerStrategyOpen] = useState(false);
   const aiRegenerateTimerRef = useRef(null);
 
   useEffect(() => {
@@ -6049,6 +6229,67 @@ function PerformanceAnalysisView({ exhibitions }) {
 
   // チャート用カラー
   const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16'];
+  const HEATMAP_START_HOUR = 8;
+  const HEATMAP_END_HOUR = 18;
+
+  const heatmapVisibleSlots = useMemo(() => {
+    return (visitorCheckinHeatmap.hourLabels || [])
+      .map((hourLabel, idx) => ({ hourLabel, idx, hour: Number(hourLabel.slice(0, 2)) }))
+      .filter(({ hour }) => hour >= HEATMAP_START_HOUR && hour <= HEATMAP_END_HOUR);
+  }, [visitorCheckinHeatmap.hourLabels]);
+
+  const getHeatCellClassName = (count, maxCount) => {
+    if (!count || count <= 0) return 'bg-slate-50 text-slate-300';
+    const safeMax = Math.max(maxCount, 1);
+    const ratio = count / safeMax;
+    if (ratio >= 0.8) return 'bg-rose-600 text-white';
+    if (ratio >= 0.6) return 'bg-rose-500 text-white';
+    if (ratio >= 0.4) return 'bg-orange-400 text-white';
+    if (ratio >= 0.2) return 'bg-amber-300 text-amber-900';
+    return 'bg-emerald-100 text-emerald-800';
+  };
+
+  const visibleHeatmapMaxCount = useMemo(() => {
+    if (heatmapVisibleSlots.length === 0) return 0;
+    let max = 0;
+    (visitorCheckinHeatmap.rows || []).forEach((row) => {
+      heatmapVisibleSlots.forEach(({ idx }) => {
+        const count = row.slots?.[idx] || 0;
+        if (count > max) max = count;
+      });
+    });
+    heatmapVisibleSlots.forEach(({ idx }) => {
+      const total = visitorCheckinHeatmap.totalsByHour?.[idx]?.count || 0;
+      if (total > max) max = total;
+    });
+    return max;
+  }, [heatmapVisibleSlots, visitorCheckinHeatmap.rows, visitorCheckinHeatmap.totalsByHour]);
+
+  const visibleHeatmapTotalPeak = useMemo(() => {
+    let peakLabel = '-';
+    let peakCount = 0;
+    heatmapVisibleSlots.forEach(({ idx, hourLabel }) => {
+      const count = visitorCheckinHeatmap.totalsByHour?.[idx]?.count || 0;
+      if (count > peakCount) {
+        peakCount = count;
+        peakLabel = hourLabel;
+      }
+    });
+    return { peakLabel, peakCount };
+  }, [heatmapVisibleSlots, visitorCheckinHeatmap.totalsByHour]);
+
+  const getVisibleRowPeak = (row) => {
+    let peakLabel = '-';
+    let peakCount = 0;
+    heatmapVisibleSlots.forEach(({ idx, hourLabel }) => {
+      const count = row.slots?.[idx] || 0;
+      if (count > peakCount) {
+        peakCount = count;
+        peakLabel = hourLabel;
+      }
+    });
+    return { peakLabel, peakCount };
+  };
 
   return (
     <div className="space-y-8 animate-fade-in pb-20">
@@ -6162,81 +6403,93 @@ function PerformanceAnalysisView({ exhibitions }) {
 
       {/* Maker Strategy Report */}
       <div className="bg-gradient-to-r from-emerald-50 via-teal-50 to-cyan-50 rounded-xl border border-emerald-100 p-6 shadow-sm">
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-4">
+        <button
+          onClick={() => setIsMakerStrategyOpen((prev) => !prev)}
+          className="w-full flex items-center justify-between gap-3 text-left"
+        >
           <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
             <Building2 className="text-emerald-600" size={20} />
             出展メーカー戦略レポート
-            <span className="text-xs font-normal text-slate-500">出展回数・辞退率・次回方針</span>
           </h3>
-          <button onClick={handleExportMakerStrategyReport} className="px-3 py-1.5 text-xs font-bold rounded-lg border border-emerald-200 bg-white text-emerald-700 hover:bg-emerald-50">
-            Markdown出力
-          </button>
-        </div>
-        <p className="text-xs text-slate-500 mb-4">最終生成: {formatReportTimestamp(makerStrategyReport.generatedAt)}</p>
+          <span className="text-emerald-700">
+            {isMakerStrategyOpen ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+          </span>
+        </button>
 
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
-          <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">対象企業数</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.totals.companies}社</p></div>
-          <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">招待回数合計</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.totals.invited}回</p></div>
-          <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">出展回数合計</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.totals.confirmed}回</p></div>
-          <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">平均出展率</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.kpi.participationRate.toFixed(1)}%</p></div>
-          <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">平均辞退率</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.kpi.declineRate.toFixed(1)}%</p></div>
-        </div>
+        {isMakerStrategyOpen && (
+          <div className="mt-4">
+            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2 mb-4">
+              <p className="text-xs text-slate-500">最終生成: {formatReportTimestamp(makerStrategyReport.generatedAt)} / 出展回数・辞退率・次回方針</p>
+              <button onClick={handleExportMakerStrategyReport} className="px-3 py-1.5 text-xs font-bold rounded-lg border border-emerald-200 bg-white text-emerald-700 hover:bg-emerald-50">
+                Markdown出力
+              </button>
+            </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-4">
-          <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
-            <p className="text-sm font-bold text-slate-700 mb-2">サマリー</p>
-            <div className="space-y-2">
-              {makerStrategyReport.executiveSummary.map((line, idx) => (
-                <p key={idx} className="text-sm text-slate-700 leading-relaxed">{line}</p>
-              ))}
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+              <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">対象企業数</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.totals.companies}社</p></div>
+              <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">招待回数合計</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.totals.invited}回</p></div>
+              <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">出展回数合計</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.totals.confirmed}回</p></div>
+              <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">平均出展率</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.kpi.participationRate.toFixed(1)}%</p></div>
+              <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">平均辞退率</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.kpi.declineRate.toFixed(1)}%</p></div>
             </div>
-          </div>
-          <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
-            <p className="text-sm font-bold text-slate-700 mb-2">方針提案</p>
-            <div className="space-y-2">
-              {makerStrategyReport.policyRecommendations.map((line, idx) => (
-                <p key={idx} className="text-sm text-slate-700 leading-relaxed">{idx + 1}. {line}</p>
-              ))}
-            </div>
-          </div>
-          <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
-            <p className="text-sm font-bold text-slate-700 mb-2">次回アクション</p>
-            <div className="space-y-2">
-              {makerStrategyReport.nextActions.map((line, idx) => (
-                <p key={idx} className="text-sm text-slate-700 leading-relaxed">{idx + 1}. {line}</p>
-              ))}
-            </div>
-          </div>
-        </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-          <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
-            <p className="text-sm font-bold text-slate-700 mb-3">出展回数 上位10社</p>
-            <div className="space-y-2">
-              {makerStrategyReport.topParticipants.slice(0, 10).map((company, idx) => (
-                <div key={company.key || idx} className="rounded-md border border-slate-100 bg-white p-2">
-                  <p className="text-sm font-bold text-slate-800">{idx + 1}. {company.name}</p>
-                  <p className="text-xs text-slate-600 mt-0.5">出展:{company.confirmed}回 / 招待:{company.invited}回 / 辞退率:{company.declineRate.toFixed(1)}%</p>
-                  <p className="text-xs text-emerald-700 mt-1">方針: {company.strategy}</p>
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-4">
+              <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
+                <p className="text-sm font-bold text-slate-700 mb-2">サマリー</p>
+                <div className="space-y-2">
+                  {makerStrategyReport.executiveSummary.map((line, idx) => (
+                    <p key={idx} className="text-sm text-slate-700 leading-relaxed">{line}</p>
+                  ))}
                 </div>
-              ))}
-              {makerStrategyReport.topParticipants.length === 0 && <p className="text-sm text-slate-500">対象データがありません。</p>}
-            </div>
-          </div>
-          <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
-            <p className="text-sm font-bold text-slate-700 mb-3">辞退率 高位10社（招待2回以上）</p>
-            <div className="space-y-2">
-              {makerStrategyReport.highDecliners.slice(0, 10).map((company, idx) => (
-                <div key={company.key || idx} className="rounded-md border border-slate-100 bg-white p-2">
-                  <p className="text-sm font-bold text-slate-800">{idx + 1}. {company.name}</p>
-                  <p className="text-xs text-slate-600 mt-0.5">招待:{company.invited}回 / 辞退:{company.declined}回 / 辞退率:{company.declineRate.toFixed(1)}%</p>
-                  <p className="text-xs text-emerald-700 mt-1">方針: {company.strategy}</p>
+              </div>
+              <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
+                <p className="text-sm font-bold text-slate-700 mb-2">方針提案</p>
+                <div className="space-y-2">
+                  {makerStrategyReport.policyRecommendations.map((line, idx) => (
+                    <p key={idx} className="text-sm text-slate-700 leading-relaxed">{idx + 1}. {line}</p>
+                  ))}
                 </div>
-              ))}
-              {makerStrategyReport.highDecliners.length === 0 && <p className="text-sm text-slate-500">対象データがありません。</p>}
+              </div>
+              <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
+                <p className="text-sm font-bold text-slate-700 mb-2">次回アクション</p>
+                <div className="space-y-2">
+                  {makerStrategyReport.nextActions.map((line, idx) => (
+                    <p key={idx} className="text-sm text-slate-700 leading-relaxed">{idx + 1}. {line}</p>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
+                <p className="text-sm font-bold text-slate-700 mb-3">出展回数 上位10社</p>
+                <div className="space-y-2">
+                  {makerStrategyReport.topParticipants.slice(0, 10).map((company, idx) => (
+                    <div key={company.key || idx} className="rounded-md border border-slate-100 bg-white p-2">
+                      <p className="text-sm font-bold text-slate-800">{idx + 1}. {company.name}</p>
+                      <p className="text-xs text-slate-600 mt-0.5">出展:{company.confirmed}回 / 招待:{company.invited}回 / 辞退率:{company.declineRate.toFixed(1)}%</p>
+                      <p className="text-xs text-emerald-700 mt-1">方針: {company.strategy}</p>
+                    </div>
+                  ))}
+                  {makerStrategyReport.topParticipants.length === 0 && <p className="text-sm text-slate-500">対象データがありません。</p>}
+                </div>
+              </div>
+              <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
+                <p className="text-sm font-bold text-slate-700 mb-3">辞退率 高位10社（招待2回以上）</p>
+                <div className="space-y-2">
+                  {makerStrategyReport.highDecliners.slice(0, 10).map((company, idx) => (
+                    <div key={company.key || idx} className="rounded-md border border-slate-100 bg-white p-2">
+                      <p className="text-sm font-bold text-slate-800">{idx + 1}. {company.name}</p>
+                      <p className="text-xs text-slate-600 mt-0.5">招待:{company.invited}回 / 辞退:{company.declined}回 / 辞退率:{company.declineRate.toFixed(1)}%</p>
+                      <p className="text-xs text-emerald-700 mt-1">方針: {company.strategy}</p>
+                    </div>
+                  ))}
+                  {makerStrategyReport.highDecliners.length === 0 && <p className="text-sm text-slate-500">対象データがありません。</p>}
+                </div>
+              </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* Yearly Revenue Section */}
@@ -6394,6 +6647,99 @@ function PerformanceAnalysisView({ exhibitions }) {
         )}
       </div>
 
+      {/* Visitor Check-in Heatmap */}
+      <div className="bg-white rounded-xl border p-6 shadow-sm">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-3">
+          <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+            <Clock className="text-orange-500" size={20} />
+            来場時間ヒートマップ
+          </h3>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="px-2 py-1 rounded-full border border-cyan-200 bg-cyan-50 text-cyan-700 font-bold">
+              表示時間帯 {String(HEATMAP_START_HOUR).padStart(2, '0')}-{String(HEATMAP_END_HOUR).padStart(2, '0')}
+            </span>
+            <span className="px-2 py-1 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 font-bold">
+              時刻記録あり {visitorCheckinHeatmap.trackedCheckinsTotal.toLocaleString()}件
+            </span>
+            <span className="px-2 py-1 rounded-full border border-amber-200 bg-amber-50 text-amber-700 font-bold">
+              時刻未記録 {visitorCheckinHeatmap.unknownCheckinsTotal.toLocaleString()}件
+            </span>
+            <span className="px-2 py-1 rounded-full border border-rose-200 bg-rose-50 text-rose-700 font-bold">
+              時間帯ピーク {visibleHeatmapTotalPeak.peakLabel} ({visibleHeatmapTotalPeak.peakCount}件)
+            </span>
+          </div>
+        </div>
+        <p className="text-xs text-slate-500 mb-4">
+          各展示会ごとに、事前登録者が未入場から入場済みに変わった時刻を可視化しています（08:00-18:00のみ表示）。
+        </p>
+
+        {visitorCheckinHeatmap.rows.length === 0 ? (
+          <p className="text-slate-400 text-center py-10">表示できる展示会データがありません</p>
+        ) : (
+          <div className="overflow-x-auto border rounded-lg">
+            <table className="w-full min-w-[860px] text-xs">
+              <thead className="bg-slate-50">
+                <tr className="border-b">
+                  <th className="sticky left-0 z-20 bg-slate-50 p-2 text-left font-bold text-slate-600 min-w-[220px]">展示会</th>
+                  {heatmapVisibleSlots.map(({ hourLabel }) => (
+                    <th key={hourLabel} className="p-2 text-center font-bold text-slate-500 border-l min-w-[42px]">{hourLabel.slice(0, 2)}</th>
+                  ))}
+                  <th className="p-2 text-center font-bold text-slate-600 border-l min-w-[72px]">記録数</th>
+                  <th className="p-2 text-center font-bold text-slate-600 border-l min-w-[92px]">時刻未記録</th>
+                  <th className="p-2 text-center font-bold text-slate-600 border-l min-w-[90px]">ピーク</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visitorCheckinHeatmap.rows.map((row) => {
+                  const rowPeak = getVisibleRowPeak(row);
+                  return (
+                    <tr key={row.id} className="border-b last:border-b-0">
+                      <td className="sticky left-0 z-10 bg-white p-2 border-r">
+                        <p className="font-bold text-slate-800 truncate">{row.title}</p>
+                        <p className="text-[11px] text-slate-500 truncate">{row.dateLabel}</p>
+                      </td>
+                      {heatmapVisibleSlots.map(({ idx, hourLabel }) => {
+                        const count = row.slots?.[idx] || 0;
+                        return (
+                          <td
+                            key={`${row.id}-${hourLabel}`}
+                            className={`text-center border-l p-1 font-bold ${getHeatCellClassName(count, visibleHeatmapMaxCount)}`}
+                            title={`${row.title} ${hourLabel}: ${count}件`}
+                          >
+                            {count > 0 ? count : ''}
+                          </td>
+                        );
+                      })}
+                      <td className="text-center border-l p-2 font-bold text-slate-700">{row.trackedCheckins}</td>
+                      <td className="text-center border-l p-2 font-bold text-amber-700">{row.unknownCheckinTime || '-'}</td>
+                      <td className="text-center border-l p-2 font-bold text-rose-700">{rowPeak.peakLabel}</td>
+                    </tr>
+                  );
+                })}
+                <tr className="bg-slate-50 border-t-2">
+                  <td className="sticky left-0 z-10 bg-slate-50 p-2 border-r font-bold text-slate-700">全展示会 合計</td>
+                  {heatmapVisibleSlots.map(({ idx, hourLabel }) => {
+                    const count = visitorCheckinHeatmap.totalsByHour?.[idx]?.count || 0;
+                    return (
+                      <td
+                        key={`total-${hourLabel}`}
+                        className={`text-center border-l p-1 font-bold ${getHeatCellClassName(count, visibleHeatmapMaxCount)}`}
+                        title={`全展示会 ${hourLabel}: ${count}件`}
+                      >
+                        {count > 0 ? count : ''}
+                      </td>
+                    );
+                  })}
+                  <td className="text-center border-l p-2 font-bold text-slate-700">{visitorCheckinHeatmap.trackedCheckinsTotal}</td>
+                  <td className="text-center border-l p-2 font-bold text-amber-700">{visitorCheckinHeatmap.unknownCheckinsTotal || '-'}</td>
+                  <td className="text-center border-l p-2 font-bold text-rose-700">{visibleHeatmapTotalPeak.peakLabel}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
       {/* Lecture Details */}
       <div className="bg-white rounded-xl border p-6 shadow-sm">
         <h3 className="text-xl font-bold text-slate-800 mb-6 flex items-center gap-2">
@@ -6505,7 +6851,13 @@ function DashboardView({ exhibitions, onCreateClick, onCardClick, onDeleteClick,
             const completedTasks = ex.tasks?.filter(t => t.status === 'done').length || 0;
             const taskRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
-            const makerCount = ex.makers?.filter(m => m.status === 'confirmed')?.length || 0;
+            const confirmedMakers = ex.makers?.filter(m => m.status === 'confirmed') || [];
+            const makerCount = confirmedMakers.length;
+            const totalBoothCount = confirmedMakers.reduce((sum, maker) => {
+              const rawBoothCount = maker?.response?.boothCount ?? maker?.boothCount ?? '';
+              const parsed = extractNum(rawBoothCount);
+              return sum + (parsed > 0 ? parsed : 1);
+            }, 0);
 
             const eventDateStr = ex.dates && ex.dates.length > 0 ? ex.dates[0] : null;
             const countdown = getDaysUntil(ex.dates);
@@ -6637,11 +6989,11 @@ function DashboardView({ exhibitions, onCreateClick, onCardClick, onDeleteClick,
                     {/* Maker Participation Goal */}
                     <div>
                       <div className="flex justify-between text-xs mb-1.5 items-center">
-                        <span className="text-slate-500 font-bold flex items-center gap-1"><Briefcase size={12} /> 参加企業数</span>
-                        <span className="font-bold text-slate-700">{makerCount} / {ex.targetMakers || 0}</span>
+                        <span className="text-slate-500 font-bold flex items-center gap-1"><Briefcase size={12} /> 参加コマ数/目標企業数</span>
+                        <span className="font-bold text-slate-700">{totalBoothCount} / {ex.targetMakers || 0}</span>
                       </div>
                       <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                        <div className="h-full bg-indigo-500 rounded-full transition-all duration-1000" style={{ width: `${ex.targetMakers > 0 ? Math.min((makerCount / ex.targetMakers) * 100, 100) : 0}%` }}></div>
+                        <div className="h-full bg-indigo-500 rounded-full transition-all duration-1000" style={{ width: `${ex.targetMakers > 0 ? Math.min((totalBoothCount / ex.targetMakers) * 100, 100) : 0}%` }}></div>
                       </div>
                     </div>
                   </div>

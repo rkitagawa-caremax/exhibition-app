@@ -1,5 +1,61 @@
 const ANALYSIS_STATUSES = new Set(['invited', 'confirmed', 'declined']);
 
+const normalizeVisitorStatus = (rawStatus) => String(rawStatus || '').trim().toLowerCase();
+
+const isCheckedInVisitor = (visitor) => {
+  if (!visitor) return false;
+  const status = normalizeVisitorStatus(visitor.status);
+  return visitor.checkedIn === true
+    || status === 'checked-in'
+    || status === 'checkedin'
+    || status === 'arrived';
+};
+
+const toTimestamp = (raw) => {
+  if (raw === null || raw === undefined || raw === '') return null;
+
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return raw > 100000000000 ? raw : raw * 1000;
+  }
+
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    if (/^\d+$/.test(trimmed)) {
+      const n = Number(trimmed);
+      if (Number.isFinite(n)) return n > 100000000000 ? n : n * 1000;
+    }
+    const parsed = new Date(trimmed).getTime();
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+
+  if (typeof raw?.toDate === 'function') {
+    const date = raw.toDate();
+    const ts = date?.getTime?.();
+    return Number.isFinite(ts) ? ts : null;
+  }
+
+  if (typeof raw === 'object' && typeof raw.seconds === 'number') {
+    const ms = (raw.seconds * 1000) + Math.floor((raw.nanoseconds || 0) / 1000000);
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  return null;
+};
+
+const getVisitorCheckinTimestamp = (visitor) => {
+  const candidates = [
+    visitor?.checkedInAt,
+    visitor?.checkInAt,
+    visitor?.arrivedAt
+  ];
+  for (const candidate of candidates) {
+    const ts = toTimestamp(candidate);
+    if (ts !== null) return ts;
+  }
+  return null;
+};
+
 const normalizeCompanyName = (name) => String(name || '')
   .replace(/[ \t\r\n\u3000]/g, '')
   .trim()
@@ -93,7 +149,7 @@ export const buildTotalVisitors = (exhibitions) => {
 export const buildCheckedInVisitors = (exhibitions) => {
   return (exhibitions || []).reduce((sum, ex) => {
     const visitors = ex.visitors || [];
-    return sum + visitors.filter((v) => v.checkedIn || v.status === 'arrived').length;
+    return sum + visitors.filter((v) => isCheckedInVisitor(v)).length;
   }, 0);
 };
 
@@ -106,6 +162,86 @@ export const buildVisitorAttributes = (exhibitions) => {
     });
   });
   return Object.entries(attributes).map(([name, value]) => ({ name, value }));
+};
+
+export const buildVisitorCheckinHeatmap = (exhibitions) => {
+  const HOUR_SLOTS = 24;
+  const hourLabels = Array.from({ length: HOUR_SLOTS }, (_, hour) => `${String(hour).padStart(2, '0')}:00`);
+  const totalByHour = Array(HOUR_SLOTS).fill(0);
+
+  const rows = (exhibitions || []).map((ex, exIndex) => {
+    const slots = Array(HOUR_SLOTS).fill(0);
+    let trackedCheckins = 0;
+    let unknownCheckinTime = 0;
+
+    (ex.visitors || []).forEach((visitor) => {
+      if (!isCheckedInVisitor(visitor)) return;
+
+      const ts = getVisitorCheckinTimestamp(visitor);
+      if (ts === null) {
+        unknownCheckinTime += 1;
+        return;
+      }
+
+      const date = new Date(ts);
+      if (Number.isNaN(date.getTime())) {
+        unknownCheckinTime += 1;
+        return;
+      }
+
+      const hour = date.getHours();
+      if (!Number.isInteger(hour) || hour < 0 || hour >= HOUR_SLOTS) {
+        unknownCheckinTime += 1;
+        return;
+      }
+
+      slots[hour] += 1;
+      totalByHour[hour] += 1;
+      trackedCheckins += 1;
+    });
+
+    const peakHourIndex = slots.reduce((bestIndex, count, idx) => {
+      if (count > slots[bestIndex]) return idx;
+      return bestIndex;
+    }, 0);
+
+    const rawDate = ex.dates?.[0] || '';
+    const parsedDate = rawDate ? new Date(rawDate) : null;
+    const sortTime = parsedDate && !Number.isNaN(parsedDate.getTime()) ? parsedDate.getTime() : -Infinity;
+
+    return {
+      id: ex.id || `ex-${exIndex}`,
+      title: ex.title || `展示会${exIndex + 1}`,
+      dateLabel: rawDate || '日付未設定',
+      sortTime,
+      slots,
+      trackedCheckins,
+      unknownCheckinTime,
+      totalCheckins: trackedCheckins + unknownCheckinTime,
+      peakHourLabel: slots[peakHourIndex] > 0 ? hourLabels[peakHourIndex] : '-',
+      peakHourCount: slots[peakHourIndex] || 0
+    };
+  }).sort((a, b) => b.sortTime - a.sortTime);
+
+  const maxCount = Math.max(0, ...totalByHour, ...rows.flatMap((row) => row.slots));
+  const totalPeakHourIndex = totalByHour.reduce((bestIndex, count, idx) => {
+    if (count > totalByHour[bestIndex]) return idx;
+    return bestIndex;
+  }, 0);
+
+  const trackedCheckinsTotal = rows.reduce((sum, row) => sum + row.trackedCheckins, 0);
+  const unknownCheckinsTotal = rows.reduce((sum, row) => sum + row.unknownCheckinTime, 0);
+
+  return {
+    hourLabels,
+    rows,
+    maxCount,
+    totalsByHour: totalByHour.map((count, idx) => ({ hour: hourLabels[idx], count })),
+    trackedCheckinsTotal,
+    unknownCheckinsTotal,
+    totalPeakHourLabel: totalByHour[totalPeakHourIndex] > 0 ? hourLabels[totalPeakHourIndex] : '-',
+    totalPeakHourCount: totalByHour[totalPeakHourIndex] || 0
+  };
 };
 
 export const buildCompanyPerformanceStats = (exhibitions) => {
@@ -249,7 +385,7 @@ export const buildOverallExhibitionStats = (exhibitions) => {
     const confirmRate = actionableInvites > 0 ? (statusCounts.confirmed / actionableInvites) * 100 : 0;
     const declineRate = actionableInvites > 0 ? (statusCounts.declined / actionableInvites) * 100 : 0;
 
-    const checkedIn = visitors.filter((v) => v.checkedIn || v.status === 'arrived').length;
+    const checkedIn = visitors.filter((v) => isCheckedInVisitor(v)).length;
     const visitorTarget = toInt(ex.targetVisitors, 0);
     const makerTarget = toInt(ex.targetMakers, 0);
     const profitTarget = toInt(ex.targetProfit, 0);

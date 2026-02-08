@@ -92,50 +92,70 @@ const INITIAL_INTERNAL_SUPPLIES = [
 // ▼ メーカーリスト初期値（CSV取込前提のため空配列）
 const FIXED_MAKERS_LIST = [];
 
-// ▼ 完全版タスクリスト（Phase 9: 営業/企画の2カテゴリ）
-const INITIAL_TASKS = [
-  // 【営業側タスク】
-  { id: 's1', category: 'sales', title: '展示会日時・エリアの決定', status: 'pending', assignees: [], desc: '' },
-  { id: 's2', category: 'sales', title: '展示会場選び', status: 'pending', assignees: [], desc: '' },
-  { id: 's3', category: 'sales', title: '展示会場申請', status: 'pending', assignees: [], desc: '' },
-  { id: 's4', category: 'sales', title: 'メーカー選定（予備リストを編集）', status: 'pending', assignees: [], desc: '' },
-  { id: 's5', category: 'sales', title: '講演会企画の計画', status: 'pending', assignees: [], desc: '' },
-  { id: 's6', category: 'sales', title: '電気設備会社手配', status: 'pending', assignees: [], desc: '' },
-  { id: 's7', category: 'sales', title: '展示会必要品の手配（リストを参照）', status: 'pending', assignees: [], desc: '' },
-  { id: 's8', category: 'sales', title: '集荷手配（ヤマト・佐川）', status: 'pending', assignees: [], desc: '' },
-  { id: 's9', category: 'sales', title: 'バイトの手配と打ち合わせ', status: 'pending', assignees: [], desc: '' },
-  { id: 's10', category: 'sales', title: '展示会場最終打ち合わせ', status: 'pending', assignees: [], desc: '' },
-  { id: 's11', category: 'sales', title: '当日のデモンストレーション', status: 'pending', assignees: [], desc: '' },
-  { id: 's12', category: 'sales', title: '得意先集客', status: 'pending', assignees: [], desc: '' },
-  { id: 's13', category: 'sales', title: 'エンド（施設など）集客', status: 'pending', assignees: [], desc: '' },
-  { id: 's14', category: 'sales', title: '当日の展示会運営', status: 'pending', assignees: [], desc: '' },
-  { id: 's15', category: 'sales', title: '当日の講演会運営', status: 'pending', assignees: [], desc: '' },
-  { id: 's16', category: 'sales', title: 'ホテル予約', status: 'pending', assignees: [], desc: '' },
-  { id: 's17', category: 'sales', title: '弁当手配', status: 'pending', assignees: [], desc: '' },
-  { id: 's18', category: 'sales', title: '打ち上げ会場予約', status: 'pending', assignees: [], desc: '' },
-  { id: 's19', category: 'sales', title: '備品整理', status: 'pending', assignees: [], desc: '終了後タスク' },
-  { id: 's20', category: 'sales', title: '領収書等を企画へ送付', status: 'pending', assignees: [], desc: '終了後タスク' },
-  // 【企画側タスク】
-  { id: 'p1', category: 'planning', title: '展示会企画概要作成（参加メンバー、場所・時間、収支・集客目標など）', status: 'pending', assignees: [], desc: '' },
-  { id: 'p2', category: 'planning', title: 'メーカー選定（希望リスト・予備リストを編集）', status: 'pending', assignees: [], desc: '' },
-  { id: 'p3', category: 'planning', title: 'メーカー招待', status: 'pending', assignees: [], desc: '' },
-  { id: 'p4', category: 'planning', title: 'メーカー問い合わせ対応', status: 'pending', assignees: [], desc: '' },
-  { id: 'p5', category: 'planning', title: '案内チラシ作成', status: 'pending', assignees: [], desc: '' },
-  { id: 'p6', category: 'planning', title: '講演会企画の手配実行', status: 'pending', assignees: [], desc: '' },
-  { id: 'p7', category: 'planning', title: '展示会場レイアウト作成（メーカー用・来場者用・自社用）', status: 'pending', assignees: [], desc: '' },
-  { id: 'p8', category: 'planning', title: 'メーカー招待（催促）', status: 'pending', assignees: [], desc: '' },
-  { id: 'p9', category: 'planning', title: 'メーカー招待（第2弾）', status: 'pending', assignees: [], desc: '' },
-  { id: 'p10', category: 'planning', title: '（仮）収支報告書作成', status: 'pending', assignees: [], desc: '' },
-  { id: 'p11', category: 'planning', title: 'メーカーへチラシ配布を依頼', status: 'pending', assignees: [], desc: '' },
-  { id: 'p12', category: 'planning', title: '備品確保・貸借申請', status: 'pending', assignees: [], desc: '' },
-  { id: 'p13', category: 'planning', title: 'メーカーパネルラミネート作成', status: 'pending', assignees: [], desc: '' },
-  { id: 'p14', category: 'planning', title: '出展確定メーカーに確定メールを送信', status: 'pending', assignees: [], desc: 'レイアウト添付・チラシ添付・搬入時間変更・フォーム記載の案内文' },
-  { id: 'p15', category: 'planning', title: '当日の工程表作成', status: 'pending', assignees: [], desc: '' },
-  { id: 'p16', category: 'planning', title: 'メーカー請求書作成（澤田さんに送付依頼）', status: 'pending', assignees: [], desc: '' },
-  { id: 'p17', category: 'planning', title: '入金確認（振り込み・現金集金）', status: 'pending', assignees: [], desc: '終了後タスク' },
-  { id: 'p18', category: 'planning', title: '展示会使用経費のデータをもらう', status: 'pending', assignees: [], desc: '終了後タスク' },
-  { id: 'p19', category: 'planning', title: '収支報告書（決定版）', status: 'pending', assignees: [], desc: '終了後タスク' },
+const TASK_TEMPLATE_VERSION = 20260208;
+const SALES_TASK_TITLES = [
+  '展示会場選び',
+  '展示会日時・エリアの決定',
+  '展示会場申請',
+  'メーカー選定、企画へ招待依頼',
+  'メーカー追加招待、企画に招待依頼',
+  'メーカー招待締め切り、企画に報告',
+  '講演会企画の計画',
+  'レイアウト作成',
+  '講演会企画の諸々手配',
+  '電気設備会社手配',
+  '展示会必要品の手配（リストを参照）',
+  '展示会場備品確保',
+  '集荷会社手配（ヤマト・佐川）',
+  'バイトの手配と打ち合わせ',
+  '（仮）収支報告書作成',
+  '展示会場最終打ち合わせ',
+  '当日のデモンストレーション',
+  '得意先への集客',
+  'エンド（施設など）集客',
+  '当日の展示会運営マニュアル',
+  '当日の講演会運営マニュアル',
+  'ホテル予約',
+  '弁当手配',
+  '打ち上げ会場手配',
+  '備品整理',
+  '収支報告書作成'
 ];
+const PLANNING_TASK_TITLES = [
+  'メーカー招待実行（営業から指示あり次第）',
+  'メーカー追加招待（営業から指示あり次第）',
+  'メーカー回答催促',
+  '案内チラシ作成（メーカー確定・講演会確定後）',
+  'メーカー確定案内メール',
+  'メーカーへチラシ配布を依頼',
+  'チラシ配布以外の集客戦略を実行',
+  'メーカーパネルラミネートを作成',
+  'メーカー請求書送付',
+  '入金確認（経理と連携）'
+];
+
+const buildFixedTaskTemplate = () => [
+  ...SALES_TASK_TITLES.map((title, index) => ({
+    id: `s${index + 1}`,
+    category: 'sales',
+    title,
+    status: 'pending',
+    assignees: [],
+    dueDate: '',
+    desc: ''
+  })),
+  ...PLANNING_TASK_TITLES.map((title, index) => ({
+    id: `p${index + 1}`,
+    category: 'planning',
+    title,
+    status: 'pending',
+    assignees: [],
+    dueDate: '',
+    desc: ''
+  }))
+];
+
+const INITIAL_TASKS = buildFixedTaskTemplate();
 
 const DEFAULT_FORM_CONFIG = {
   section1: {
@@ -8458,14 +8478,29 @@ function App() {
 
         const normalizationTargets = [];
         const normalizedData = uniqueData.map((item) => {
+          const updates = {};
+          let normalizedItem = item;
+
           const normalizedVisitorFormConfig = normalizeVisitorFormConfig(item.visitorFormConfig);
           const rawConfig = JSON.stringify(item.visitorFormConfig || {});
           const normalizedConfig = JSON.stringify(normalizedVisitorFormConfig || {});
           if (rawConfig !== normalizedConfig) {
-            normalizationTargets.push({ id: item.id, visitorFormConfig: normalizedVisitorFormConfig });
-            return { ...item, visitorFormConfig: normalizedVisitorFormConfig };
+            updates.visitorFormConfig = normalizedVisitorFormConfig;
+            normalizedItem = { ...normalizedItem, visitorFormConfig: normalizedVisitorFormConfig };
           }
-          return item;
+
+          if (item.taskTemplateVersion !== TASK_TEMPLATE_VERSION || !Array.isArray(item.tasks)) {
+            const normalizedTasks = buildFixedTaskTemplate();
+            updates.tasks = normalizedTasks;
+            updates.taskTemplateVersion = TASK_TEMPLATE_VERSION;
+            normalizedItem = { ...normalizedItem, tasks: normalizedTasks, taskTemplateVersion: TASK_TEMPLATE_VERSION };
+          }
+
+          if (Object.keys(updates).length > 0) {
+            normalizationTargets.push({ id: item.id, updates });
+          }
+
+          return normalizedItem;
         });
 
         normalizedData.sort((a, b) => b.createdAt - a.createdAt);
@@ -8475,12 +8510,12 @@ function App() {
           Promise.allSettled(
             normalizationTargets.map((target) => {
               const targetRef = doc(db, 'artifacts', appId, 'public', 'data', 'exhibitions', target.id);
-              return updateDoc(targetRef, { visitorFormConfig: target.visitorFormConfig });
+              return updateDoc(targetRef, target.updates);
             })
           ).then((results) => {
             const rejected = results.filter(r => r.status === 'rejected');
             if (rejected.length > 0) {
-              console.warn('[VisitorForm] normalization update partially failed', rejected);
+              console.warn('[Exhibition] normalization update partially failed', rejected);
             }
           });
         }
@@ -8678,7 +8713,7 @@ function App() {
     const newProject = {
       ...newExhibition, id, createdAt: Date.now(), currentVisitors: 0, imageUrl: finalImg,
       makers: [], visitors: [], venueDetails: { cost: 0, equipment: [], notes: '', internalSupplies: INITIAL_INTERNAL_SUPPLIES },
-      otherBudgets: [], tasks: INITIAL_TASKS, formUrlMaker, formUrlVisitor,
+      otherBudgets: [], tasks: buildFixedTaskTemplate(), taskTemplateVersion: TASK_TEMPLATE_VERSION, formUrlMaker, formUrlVisitor,
       formConfig: DEFAULT_FORM_CONFIG, visitorFormConfig: DEFAULT_VISITOR_FORM_CONFIG, hotels: [], schedule: { dayBefore: [], eventDay: [] }
     };
     try {

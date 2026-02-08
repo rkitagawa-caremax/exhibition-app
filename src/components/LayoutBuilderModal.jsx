@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
-    X, Plus, Minus, Settings, Save, Eye, Download, Box, Square, ArrowRight,
+    X, Plus, Settings, Save, Eye, Download, Box, Square, ArrowRight,
     Edit3, Trash2, LayoutGrid, Users, XCircle, LayoutDashboard
 } from 'lucide-react';
 import html2canvas from 'html2canvas';
@@ -47,6 +47,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     const [isDirty, setIsDirty] = useState(false); // 未保存状態
     const [dragInfo, setDragInfo] = useState(null);
     const [resizeInfo, setResizeInfo] = useState(null);
+    const [isPanning, setIsPanning] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
     const [showAutoLayout, setShowAutoLayout] = useState(false);
 
@@ -60,6 +61,8 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     // キャンバス参照
     const canvasRef = useRef(null);
     const scrollContainerRef = useRef(null); // Add ref for scroll container
+    const panInfoRef = useRef(null);
+    const suppressCanvasClickRef = useRef(false);
 
     // Auto-scroll to center on mount
     useEffect(() => {
@@ -80,8 +83,37 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     // ============================================================================
     // ズーム機能
     // ============================================================================
-    const handleZoomIn = () => setZoomScale(Math.min(2.0, zoomScale + 0.1));
-    const handleZoomOut = () => setZoomScale(Math.max(0.2, zoomScale - 0.1));
+    const clampZoom = (value) => Math.max(0.2, Math.min(2.0, value));
+    const handleViewportWheel = (e) => {
+        if (e.target.closest('input, textarea, select, button')) return;
+        if (dragInfo || resizeInfo || panInfoRef.current) return;
+
+        const container = scrollContainerRef.current;
+        if (!container) return;
+
+        e.preventDefault();
+
+        const rect = container.getBoundingClientRect();
+        const pointerX = e.clientX - rect.left;
+        const pointerY = e.clientY - rect.top;
+
+        setZoomScale(prevZoom => {
+            const nextZoom = clampZoom(prevZoom * Math.exp(-e.deltaY * 0.0015));
+            if (Math.abs(nextZoom - prevZoom) < 0.0001) return prevZoom;
+
+            const worldX = (container.scrollLeft + pointerX) / prevZoom;
+            const worldY = (container.scrollTop + pointerY) / prevZoom;
+
+            requestAnimationFrame(() => {
+                const viewport = scrollContainerRef.current;
+                if (!viewport) return;
+                viewport.scrollLeft = Math.max(0, worldX * nextZoom - pointerX);
+                viewport.scrollTop = Math.max(0, worldY * nextZoom - pointerY);
+            });
+
+            return nextZoom;
+        });
+    };
     // ============================================================================
     // 参加確定企業の取得（改善版）
     // ============================================================================
@@ -321,6 +353,13 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
         return calculateDistances(selectedItem);
     }, [selectedIds, items, pixelsPerMeter]);
 
+    const resizingItem = useMemo(() => {
+        if (!resizeInfo) return null;
+        const target = items.find(i => i.id === resizeInfo.id);
+        if (!target || target.type === 'arrow') return null;
+        return target;
+    }, [resizeInfo, items]);
+
     // ============================================================================
     // 要素追加
     // ============================================================================
@@ -352,12 +391,15 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                     newItem.chairCount = makerData.chairCount;
                     newItem.hasPower = makerData.hasPower;
                     newItem.label = makerData.companyName;
+                    newItem.isEditable = false;
                 } else {
+                    newItem.isEditable = true;
                     newItem.label = 'ブース';
                 }
                 break;
             case 'freeBooth':
-                newItem.label = 'フリー';
+                newItem.type = 'booth';
+                newItem.label = 'ブース';
                 newItem.isEditable = true;
                 newItem.w = boothW;
                 newItem.h = boothH;
@@ -400,6 +442,27 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
         setIsDirty(true);
     };
 
+    const handleViewportMouseDown = (e) => {
+        if (e.button !== 0 || activeTool) return;
+        const target = e.target;
+        if (!target || typeof target.closest !== 'function') return;
+        if (target.closest('[data-layout-item=\"true\"]')) return;
+        if (target.closest('input, textarea, button, select, label')) return;
+        const container = scrollContainerRef.current;
+        if (!container) return;
+
+        panInfoRef.current = {
+            startX: e.clientX,
+            startY: e.clientY,
+            scrollLeft: container.scrollLeft,
+            scrollTop: container.scrollTop,
+            moved: false
+        };
+        suppressCanvasClickRef.current = false;
+        setIsPanning(true);
+        e.preventDefault();
+    };
+
     // ============================================================================
     // ドラッグ＆ドロップ処理
     // ============================================================================
@@ -440,6 +503,22 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     };
 
     const handleMouseMove = (e) => {
+        if (panInfoRef.current && !dragInfo && !resizeInfo) {
+            const container = scrollContainerRef.current;
+            if (container) {
+                const pan = panInfoRef.current;
+                const dx = e.clientX - pan.startX;
+                const dy = e.clientY - pan.startY;
+                if (!pan.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+                    pan.moved = true;
+                    suppressCanvasClickRef.current = true;
+                }
+                container.scrollLeft = pan.scrollLeft - dx;
+                container.scrollTop = pan.scrollTop - dy;
+                e.preventDefault();
+            }
+        }
+
         if (dragInfo) {
             // Delta calculation must account for zoom scale? 
             // Actually simpler to just track absolute mouse position relative to canvas
@@ -521,6 +600,8 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     const handleMouseUp = () => {
         setDragInfo(null);
         setResizeInfo(null);
+        panInfoRef.current = null;
+        setIsPanning(false);
     };
 
     const handleResizeStart = (e, id, handleType = 'box') => {
@@ -546,6 +627,11 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     // キャンバスクリック（矢印描画など）
     // ============================================================================
     const handleCanvasClick = (e) => {
+        if (suppressCanvasClickRef.current) {
+            suppressCanvasClickRef.current = false;
+            return;
+        }
+
         if (activeTool === 'arrow' || activeTool === 'double-arrow') {
             const rect = canvasRef.current.getBoundingClientRect();
             const x = (e.clientX - rect.left) / zoomScale;
@@ -884,15 +970,15 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 </div>
             );
         }
-        if (item.type === 'freeBooth') {
+        if ((item.type === 'booth' && !item.makerId) || item.type === 'freeBooth') {
             return (
                 <div className="w-full h-full flex items-center justify-center p-1">
-                    <input
-                        className="bg-transparent text-[10px] text-center w-full outline-none font-bold"
+                    <textarea
+                        className="bg-transparent text-[10px] text-center leading-tight whitespace-pre-wrap w-full h-full outline-none font-bold resize-none overflow-hidden"
                         value={item.label || ''}
                         onChange={(e) => updateItemProp(item.id, 'label', e.target.value)}
                         onMouseDown={e => e.stopPropagation()}
-                        placeholder="フリー"
+                        placeholder="ブース名"
                     />
                 </div>
             );
@@ -938,7 +1024,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
             case 'booth':
                 return 'bg-white border-2 border-slate-600';
             case 'freeBooth':
-                return 'bg-blue-50 border-2 border-blue-400';
+                return 'bg-white border-2 border-slate-600';
             case 'pillar':
                 return 'bg-slate-500 border border-slate-700';
             case 'venue':
@@ -966,6 +1052,14 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     };
 
     // ドアの回転角度を計算
+    const handleResetBoothsOnly = () => {
+        if (window.confirm('ブースのみを削除します。柱・ドア・障害物・テキストなどは残ります。よろしいですか？')) {
+            setItems(items.filter(i => i.type !== 'booth' && i.type !== 'freeBooth'));
+            setSelectedIds(new Set());
+            setIsDirty(true);
+        }
+    };
+
     const getDoorRotation = (item) => {
         if (item.type !== 'door') return 0;
         switch (item.doorDirection) {
@@ -1066,7 +1160,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                     el.style.alignItems = 'center';
                     el.style.textAlign = 'center';
                     el.style.padding = '2px';
-                    el.style.overflow = 'visible'; // テキストをはみ出させる
+                    el.style.overflow = 'hidden';
 
                     // ブース内テキスト
                     const label = document.createElement('div');
@@ -1074,8 +1168,10 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                     label.style.fontSize = '12px'; // 少し大きめに
                     label.style.fontWeight = 'bold';
                     label.style.color = '#000000';
-                    label.style.lineHeight = '1.1';
-                    label.style.wordBreak = 'break-all';
+                    label.style.lineHeight = '1.2';
+                    label.style.whiteSpace = 'pre-wrap';
+                    label.style.wordBreak = 'break-word';
+                    label.style.width = '100%';
                     label.style.fontFamily = '"Noto Sans JP", sans-serif'; // フォント指定
                     el.appendChild(label);
 
@@ -1230,10 +1326,9 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                     </div>
                     <div className="flex gap-2">
                         {/* ズームコントロール */}
-                        <div className="flex items-center gap-1 bg-slate-100 rounded-lg px-2">
-                            <button onClick={handleZoomOut} className="p-1 hover:bg-slate-200 rounded" title="縮小"><Minus size={14} /></button>
+                        <div className="flex items-center gap-2 bg-slate-100 rounded-lg px-3 py-1">
                             <span className="text-xs font-bold w-12 text-center">{Math.round(zoomScale * 100)}%</span>
-                            <button onClick={handleZoomIn} className="p-1 hover:bg-slate-200 rounded" title="拡大"><Plus size={14} /></button>
+                            <span className="text-[10px] text-slate-500 whitespace-nowrap">ホイールで拡大縮小</span>
                         </div>
                         <button onClick={() => setShowSettings(true)} className="bg-slate-100 text-slate-600 px-3 py-2 rounded-lg font-bold hover:bg-slate-200 flex items-center gap-2 text-sm">
                             <Settings size={16} /> 設定
@@ -1258,7 +1353,6 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 <div className="p-2 border-b bg-white flex justify-between items-center shrink-0 flex-wrap gap-2">
                     <div className="flex gap-1 flex-wrap">
                         <button onClick={() => addElement('booth')} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded text-xs font-bold flex gap-1 items-center"><Plus size={12} /> ブース</button>
-                        <button onClick={() => addElement('freeBooth')} className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-600 rounded text-xs font-bold flex gap-1 items-center"><Plus size={12} /> フリー</button>
                         <div className="w-px bg-slate-200 mx-1"></div>
                         <button onClick={() => addElement('pillar')} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded text-xs font-bold flex gap-1 items-center"><Box size={12} /> 柱</button>
                         <button onClick={() => addElement('venueArea')} className="px-3 py-1.5 bg-white hover:bg-slate-50 border border-slate-300 rounded text-xs font-bold flex gap-1 items-center text-slate-700"><Square size={12} /> 会場追加</button>
@@ -1298,6 +1392,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                         )}
 
                         <button onClick={deleteSelected} disabled={selectedIds.size === 0} className="px-3 py-1.5 bg-red-50 text-red-500 hover:bg-red-100 rounded text-xs font-bold disabled:opacity-50 flex gap-1 items-center"><Trash2 size={12} /> 削除</button>
+                        <button onClick={handleResetBoothsOnly} className="px-3 py-1.5 bg-amber-50 text-amber-700 hover:bg-amber-100 rounded text-xs font-bold flex gap-1 items-center border border-amber-200"><Trash2 size={12} /> ブースのみ全クリア</button>
                         <button onClick={handleResetLayout} className="px-3 py-1.5 bg-red-50 text-red-500 hover:bg-red-100 rounded text-xs font-bold flex gap-1 items-center border border-red-200"><Trash2 size={12} /> 全クリア</button>
                     </div>
                     <div className="flex gap-2 items-center">
@@ -1325,13 +1420,16 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                     {/* Canvas Area */}
                     <div
                         ref={scrollContainerRef}
-                        className="flex-1 overflow-auto bg-slate-200 p-4"
+                        className={`flex-1 overflow-auto bg-slate-200 p-4 ${isPanning ? 'cursor-grabbing' : activeTool ? '' : 'cursor-grab'}`}
+                        onWheel={handleViewportWheel}
+                        onMouseDown={handleViewportMouseDown}
                         onMouseMove={handleMouseMove}
                         onMouseUp={handleMouseUp}
+                        onMouseLeave={handleMouseUp}
                     >
                         <div
                             ref={canvasRef}
-                            className={`bg-slate-300 shadow-xl relative select-none mx-auto ${activeTool === 'arrow' ? 'cursor-crosshair' : ''}`}
+                            className={`bg-slate-300 shadow-xl relative select-none mx-auto ${isPanning ? 'cursor-grabbing' : (activeTool === 'arrow' || activeTool === 'double-arrow' || activeTool === 'text') ? 'cursor-crosshair' : ''}`}
                             style={{
                                 width: canvasWidth,
                                 height: canvasHeight,
@@ -1417,6 +1515,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                                             )}
                                             {/* Clickable Area (Thick Line) */}
                                             <div
+                                                data-layout-item="true"
                                                 className="absolute cursor-move"
                                                 onMouseDown={(e) => handleMouseDown(e, item.id)}
                                                 onClick={(e) => e.stopPropagation()}
@@ -1452,6 +1551,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                                 return ( // Existing item render
                                     <div
                                         key={item.id}
+                                        data-layout-item="true"
                                         className={`absolute group touch-none select-none ${activeTool ? '' : 'cursor-move'} ${getItemStyle(item)} ${selectedIds.has(item.id) ? 'ring-2 ring-blue-500 z-10' : ''}`}
                                         style={{
                                             left: item.x,
@@ -1510,10 +1610,30 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                             )}
 
                             {/* リサイズ中のサイズ表示 */}
-                            {resizeInfo && (
+                            {resizingItem && (<>
                                 <div className="absolute top-2 left-2 bg-blue-600 text-white px-3 py-1 rounded-lg text-xs font-bold z-50 shadow-lg">
-                                    📐 {pixelsToMeters(items.find(i => i.id === resizeInfo.id)?.w || 0).toFixed(1)}m × {pixelsToMeters(items.find(i => i.id === resizeInfo.id)?.h || 0).toFixed(1)}m
+                                    📐 {pixelsToMeters(resizingItem.w || 0).toFixed(1)}m × {pixelsToMeters(resizingItem.h || 0).toFixed(1)}m
                                 </div>
+                                <div className="absolute pointer-events-none z-50" style={{ left: resizingItem.x, top: resizingItem.y, width: resizingItem.w, height: resizingItem.h }}>
+                                    <div className="absolute left-0 right-0 -top-3 border-t border-dashed border-blue-400" />
+                                    <div className="absolute left-0 right-0 -bottom-3 border-t border-dashed border-blue-400" />
+                                    <div className="absolute top-0 bottom-0 -left-3 border-l border-dashed border-blue-400" />
+                                    <div className="absolute top-0 bottom-0 -right-3 border-l border-dashed border-blue-400" />
+                                </div>
+
+                                <div className="absolute pointer-events-none z-50" style={{ left: resizingItem.x + resizingItem.w / 2, top: Math.max(0, resizingItem.y - 22), transform: 'translateX(-50%)' }}>
+                                    <span className="bg-blue-600 text-white px-2 py-0.5 rounded text-[10px] font-bold shadow">{pixelsToMeters(resizingItem.w || 0).toFixed(1)}m</span>
+                                </div>
+                                <div className="absolute pointer-events-none z-50" style={{ left: resizingItem.x + resizingItem.w / 2, top: resizingItem.y + resizingItem.h + 8, transform: 'translateX(-50%)' }}>
+                                    <span className="bg-blue-600 text-white px-2 py-0.5 rounded text-[10px] font-bold shadow">{pixelsToMeters(resizingItem.w || 0).toFixed(1)}m</span>
+                                </div>
+                                <div className="absolute pointer-events-none z-50" style={{ left: Math.max(0, resizingItem.x - 18), top: resizingItem.y + resizingItem.h / 2, transform: 'translate(-100%, -50%) rotate(-90deg)' }}>
+                                    <span className="bg-blue-600 text-white px-2 py-0.5 rounded text-[10px] font-bold shadow">{pixelsToMeters(resizingItem.h || 0).toFixed(1)}m</span>
+                                </div>
+                                <div className="absolute pointer-events-none z-50" style={{ left: resizingItem.x + resizingItem.w + 18, top: resizingItem.y + resizingItem.h / 2, transform: 'translate(0, -50%) rotate(-90deg)' }}>
+                                    <span className="bg-blue-600 text-white px-2 py-0.5 rounded text-[10px] font-bold shadow">{pixelsToMeters(resizingItem.h || 0).toFixed(1)}m</span>
+                                </div>
+                                </>
                             )}
 
                             {/* 矢印描画中のプレビュー */}
@@ -1632,13 +1752,11 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                                     </div>
                                 </div>
                                 <div>
-                                    <label className="block text-xs font-bold text-slate-500 mb-1">表示スケール（ズーム）</label>
+                                    <label className="block text-xs font-bold text-slate-500 mb-1">描画スケール（px/m）</label>
                                     <div className="flex gap-2 items-center">
-                                        <button onClick={handleZoomOut} className="p-2 bg-slate-100 hover:bg-slate-200 rounded"><Minus size={16} /></button>
                                         <input type="range" min="20" max="80" value={pixelsPerMeter} onChange={e => setPixelsPerMeter(Number(e.target.value))} className="flex-1" />
-                                        <button onClick={handleZoomIn} className="p-2 bg-slate-100 hover:bg-slate-200 rounded"><Plus size={16} /></button>
                                     </div>
-                                    <div className="text-xs text-slate-400 text-center mt-1">{Math.round(pixelsPerMeter / 40 * 100)}% ({pixelsPerMeter}px/m)</div>
+                                    <div className="text-xs text-slate-400 text-center mt-1">{Math.round(pixelsPerMeter / 40 * 100)}% ({pixelsPerMeter}px/m) / ズームはキャンバス上でホイール操作</div>
                                 </div>
                             </div>
                             <div className="p-4 border-t flex justify-end"><button onClick={() => setShowSettings(false)} className="bg-blue-600 text-white px-4 py-2 rounded-lg font-bold">閉じる</button></div>

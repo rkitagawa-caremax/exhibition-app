@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
     BookOpen, AlertTriangle, ArrowLeft, ChevronRight
 } from 'lucide-react';
@@ -7,9 +7,14 @@ function activeCategoryStepOffset(tab, idx) {
     return idx + 1;
 }
 
-export default function OperationalManualView() {
-    const [activeTab, setActiveTab] = useState('preparation'); // preparation, dayOf, postEvent
+export default function OperationalManualView({ initialTab = 'preparation' }) {
+    const [activeTab, setActiveTab] = useState(initialTab); // preparation, dayOf, postEvent
     const [activeStep, setActiveStep] = useState(0);
+
+    useEffect(() => {
+        setActiveTab(initialTab);
+        setActiveStep(0);
+    }, [initialTab]);
 
     const MANUAL_DATA = {
         preparation: {
@@ -35,7 +40,7 @@ export default function OperationalManualView() {
                     title: "Step 2: タスクの整理",
                     desc: "タスク管理タブで、タスク一覧を確認！営業タスクと企画タスク、どちらも確認してそれぞれのタスクに期限を設定してください。",
                     actions: [
-                        "タスクの横のペンボタンから編集できます",
+                        "タスクを押すとタスクの内容が編集できます",
                         "営業タスクで、いらないタスク・または追加したいタスクがあれば適宜追加してください",
                         "タスク順も見やすいようにドラッグで並び替えることもできます"
                     ],
@@ -48,12 +53,12 @@ export default function OperationalManualView() {
                     title: "Step 3: メーカーを招待",
                     desc: "メーカーを招待！ 招待メーカータブ",
                     actions: [
-                        "マスター管理シートをクリックし、招待確定リストタブの中身を確認 → ここに記載のメーカーは全国どこの展示会でも招待します",
-                        "招待確定リスト以外に呼びたいメーカーがあれば、招待リストに仕入先コードとともに追加（※招待固定リストは企画でCSV取込をするので入力不要）",
+                        "まずは固定リスト反映で、企業管理コンソールの固定リストを招待リストに反映！",
+                        "それ以外で招待したいメーカーがいれば＋個別追加から追加。AI提案機能も活用してください（※企業管理コンソールに登録が無いと登録不可のため、企業管理コンソールの全リストで企業登録が必要です）",
                         "オリジナル招待フォームの「⚙フォーム編集」から招待アンケート内容を編集（質問の追加・回答方法や必須設定も自由に設定可能）",
                         "質問を保存後、回答画面（デモ）でアンケート内容が問題ないか確認！",
                         "問題なければ企画部に招待Goの指示をお願いします！（※メーカーに展示会招待メールを一斉送信します）",
-                        "追加招待が完了したら、赤い受付締め切りボタンを押してフォームをシャットダウン"
+                        "メーカー招待を打ち切る場合、赤い受付締め切りボタンを押してフォーム回答をシャットダウンします。"
                     ],
                     points: [
                         "招待URLは各メーカー共通です",
@@ -75,12 +80,12 @@ export default function OperationalManualView() {
                     title: "Step 4: 事前登録フォーム確認",
                     desc: "受付用タブの登録フォーム編集より、事前登録フォームの内容を確認してください。",
                     actions: [
-                        "受付用タブ → 登録フォーム編集 → 内容を確認（基本はデフォルトで問題ないはず）",
+                        "来場者管理タブ → 登録フォーム編集 → 内容を確認（基本はデフォルトで問題ないはず）",
                         "カスタマイズして保存！登録画面（デモ）から内容が問題ないか確認！",
                         "問題なければ表示されているURLをコピー",
                         "緑色のボタンから他サイトへ遷移し、URLを貼り付けてQRコード画像を作成",
                         "生成したQR画像を企画部へ送付 → チラシの作成に移ります",
-                        "会場の図面（会場のサイズの記載あり）を企画部に送付 → レイアウトたたき台を作成します"
+                        "会場・備品タブのレイアウト作成ツールよりレイアウトを作成。完成したレイアウトを企画に送ってください。"
                     ],
                     points: [
                         "QRコード作成サイトへ遷移してQR画像を保存しましょう",
@@ -102,12 +107,12 @@ export default function OperationalManualView() {
                     ]
                 },
                 {
-                    title: "Step 6: レイアウトとチラシ完成",
-                    desc: "この時点でレイアウト図とチラシを完成させます。",
+                    title: "Step 6: 会場・備品タブ",
+                    desc: "完成したレイアウト図・チラシを資料管理に反映し、メーカーへ確定連絡を行います。",
                     actions: [
-                        "レイアウト図は会場・備品タブに埋め込み",
-                        "チラシは資料タブのGoogleドライブに入れます",
-                        "企画部よりメーカーへ確定メールを送付（アンケートの際の回答のコピー・メーカースキャナ管理サイト・レイアウト図など）",
+                        "完成したレイアウト図をメーカー招待タブの資料管理に埋め込み。メーカーがポータルサイトからダウンロードできます。（企画部）",
+                        "完成したチラシをメーカー招待タブの資料管理に埋め込み。メーカーがポータルサイトからダウンロードできます。（企画部）",
+                        "企画部よりメーカーへ確定メールを送付",
                         "タスク管理の登録タスクを処理しながら、集客に移行してください"
                     ],
                     points: [
@@ -221,7 +226,7 @@ export default function OperationalManualView() {
                     title: "Step 2: 締め",
                     desc: "展示会活動の締めくくりです。",
                     actions: [
-                        "お礼メール（出展メーカーへ）を送るので、メール内容を企画に共有してください。（全メーカー内容は統一）",
+                        "請求書自動生成機能から、請求書を生成し各メーカーに送付（企画）",
                         "メーカー入金がされているか、経理と連携して確認",
                         "これにて展示会は完全終了です！本当にお疲れ様でした！！"
                     ],

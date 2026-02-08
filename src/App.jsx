@@ -10,7 +10,7 @@ import {
   AlertTriangle, ExternalLink, Copy, Check, FileSpreadsheet,
   UserPlus, Settings, Download, Eye, Folder, PackageCheck,
   Camera, Loader, Ghost, BedDouble, CalendarDays, Menu,
-  ChevronDown, ChevronUp, ChevronRight, RefreshCcw, Trash, GitBranch, Mic, Truck, Layout, User, Info, LogOut, Maximize,
+  ChevronDown, ChevronUp, ChevronRight, Trash, GitBranch, Mic, Truck, Layout, User, Info, LogOut, Maximize,
   Box, BookOpen, Star, LayoutGrid, Grid, Image, Radio, ArrowRight, XCircle, History as HistoryIcon, Minus, Inbox, Square, Trophy, BarChart3, Wand2
 } from 'lucide-react';
 // import ExcelJS from 'exceljs';
@@ -33,7 +33,9 @@ import {
   buildDeclineRanking,
   buildMakerStrategyReport,
   buildOverallExhibitionStats,
+  buildRevenueSimulation,
   buildTotalVisitors,
+  buildVisitorForecast,
   buildVisitorCheckinHeatmap,
   buildVisitorAttributes,
   buildYearlyStats,
@@ -230,18 +232,71 @@ const DEFAULT_FORM_CONFIG = {
   }
 };
 
-const DEFAULT_VISITOR_FORM_CONFIG = {
+const VISITOR_TYPE_OPTIONS = [
+  '福祉用具貸与事業所',
+  '医療機器販売',
+  '介護施設・病院管理者様',
+  '介護・看護従事者様(看護師・介護士・ケアマネ等)',
+  'メーカー・製造業',
+  '一般・個人',
+  'その他'
+];
+
+const VISITOR_CONTACT_DISABLED_TYPES = new Set([
+  '介護・看護従事者様(看護師・介護士・ケアマネ等)',
+  '一般・個人'
+]);
+
+const getDefaultVisitorFormItems = () => ([
+  { id: 'type', label: '★受付区分', type: 'select', options: [...VISITOR_TYPE_OPTIONS], required: true, isFixed: true },
+  { id: 'companyName', label: '★会社名・法人名', type: 'text', help: '個人の場合は「個人」とご明記ください (例：株式会社ケアマックスコーポレーション)', required: true, isFixed: true },
+  { id: 'repName', label: '★代表者名', type: 'text', help: '', required: true, isFixed: true },
+  { id: 'phone', label: '★電話番号', type: 'text', help: 'ハイフンなしでも可', required: true, isFixed: true },
+  { id: 'email', label: '★メールアドレス', type: 'email', help: '', required: true, isFixed: true },
+  { id: 'invitedBy', label: '★招待企業様名', type: 'text', help: '招待状をお持ちの場合、企業名をご記入ください（任意）', required: false, isFixed: true }
+]);
+
+const FIXED_VISITOR_ITEM_IDS = new Set(getDefaultVisitorFormItems().map(item => item.id));
+const isVisitorFixedQuestion = (itemOrId) => {
+  const id = typeof itemOrId === 'string' ? itemOrId : itemOrId?.id;
+  return FIXED_VISITOR_ITEM_IDS.has(id);
+};
+
+const isContactDisabledByVisitorType = (typeValue) => VISITOR_CONTACT_DISABLED_TYPES.has(typeValue || '');
+
+const normalizeVisitorContactFields = (formData = {}) => {
+  if (!isContactDisabledByVisitorType(formData.type)) {
+    return formData;
+  }
+  return {
+    ...formData,
+    phone: '',
+    email: ''
+  };
+};
+
+const normalizeVisitorFormConfig = (config) => {
+  const base = (config && typeof config === 'object') ? config : {};
+  const defaults = getDefaultVisitorFormItems();
+  const sourceItems = Array.isArray(base.items) ? base.items : [];
+  const customItems = sourceItems
+    .filter(item => !isVisitorFixedQuestion(item?.id))
+    .map(item => ({ ...item, isFixed: false }));
+
+  return {
+    title: typeof base.title === 'string' && base.title.trim() ? base.title : '来場者事前登録',
+    description: typeof base.description === 'string' && base.description.trim()
+      ? base.description
+      : '当日のスムーズな入場のため、事前登録にご協力をお願いいたします。登録完了後、入場用QRコードが発行されます。',
+    items: [...defaults, ...customItems]
+  };
+};
+
+const DEFAULT_VISITOR_FORM_CONFIG = normalizeVisitorFormConfig({
   title: '来場者事前登録',
   description: '当日のスムーズな入場のため、事前登録にご協力をお願いいたします。登録完了後、入場用QRコードが発行されます。',
-  items: [
-    { id: 'type', label: '★受付区分', type: 'select', options: ['販売店', '介護・看護従事者様(看護師・介護士・ケアマネ等)', 'メーカー・製造業', '一般・個人'], required: true },
-    { id: 'companyName', label: '★会社名・法人名', type: 'text', help: '個人の場合は「個人」とご明記ください (例：株式会社ケアマックスコーポレーション)', required: true },
-    { id: 'repName', label: '★代表者名', type: 'text', help: '', required: true },
-    { id: 'phone', label: '★電話番号', type: 'text', help: 'ハイフンなしでも可', required: true },
-    { id: 'email', label: '★メールアドレス', type: 'email', help: 'QRコード送付用', required: true },
-    { id: 'invitedBy', label: '★招待企業様名', type: 'text', help: '招待状をお持ちの場合、企業名をご記入ください（任意）', required: false }
-  ]
-};
+  items: getDefaultVisitorFormItems()
+});
 
 const downloadCSV = (data, filename) => {
   if (!data || !data.length) return;
@@ -824,21 +879,137 @@ ${place}
 
 
 function VisitorFormEditor({ config, onSave }) {
-  const [localConfig, setLocalConfig] = useState(JSON.parse(JSON.stringify(config)));
+  const [localConfig, setLocalConfig] = useState(() => normalizeVisitorFormConfig(config));
   const [newItemName, setNewItemName] = useState('');
-  const updateField = (key, val) => setLocalConfig({ ...localConfig, [key]: val });
+  useEffect(() => {
+    setLocalConfig(normalizeVisitorFormConfig(config));
+  }, [config]);
+
+  const updateField = (key, val) => setLocalConfig(prev => ({ ...prev, [key]: val }));
+
   const updateItem = (id, key, val) => {
-    const newItems = localConfig.items.map(item => item.id === id ? { ...item, [key]: val } : item);
-    setLocalConfig({ ...localConfig, items: newItems });
+    if (isVisitorFixedQuestion(id)) return;
+    const newItems = localConfig.items.map(item => {
+      if (item.id !== id) return item;
+      return { ...item, [key]: val };
+    });
+    setLocalConfig(prev => ({ ...prev, items: newItems }));
   };
-  const deleteItem = (id) => { if (window.confirm('削除しますか？')) setLocalConfig({ ...localConfig, items: localConfig.items.filter(i => i.id !== id) }); };
-  const addItem = () => { if (!newItemName) return; setLocalConfig({ ...localConfig, items: [...localConfig.items, { id: `custom-${Date.now()}`, label: newItemName, type: 'text', help: '', required: false }] }); setNewItemName(''); };
+  const deleteItem = (id) => {
+    if (isVisitorFixedQuestion(id)) {
+      alert('固定質問は削除できません。');
+      return;
+    }
+    if (window.confirm('削除しますか？')) {
+      setLocalConfig(prev => ({ ...prev, items: prev.items.filter(i => i.id !== id) }));
+    }
+  };
+  const addItem = () => {
+    const trimmed = newItemName.trim();
+    if (!trimmed) return;
+    setLocalConfig(prev => ({
+      ...prev,
+      items: [...prev.items, { id: `custom-${Date.now()}`, label: trimmed, type: 'text', help: '', required: false, isFixed: false }]
+    }));
+    setNewItemName('');
+  };
+
+  const handleSave = () => {
+    onSave(normalizeVisitorFormConfig(localConfig));
+  };
 
   return (
     <div className="animate-fade-in max-w-3xl mx-auto">
-      <div className="flex justify-between items-center mb-6"><h2 className="text-2xl font-bold text-slate-800">登録フォーム編集</h2><button onClick={() => onSave(localConfig)} className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-blue-700 flex items-center gap-2"><Save size={18} /> 保存する</button></div>
-      <div className="bg-white border border-slate-200 rounded-xl p-6 mb-6 shadow-sm"><div className="space-y-4"><div><label className="block text-sm font-bold text-slate-500 mb-1">フォームタイトル</label><input className="w-full border p-2 rounded" value={localConfig.title} onChange={e => updateField('title', e.target.value)} /></div><div><label className="block text-sm font-bold text-slate-500 mb-1">説明文</label><textarea className="w-full border p-2 rounded h-24" value={localConfig.description} onChange={e => updateField('description', e.target.value)} /></div></div></div>
-      <div className="bg-slate-50 border border-slate-200 rounded-xl p-6"><h3 className="font-bold text-slate-700 border-b pb-2 mb-4">質問項目</h3><div className="space-y-3">{localConfig.items.map((item, idx) => (<div key={item.id} className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm group"><div className="flex justify-between items-start mb-2"><span className="text-xs font-bold text-slate-400">項目 {idx + 1} ({item.type})</span><button onClick={() => deleteItem(item.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={16} /></button></div><div className="grid grid-cols-1 md:grid-cols-2 gap-4"><div><label className="block text-xs font-bold mb-1">質問ラベル</label><input className="w-full border p-2 rounded text-sm" value={item.label} onChange={e => updateItem(item.id, 'label', e.target.value)} /></div><div><label className="block text-xs font-bold mb-1">補足説明</label><input className="w-full border p-2 rounded text-sm" value={item.help || ''} onChange={e => updateItem(item.id, 'help', e.target.value)} /></div></div><div className="mt-2 flex items-center gap-2"><label className="flex items-center gap-1 text-sm cursor-pointer"><input type="checkbox" checked={item.required} onChange={e => updateItem(item.id, 'required', e.target.checked)} /> 必須項目</label>{item.type === 'select' && (<div className="flex-1 ml-4"><label className="block text-xs font-bold mb-1">選択肢 (カンマ区切り)</label><input className="w-full border p-1 rounded text-xs" value={item.options ? item.options.join(',') : ''} onChange={e => updateItem(item.id, 'options', e.target.value.split(','))} /></div>)}</div></div>))}</div><div className="mt-6 flex gap-2"><input className="flex-1 border p-2 rounded" placeholder="新しい質問タイトル..." value={newItemName} onChange={e => setNewItemName(e.target.value)} /><button onClick={addItem} className="bg-slate-700 text-white px-4 py-2 rounded font-bold text-sm">新規追加</button></div></div>
+      <div className="flex justify-between items-center mb-6">
+        <h2 className="text-2xl font-bold text-slate-800">登録フォーム編集</h2>
+        <button onClick={handleSave} className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-blue-700 flex items-center gap-2">
+          <Save size={18} /> 保存する
+        </button>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl p-6 mb-6 shadow-sm">
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-bold text-slate-500 mb-1">フォームタイトル</label>
+            <input className="w-full border p-2 rounded" value={localConfig.title} onChange={e => updateField('title', e.target.value)} />
+          </div>
+          <div>
+            <label className="block text-sm font-bold text-slate-500 mb-1">説明文</label>
+            <textarea className="w-full border p-2 rounded h-24" value={localConfig.description} onChange={e => updateField('description', e.target.value)} />
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-slate-50 border border-slate-200 rounded-xl p-6">
+        <h3 className="font-bold text-slate-700 border-b pb-2 mb-4">質問項目</h3>
+        <div className="space-y-3">
+          {localConfig.items.map((item, idx) => {
+            const itemIsFixed = isVisitorFixedQuestion(item);
+            return (
+              <div key={item.id} className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm group">
+                <div className="flex justify-between items-start mb-2">
+                  <span className="text-xs font-bold text-slate-400">
+                    項目 {idx + 1} ({item.type}) {itemIsFixed && <span className="ml-1 text-blue-600">固定</span>}
+                  </span>
+                  <button
+                    onClick={() => deleteItem(item.id)}
+                    className={itemIsFixed ? 'text-slate-200 cursor-not-allowed' : 'text-slate-300 hover:text-red-500'}
+                    disabled={itemIsFixed}
+                    title={itemIsFixed ? '固定質問は削除できません' : '削除'}
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold mb-1">質問ラベル</label>
+                    <input
+                      className={`w-full border p-2 rounded text-sm ${itemIsFixed ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
+                      value={item.label}
+                      onChange={e => updateItem(item.id, 'label', e.target.value)}
+                      disabled={itemIsFixed}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold mb-1">補足説明</label>
+                    <input
+                      className={`w-full border p-2 rounded text-sm ${itemIsFixed ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
+                      value={item.help || ''}
+                      onChange={e => updateItem(item.id, 'help', e.target.value)}
+                      disabled={itemIsFixed}
+                    />
+                  </div>
+                </div>
+                <div className="mt-2 flex items-center gap-2">
+                  <label className={`flex items-center gap-1 text-sm ${itemIsFixed ? 'text-slate-400 cursor-not-allowed' : 'cursor-pointer'}`}>
+                    <input
+                      type="checkbox"
+                      checked={item.required}
+                      onChange={e => updateItem(item.id, 'required', e.target.checked)}
+                      disabled={itemIsFixed}
+                    /> 必須項目
+                  </label>
+                  {item.type === 'select' && (
+                    <div className="flex-1 ml-4">
+                      <label className="block text-xs font-bold mb-1">選択肢 (カンマ区切り)</label>
+                      <input
+                        className={`w-full border p-1 rounded text-xs ${itemIsFixed ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
+                        value={item.options ? item.options.join(',') : ''}
+                        onChange={e => updateItem(item.id, 'options', e.target.value.split(','))}
+                        disabled={itemIsFixed}
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="mt-6 flex gap-2">
+          <input className="flex-1 border p-2 rounded" placeholder="新しい質問タイトル..." value={newItemName} onChange={e => setNewItemName(e.target.value)} />
+          <button onClick={addItem} className="bg-slate-700 text-white px-4 py-2 rounded font-bold text-sm">新規追加</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -846,14 +1017,19 @@ function VisitorFormEditor({ config, onSave }) {
 function SimulatedPublicVisitorForm({ config, onClose, onSubmit }) {
   const [formData, setFormData] = useState({});
   const [submittedData, setSubmittedData] = useState(null);
+  const normalizedConfig = useMemo(() => normalizeVisitorFormConfig(config), [config]);
+  const isContactDisabled = isContactDisabledByVisitorType(formData.type);
 
-  const handleChange = (id, val) => { setFormData({ ...formData, [id]: val }); };
+  const handleChange = (id, val) => {
+    const next = { ...formData, [id]: val };
+    setFormData(normalizeVisitorContactFields(next));
+  };
 
   const handleSubmit = (e) => {
     e.preventDefault();
     // Simulate ID generation
     const newId = crypto.randomUUID();
-    const finalData = { ...formData, id: newId, status: 'registered' };
+    const finalData = { ...normalizeVisitorContactFields(formData), id: newId, status: 'registered' };
 
     onSubmit(finalData);
     setSubmittedData(finalData);
@@ -898,9 +1074,43 @@ function SimulatedPublicVisitorForm({ config, onClose, onSubmit }) {
     <div className="fixed inset-0 bg-slate-900/90 z-[90] flex items-center justify-center p-4 overflow-y-auto">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg my-8 overflow-hidden animate-slide-up relative">
         <button onClick={onClose} className="absolute top-4 right-4 text-white hover:text-blue-200 bg-black/20 rounded-full p-1"><X size={20} /></button>
-        <div className="bg-blue-600 p-8 text-white"><h2 className="text-2xl font-bold mb-2">{config.title}</h2><p className="text-blue-100 text-sm">{config.description}</p></div>
+        <div className="bg-blue-600 p-8 text-white"><h2 className="text-2xl font-bold mb-2">{normalizedConfig.title}</h2><p className="text-blue-100 text-sm">{normalizedConfig.description}</p></div>
         <form onSubmit={handleSubmit} className="p-8 space-y-6 max-h-[70vh] overflow-y-auto">
-          {config.items && config.items.map(item => (<div key={item.id}><label className="block text-sm font-bold text-slate-700 mb-1">{item.label} {item.required && <span className="text-red-500">*</span>}</label>{item.type === 'select' ? (<select required={item.required} className="w-full border border-slate-300 p-3 rounded-lg bg-white outline-none focus:ring-2 focus:ring-blue-400" onChange={e => handleChange(item.id, e.target.value)}><option value="">選択してください</option>{item.options.map(opt => <option key={opt} value={opt}>{opt}</option>)}</select>) : (<input type={item.type} required={item.required} className="w-full border border-slate-300 p-3 rounded-lg outline-none focus:ring-2 focus:ring-blue-400" placeholder={item.help} onChange={e => handleChange(item.id, e.target.value)} />)}{item.help && item.type !== 'text' && <p className="text-xs text-slate-400 mt-1">{item.help}</p>}</div>))}
+          {normalizedConfig.items && normalizedConfig.items.map(item => {
+            const disabledField = isContactDisabled && (item.id === 'phone' || item.id === 'email');
+            const requiredField = disabledField ? false : item.required;
+            const baseClass = `w-full border border-slate-300 p-3 rounded-lg outline-none focus:ring-2 focus:ring-blue-400 ${disabledField ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white'}`;
+            return (
+              <div key={item.id}>
+                <label className="block text-sm font-bold text-slate-700 mb-1">
+                  {item.label} {requiredField && <span className="text-red-500">*</span>}
+                </label>
+                {item.type === 'select' ? (
+                  <select
+                    required={requiredField}
+                    className={baseClass}
+                    onChange={e => handleChange(item.id, e.target.value)}
+                    value={formData[item.id] || ''}
+                    disabled={disabledField}
+                  >
+                    <option value="">選択してください</option>
+                    {item.options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                  </select>
+                ) : (
+                  <input
+                    type={item.type}
+                    required={requiredField}
+                    className={baseClass}
+                    placeholder={disabledField ? '対象外' : item.help}
+                    onChange={e => handleChange(item.id, e.target.value)}
+                    value={formData[item.id] || ''}
+                    disabled={disabledField}
+                  />
+                )}
+                {item.help && item.type !== 'text' && !disabledField && <p className="text-xs text-slate-400 mt-1">{item.help}</p>}
+              </div>
+            );
+          })}
           <div className="pt-4"><button type="submit" className="w-full bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg hover:bg-blue-700 transition-all flex items-center justify-center gap-2"><QrCode size={20} /> 登録して入場QRを発行</button></div>
         </form>
       </div>
@@ -3258,12 +3468,11 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
 // TabEntrance: QRスキャン実装 (修正版: 連打防止・URL表示)
 function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, updateMainData, initialMode }) {
   const { formUrlVisitor, visitorFormConfig } = exhibition;
+  const normalizedVisitorFormConfig = useMemo(() => normalizeVisitorFormConfig(visitorFormConfig), [visitorFormConfig]);
   const [mode, setMode] = useState(initialMode || 'dashboard');
   const [showSimulatedPublicForm, setShowSimulatedPublicForm] = useState(false);
   const [lastScannedVisitor, setLastScannedVisitor] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
-  const [shortUrl, setShortUrl] = useState('');
-  const [isShortening, setIsShortening] = useState(false);
   const [isCopied, setIsCopied] = useState(false); // isCopied state for TabEntrance
   const [isScanning, setIsScanning] = useState(true); // Scanner state for TabEntrance
 
@@ -3279,40 +3488,9 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
     }
   };
 
-  // URL短縮機能 (is.gd - 直接リダイレクト、英語ページ表示なし)
-  const shortenUrl = async () => {
-    if (!formUrlVisitor) return;
-    setIsShortening(true);
-    try {
-      // is.gd API (無料・認証不要・直接リダイレクト)
-      const response = await fetch(`https://is.gd/create.php?format=simple&url=${encodeURIComponent(formUrlVisitor)}`);
-      if (response.ok) {
-        const shortened = await response.text();
-        setShortUrl(shortened);
-        navigator.clipboard.writeText(shortened);
-        alert('短縮URLをクリップボードにコピーしました！\nQRコードに使用できます。');
-      } else {
-        alert('URL短縮に失敗しました');
-      }
-    } catch (e) {
-      alert('URL短縮エラー: ' + e.message);
-    }
-    setIsShortening(false);
-  };
-
-  // URLリフレッシュ機能
-  const refreshVisitorUrl = () => {
-    if (!window.confirm('来場者登録フォームのURLを更新します。\n古いURLは無効になりますがよろしいですか？')) return;
-    const baseUrl = window.location.origin + window.location.pathname;
-    const newUrl = `${baseUrl}?mode=visitor_register&id=${exhibition.id}`;
-    updateMainData('formUrlVisitor', newUrl);
-    setShortUrl(''); // 短縮URLもクリア
-    alert('URLを更新しました！');
-  };
-
   // Copy function for TabEntrance
   const copyVisitorFormUrl = () => {
-    const urlToCopy = shortUrl || formUrlVisitor;
+    const urlToCopy = formUrlVisitor;
     if (!urlToCopy) return;
     navigator.clipboard.writeText(urlToCopy);
     setIsCopied(true);
@@ -3323,8 +3501,16 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
     if (initialMode) setMode(initialMode);
   }, [initialMode]);
 
+  useEffect(() => {
+    const raw = JSON.stringify(visitorFormConfig || {});
+    const normalized = JSON.stringify(normalizedVisitorFormConfig || {});
+    if (raw !== normalized) {
+      updateMainData('visitorFormConfig', normalizedVisitorFormConfig);
+    }
+  }, [normalizedVisitorFormConfig, updateMainData, visitorFormConfig]);
+
   const handleConfigSave = (newConfig) => {
-    updateMainData('visitorFormConfig', newConfig);
+    updateMainData('visitorFormConfig', normalizeVisitorFormConfig(newConfig));
     setMode('dashboard');
   };
 
@@ -3390,10 +3576,6 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
           <div className="flex flex-col md:flex-row items-center justify-between gap-4">
             <div className="flex-1 w-full">
               <h4 className="font-bold text-white mb-1 flex items-center gap-2"><QrCode size={18} /> 事前登録用フォーム</h4>
-              <div className="bg-yellow-900/30 border border-yellow-700/50 p-2 rounded mb-2 text-[10px] text-yellow-200">
-                <p>注意: スマホで読み取る場合、URLが <strong>localhost</strong> だとアクセスできません。</p>
-                <p>PCのIPアドレス（例: 192.168.x.x）に変更してください。</p>
-              </div>
               <div className="mt-2 flex gap-2">
                 <div className="relative w-full">
                   <input
@@ -3403,10 +3585,8 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
                     className="bg-slate-800 text-blue-300 text-xs px-3 py-2 rounded border border-slate-700 w-full focus:ring-1 focus:ring-blue-500 outline-none"
                     placeholder="https://..."
                   />
-                  {shortUrl && <span className="absolute right-2 top-2 text-[10px] bg-blue-900 px-1 rounded text-blue-200">短縮中</span>}
                 </div>
                 <button className={`px-3 py-2 rounded text-xs flex items-center gap-1 shrink-0 transition-colors ${isCopied ? 'bg-green-600 text-white' : 'bg-slate-700 hover:bg-slate-600 text-white'}`} onClick={copyVisitorFormUrl}>{isCopied ? <Check size={14} /> : <Copy size={14} />} {isCopied ? '完了' : 'コピー'}</button>
-                <button onClick={refreshVisitorUrl} className="bg-slate-700 hover:bg-slate-600 text-white px-3 py-2 rounded text-xs flex items-center gap-1 shrink-0" title="初期化"><RefreshCcw size={14} /></button>
               </div>
 
               {/* QR Link */}
@@ -3538,9 +3718,9 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
           </div>
         )}
 
-        {mode === 'editForm' && <VisitorFormEditor config={visitorFormConfig} onSave={handleConfigSave} />}
+        {mode === 'editForm' && <VisitorFormEditor config={normalizedVisitorFormConfig} onSave={handleConfigSave} />}
       </div>
-      {showSimulatedPublicForm && <SimulatedPublicVisitorForm config={visitorFormConfig} onClose={() => setShowSimulatedPublicForm(false)} onSubmit={handlePublicRegister} />}
+      {showSimulatedPublicForm && <SimulatedPublicVisitorForm config={normalizedVisitorFormConfig} onClose={() => setShowSimulatedPublicForm(false)} onSubmit={handlePublicRegister} />}
     </div>
   );
 }
@@ -3604,6 +3784,10 @@ function TabMainBoard({ exhibition, updateMainData, updateBatch, tasks, onNaviga
   const totalIncome = boothIncome + incomes.reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
   const totalExpense = (venueDetails?.cost || 0) + equipmentTotal + lectureFees + expenses.reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
   const finalBalance = totalIncome - totalExpense;
+  const targetProfitValue = Number(exhibition.targetProfit) || 0;
+  const profitGap = finalBalance - targetProfitValue;
+  const profitAchievementRate = targetProfitValue > 0 ? (finalBalance / targetProfitValue) * 100 : 0;
+  const confirmedBoothTotal = confirmedMakers.reduce((sum, maker) => sum + extractNum(maker.boothCount), 0);
 
   // Urgent Tasks (Due within 7 days and not done)
   const today = new Date();
@@ -3695,6 +3879,34 @@ function TabMainBoard({ exhibition, updateMainData, updateBatch, tasks, onNaviga
   // Google Maps Embed URL (query-based, no API key needed)
   const mapQuery = exhibition.venueAddress || exhibition.place || '';
   const mapEmbedUrl = mapQuery ? `https://www.google.com/maps?q=${encodeURIComponent(mapQuery)}&output=embed` : '';
+  const resolveGoogleMapsUrl = () => {
+    const raw = (exhibition.googleMapsUrl || '').trim();
+    if (raw) {
+      try {
+        const parsed = new URL(raw);
+        const host = parsed.hostname.toLowerCase();
+        const isGoogleComHost = host.includes('google.com');
+        const isMapsAppHost = host === 'maps.app.goo.gl' || host.endsWith('.maps.app.goo.gl');
+        const isGoogleShortHost = host === 'goo.gl' || host.endsWith('.goo.gl');
+        const isMapsPath =
+          parsed.pathname.includes('/maps') ||
+          parsed.pathname.includes('/search') ||
+          parsed.pathname.includes('/place');
+        if (
+          isMapsAppHost ||
+          (isGoogleComHost && isMapsPath) ||
+          (isGoogleShortHost && parsed.pathname.includes('/maps'))
+        ) {
+          return raw;
+        }
+      } catch (_) {
+        // ignore malformed URL and fallback below
+      }
+    }
+    if (!mapQuery) return '';
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(mapQuery)}`;
+  };
+  const googleMapsLinkUrl = resolveGoogleMapsUrl();
 
   // Color palette for member avatars
   const avatarColors = ['bg-blue-500', 'bg-emerald-500', 'bg-amber-500', 'bg-rose-500', 'bg-purple-500', 'bg-cyan-500'];
@@ -3729,6 +3941,7 @@ function TabMainBoard({ exhibition, updateMainData, updateBatch, tasks, onNaviga
             <span className="text-4xl font-black text-slate-800">{confirmedMakers.length}</span>
             <span className="text-slate-400 text-lg">社 (確定)</span>
           </div>
+          <div className="text-slate-600 text-sm font-bold mt-1">総コマ数: {confirmedBoothTotal.toLocaleString()}コマ</div>
           {pendingMakers.length > 0 && (
             <div className="text-amber-500 text-sm font-bold mt-1">未回答: {pendingMakers.length}社</div>
           )}
@@ -3748,6 +3961,11 @@ function TabMainBoard({ exhibition, updateMainData, updateBatch, tasks, onNaviga
           <div className="flex items-center gap-2 text-slate-500 text-sm font-medium mb-2"><TrendingUp size={16} /> 最終収支</div>
           <div className={`text-3xl font-black ${finalBalance >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
             ¥{finalBalance.toLocaleString()}
+          </div>
+          <div className="text-slate-500 text-xs mt-1">目標利益: ¥{targetProfitValue.toLocaleString()}</div>
+          <div className={`text-xs font-bold mt-1 ${profitGap >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+            乖離: {profitGap >= 0 ? '+' : '-'}¥{Math.abs(profitGap).toLocaleString()}
+            {targetProfitValue > 0 ? ` (${profitAchievementRate.toFixed(1)}%)` : ''}
           </div>
           <div className="text-slate-400 text-xs mt-1">出展費用+雑収入 - 総支出</div>
         </div>
@@ -3813,8 +4031,8 @@ function TabMainBoard({ exhibition, updateMainData, updateBatch, tasks, onNaviga
                   {exhibition.venueUrl && (
                     <a href={exhibition.venueUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 hover:underline flex items-center gap-1"><ExternalLink size={14} /> 会場Webサイト</a>
                   )}
-                  {exhibition.googleMapsUrl && (
-                    <a href={exhibition.googleMapsUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 hover:underline flex items-center gap-1"><Map size={14} /> Googleマップで開く</a>
+                  {googleMapsLinkUrl && (
+                    <a href={googleMapsLinkUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 hover:underline flex items-center gap-1"><Map size={14} /> Googleマップで開く</a>
                   )}
                 </div>
               </div>
@@ -5170,10 +5388,16 @@ const ALL_TAB_DEFINITIONS = [
 // 公開フォーム: ダウンロード機能付き（スマホ対応修正版）
 // -----------------------------------------------------------
 function PublicVisitorView({ exhibition, onSubmit }) {
-  const { visitorFormConfig } = exhibition;
+  const visitorFormConfig = useMemo(() => normalizeVisitorFormConfig(exhibition?.visitorFormConfig), [exhibition?.visitorFormConfig]);
   const [formData, setFormData] = useState({});
   const [submitted, setSubmitted] = useState(false);
   const [qrData, setQrData] = useState(null);
+  const isContactDisabled = isContactDisabledByVisitorType(formData.type);
+
+  const handleChange = (id, value) => {
+    const next = { ...formData, [id]: value };
+    setFormData(normalizeVisitorContactFields(next));
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -5181,7 +5405,7 @@ function PublicVisitorView({ exhibition, onSubmit }) {
     // QRコードにはIDのみ埋め込む（シンプルなQRで読み取りやすく）
     setQrData(visitorId);
 
-    const finalData = { ...formData, id: visitorId };
+    const finalData = { ...normalizeVisitorContactFields(formData), id: visitorId };
     const success = await onSubmit(finalData);
     if (success) setSubmitted(true);
   };
@@ -5252,7 +5476,46 @@ function PublicVisitorView({ exhibition, onSubmit }) {
     <div className="min-h-screen bg-slate-50 p-4 md:p-8">
       <div className="max-w-xl mx-auto bg-white rounded-2xl shadow-lg overflow-hidden">
         <div className="bg-blue-600 p-6 text-white"><h1 className="text-xl font-bold mb-2">{exhibition.title}</h1><h2 className="text-lg opacity-90">{visitorFormConfig.title}</h2></div>
-        <div className="p-6 md:p-8"><form onSubmit={handleSubmit} className="space-y-5">{visitorFormConfig.items.map(item => (<div key={item.id}><label className="block text-sm font-bold text-slate-700 mb-1">{item.label} {item.required && <span className="text-red-500">*</span>}</label>{item.type === 'select' ? (<select required={item.required} className="w-full border border-slate-300 p-3 rounded-lg bg-white outline-none" onChange={e => setFormData({ ...formData, [item.id]: e.target.value })}><option value="">選択してください</option>{item.options.map(opt => <option key={opt} value={opt}>{opt}</option>)}</select>) : (<input type={item.type} required={item.required} className="w-full border border-slate-300 p-3 rounded-lg outline-none" placeholder={item.help} onChange={e => setFormData({ ...formData, [item.id]: e.target.value })} />)}</div>))}<button type="submit" className="w-full bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg hover:bg-blue-700 transition-all mt-4">登録してQRコードを発行</button></form></div>
+        <div className="p-6 md:p-8">
+          <form onSubmit={handleSubmit} className="space-y-5">
+            {visitorFormConfig.items.map(item => {
+              const disabledField = isContactDisabled && (item.id === 'phone' || item.id === 'email');
+              const requiredField = disabledField ? false : item.required;
+              const baseClass = `w-full border border-slate-300 p-3 rounded-lg outline-none ${disabledField ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white'}`;
+
+              return (
+                <div key={item.id}>
+                  <label className="block text-sm font-bold text-slate-700 mb-1">
+                    {item.label} {requiredField && <span className="text-red-500">*</span>}
+                  </label>
+                  {item.type === 'select' ? (
+                    <select
+                      required={requiredField}
+                      className={baseClass}
+                      onChange={e => handleChange(item.id, e.target.value)}
+                      value={formData[item.id] || ''}
+                      disabled={disabledField}
+                    >
+                      <option value="">選択してください</option>
+                      {item.options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                    </select>
+                  ) : (
+                    <input
+                      type={item.type}
+                      required={requiredField}
+                      className={baseClass}
+                      placeholder={disabledField ? '対象外' : item.help}
+                      onChange={e => handleChange(item.id, e.target.value)}
+                      value={formData[item.id] || ''}
+                      disabled={disabledField}
+                    />
+                  )}
+                </div>
+              );
+            })}
+            <button type="submit" className="w-full bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg hover:bg-blue-700 transition-all mt-4">登録してQRコードを発行</button>
+          </form>
+        </div>
       </div>
     </div>
   );
@@ -6332,6 +6595,7 @@ function PerformanceAnalysisView({ exhibitions }) {
     return buildDeclineRanking(companyPerformanceStats);
   }, [companyPerformanceStats]);
 
+  const [simulationAdditionalCompanies, setSimulationAdditionalCompanies] = useState(5);
   const [aiReportGeneratedAt, setAiReportGeneratedAt] = useState(() => Date.now());
   const [aiReportRevision, setAiReportRevision] = useState(1);
   const [isAiRegenerating, setIsAiRegenerating] = useState(false);
@@ -6350,6 +6614,14 @@ function PerformanceAnalysisView({ exhibitions }) {
   const overallExhibitionStats = useMemo(() => {
     return buildOverallExhibitionStats(exhibitions);
   }, [exhibitions]);
+
+  const visitorForecast = useMemo(() => {
+    return buildVisitorForecast(exhibitions);
+  }, [exhibitions]);
+
+  const revenueSimulation = useMemo(() => {
+    return buildRevenueSimulation(exhibitions, simulationAdditionalCompanies);
+  }, [exhibitions, simulationAdditionalCompanies]);
 
   // AI統合分析（全展示会データ横断）
   const aiIntegratedReport = useMemo(() => {
@@ -6595,6 +6867,110 @@ function PerformanceAnalysisView({ exhibitions }) {
                 {aiIntegratedReport.opportunities.map((line, idx) => (
                   <p key={idx} className="text-xs text-slate-600 leading-relaxed">- {line}</p>
                 ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Forecast & Simulation */}
+      <div className="bg-white rounded-xl border p-6 shadow-sm">
+        <h3 className="text-xl font-bold text-slate-800 mb-5 flex items-center gap-2">
+          <BarChart3 className="text-cyan-600" size={20} />
+          予測・シミュレーション
+        </h3>
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+          <div className="rounded-xl border border-cyan-100 bg-cyan-50/60 p-4">
+            <p className="text-sm font-bold text-cyan-900 mb-3">来場者予測</p>
+            {visitorForecast.dataPoints === 0 ? (
+              <p className="text-sm text-slate-500">予測に必要な過去データがありません</p>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-end gap-3">
+                  <p className="text-3xl font-bold text-slate-800">{visitorForecast.predictedVisitors.toLocaleString()}名</p>
+                  <p className="text-xs text-slate-500 pb-1">次回想定</p>
+                </div>
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div className="rounded-lg bg-white border border-cyan-100 p-3">
+                    <p className="text-slate-500 text-xs">予測レンジ</p>
+                    <p className="font-bold text-slate-800">{visitorForecast.predictedMin.toLocaleString()} - {visitorForecast.predictedMax.toLocaleString()}名</p>
+                  </div>
+                  <div className="rounded-lg bg-white border border-cyan-100 p-3">
+                    <p className="text-slate-500 text-xs">想定入場者</p>
+                    <p className="font-bold text-emerald-700">{visitorForecast.predictedCheckedIn.toLocaleString()}名</p>
+                  </div>
+                  <div className="rounded-lg bg-white border border-cyan-100 p-3">
+                    <p className="text-slate-500 text-xs">平均来場者</p>
+                    <p className="font-bold text-slate-700">{visitorForecast.averageVisitors.toLocaleString()}名</p>
+                  </div>
+                  <div className="rounded-lg bg-white border border-cyan-100 p-3">
+                    <p className="text-slate-500 text-xs">1展示会あたり傾向</p>
+                    <p className={`font-bold ${visitorForecast.trendPerExhibition >= 0 ? 'text-blue-700' : 'text-red-700'}`}>
+                      {visitorForecast.trendPerExhibition >= 0 ? '+' : ''}{visitorForecast.trendPerExhibition}名
+                    </p>
+                  </div>
+                </div>
+                <p className="text-xs text-slate-500">
+                  過去{visitorForecast.dataPoints}展示会の実績から算出（平均入場率: {visitorForecast.avgCheckinRate}%）
+                </p>
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-xl border border-emerald-100 bg-emerald-50/60 p-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
+              <p className="text-sm font-bold text-emerald-900">収益シミュレーション</p>
+              <label className="flex items-center gap-2 text-sm text-slate-600">
+                <span>出展社 +</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="200"
+                  value={simulationAdditionalCompanies}
+                  onChange={(e) => setSimulationAdditionalCompanies(Math.max(0, Number(e.target.value) || 0))}
+                  className="w-20 border rounded px-2 py-1 text-right bg-white"
+                />
+                <span>社</span>
+              </label>
+            </div>
+
+            {revenueSimulation.dataPoints === 0 ? (
+              <p className="text-sm text-slate-500">シミュレーションに必要な実績データがありません</p>
+            ) : (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div className="rounded-lg bg-white border border-emerald-100 p-3">
+                    <p className="text-slate-500 text-xs">増加売上（想定）</p>
+                    <p className="font-bold text-blue-700">+¥{revenueSimulation.projected.additionalIncome.toLocaleString()}</p>
+                  </div>
+                  <div className="rounded-lg bg-white border border-emerald-100 p-3">
+                    <p className="text-slate-500 text-xs">増加費用（想定）</p>
+                    <p className="font-bold text-red-700">+¥{revenueSimulation.projected.additionalExpense.toLocaleString()}</p>
+                  </div>
+                  <div className="rounded-lg bg-white border border-emerald-100 p-3">
+                    <p className="text-slate-500 text-xs">利益差分</p>
+                    <p className={`font-bold ${revenueSimulation.projected.profitDelta >= 0 ? 'text-emerald-700' : 'text-red-700'}`}>
+                      {revenueSimulation.projected.profitDelta >= 0 ? '+' : ''}¥{revenueSimulation.projected.profitDelta.toLocaleString()}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white border border-emerald-100 p-3">
+                    <p className="text-slate-500 text-xs">想定追加コマ</p>
+                    <p className="font-bold text-slate-700">{revenueSimulation.scenario.additionalBooths}コマ</p>
+                  </div>
+                </div>
+                <div className="rounded-lg bg-white border border-emerald-100 p-3">
+                  <p className="text-xs text-slate-500">平均展示会ベースの最終収支（想定）</p>
+                  <p className={`text-2xl font-bold ${revenueSimulation.projected.projectedProfit >= 0 ? 'text-emerald-700' : 'text-red-700'}`}>
+                    ¥{revenueSimulation.projected.projectedProfit.toLocaleString()}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    現在平均: ¥{revenueSimulation.baseline.avgProfit.toLocaleString()} / 1社あたり平均売上: ¥{revenueSimulation.baseline.avgRevenuePerCompany.toLocaleString()}
+                    {revenueSimulation.projected.roi !== null ? ` / ROI: ${revenueSimulation.projected.roi}%` : ''}
+                  </p>
+                </div>
+                <p className="text-xs text-slate-500">
+                  過去{revenueSimulation.dataPoints}展示会の実績をもとに算出。固定費は据え置き、可変費用のみ増加として試算しています。
+                </p>
               </div>
             )}
           </div>
@@ -7325,9 +7701,23 @@ function CreateExhibitionForm({ data, setData, onCancel, onSubmit }) {
 
 
 
-function ExhibitionDetail({ exhibition, onBack, onNavigate, updateVisitorCount, updateExhibitionData, batchUpdateExhibitionData, masterMakers, initialTab, onTabChange, storage, allExhibitions = [] }) {
+function ExhibitionDetail({
+  exhibition,
+  onBack,
+  onNavigate,
+  updateVisitorCount,
+  updateExhibitionData,
+  batchUpdateExhibitionData,
+  masterMakers,
+  initialTab,
+  onTabChange,
+  storage,
+  allExhibitions = [],
+  allowedTabs = null,
+  initialEntranceMode = 'dashboard',
+}) {
   const [activeTab, setActiveTab] = useState(initialTab || 'main');
-  const [entranceMode, setEntranceMode] = useState('dashboard'); // QRスキャナーモード制御用
+  const [entranceMode, setEntranceMode] = useState(initialEntranceMode || 'dashboard'); // QRスキャナーモード制御用
 
   const setVenueDetails = (d) => updateExhibitionData(exhibition.id, 'venueDetails', d);
   const setMakers = (m) => updateExhibitionData(exhibition.id, 'makers', m);
@@ -7350,6 +7740,12 @@ function ExhibitionDetail({ exhibition, onBack, onNavigate, updateVisitorCount, 
     }
   }, [initialTab]);
 
+  useEffect(() => {
+    if (activeTab === 'entrance' && initialEntranceMode) {
+      setEntranceMode(initialEntranceMode);
+    }
+  }, [activeTab, initialEntranceMode]);
+
   const handleTabChange = (tabId) => {
     setActiveTab(tabId);
     if (onTabChange) onTabChange(tabId);
@@ -7367,6 +7763,23 @@ function ExhibitionDetail({ exhibition, onBack, onNavigate, updateVisitorCount, 
     { id: 'lectures', label: '講演会', icon: Mic },
     { id: 'files', label: '資料', icon: Folder },
   ];
+
+  const visibleTabDefinitions = useMemo(() => {
+    if (!Array.isArray(allowedTabs) || allowedTabs.length === 0) {
+      return ALL_TAB_DEFINITIONS;
+    }
+    const allowedSet = new Set(allowedTabs);
+    return ALL_TAB_DEFINITIONS.filter(tab => allowedSet.has(tab.id));
+  }, [allowedTabs]);
+
+  useEffect(() => {
+    const isCurrentTabAllowed = visibleTabDefinitions.some(tab => tab.id === activeTab);
+    if (!isCurrentTabAllowed) {
+      const fallbackTab = visibleTabDefinitions[0]?.id || 'main';
+      setActiveTab(fallbackTab);
+      if (onTabChange) onTabChange(fallbackTab);
+    }
+  }, [activeTab, onTabChange, visibleTabDefinitions]);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -7404,7 +7817,7 @@ function ExhibitionDetail({ exhibition, onBack, onNavigate, updateVisitorCount, 
       </div>
 
       <div className="flex overflow-x-auto gap-2 border-b border-slate-200 pb-1 scrollbar-hide">
-        {ALL_TAB_DEFINITIONS.map(tab => (
+        {visibleTabDefinitions.map(tab => (
           <button key={tab.id} onClick={() => handleTabChange(tab.id)} className={`flex items-center gap-2 px-4 py-3 rounded-t-lg font-medium transition-all whitespace-nowrap ${activeTab === tab.id ? 'bg-white text-blue-600 border-b-2 border-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-800 hover:bg-white/50'}`}><tab.icon size={18} /> {tab.label}</button>
         ))}
       </div>
@@ -7424,6 +7837,145 @@ function ExhibitionDetail({ exhibition, onBack, onNavigate, updateVisitorCount, 
   );
 }
 
+function normalizeYmdDate(dateValue) {
+  if (dateValue == null) return null;
+
+  if (typeof dateValue === 'number' && Number.isFinite(dateValue)) {
+    const d = new Date(dateValue);
+    if (Number.isNaN(d.getTime())) return null;
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+
+  if (typeof dateValue !== 'string') return null;
+
+  const text = dateValue.trim();
+  if (!text) return null;
+
+  const ymd = text.match(/(\d{4})[\/\-.年](\d{1,2})[\/\-.月](\d{1,2})/);
+  if (ymd) {
+    const year = Number(ymd[1]);
+    const month = Number(ymd[2]);
+    const day = Number(ymd[3]);
+    const d = new Date(year, month - 1, day);
+    if (Number.isNaN(d.getTime())) return null;
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+
+  const fallback = new Date(text);
+  if (Number.isNaN(fallback.getTime())) return null;
+  fallback.setHours(0, 0, 0, 0);
+  return fallback;
+}
+
+function getClosestExhibitionByDate(exhibitions = [], baseDate = new Date()) {
+  if (!Array.isArray(exhibitions) || exhibitions.length === 0) return null;
+
+  const target = new Date(baseDate);
+  target.setHours(0, 0, 0, 0);
+
+  let best = null;
+  for (const ex of exhibitions) {
+    const candidateDates = [...(ex?.dates || []), ...(ex?.preDates || [])]
+      .map(normalizeYmdDate)
+      .filter(Boolean);
+
+    if (candidateDates.length === 0) continue;
+
+    for (const d of candidateDates) {
+      const diffMs = d.getTime() - target.getTime();
+      const absDiff = Math.abs(diffMs);
+      const isPast = diffMs < 0 ? 1 : 0;
+      if (
+        !best ||
+        absDiff < best.absDiff ||
+        (absDiff === best.absDiff && isPast < best.isPast) ||
+        (absDiff === best.absDiff && isPast === best.isPast && d.getTime() < best.dateMs)
+      ) {
+        best = { exhibition: ex, absDiff, isPast, dateMs: d.getTime() };
+      }
+    }
+  }
+
+  if (best?.exhibition) return best.exhibition;
+  return exhibitions[0] || null;
+}
+
+function MobileEventSimpleView({
+  exhibitions = [],
+  selectedExhibition,
+  onSelectExhibition,
+  onOpenAction,
+}) {
+  const hasExhibitions = Array.isArray(exhibitions) && exhibitions.length > 0;
+  const datesText = (selectedExhibition?.dates || []).join(' / ') || '未設定';
+  const venueText = selectedExhibition?.place || selectedExhibition?.venueAddress || '未設定';
+  const staffText = selectedExhibition?.staff || '未設定';
+
+  return (
+    <div className="space-y-4 animate-fade-in">
+      <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
+        <h2 className="text-xl font-bold text-slate-800 mb-1">展示会用簡易ビュー</h2>
+        <p className="text-sm text-slate-600 mb-4">当日運営に必要な機能だけを表示しています。</p>
+        {hasExhibitions ? (
+          <select
+            value={selectedExhibition?.id || ''}
+            onChange={(e) => onSelectExhibition(e.target.value)}
+            className="w-full p-3 border border-slate-300 rounded-xl bg-white text-slate-800 font-medium"
+          >
+            {exhibitions.map((ex) => (
+              <option key={ex.id} value={ex.id}>
+                {ex.title}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <div className="bg-amber-50 text-amber-800 border border-amber-200 rounded-xl p-3 text-sm font-medium">
+            展示会データがありません。
+          </div>
+        )}
+      </section>
+
+      {selectedExhibition && (
+        <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
+          <h3 className="text-sm font-bold text-slate-500 mb-3">必要最低限の展示会情報</h3>
+          <div className="space-y-2 text-sm">
+            <p><span className="text-slate-500">展示会名:</span> <span className="font-bold text-slate-800">{selectedExhibition.title}</span></p>
+            <p><span className="text-slate-500">開催日:</span> <span className="font-medium text-slate-800">{datesText}</span></p>
+            <p><span className="text-slate-500">会場:</span> <span className="font-medium text-slate-800">{venueText}</span></p>
+            <p><span className="text-slate-500">担当:</span> <span className="font-medium text-slate-800">{staffText}</span></p>
+          </div>
+        </section>
+      )}
+
+      <section className="grid grid-cols-2 gap-3">
+        <button onClick={() => onOpenAction('qr')} className="col-span-2 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl p-4 flex items-center justify-center gap-2 font-bold text-base shadow-md">
+          <ScanLine size={20} /> QR読み込み
+        </button>
+        <button onClick={() => onOpenAction('schedule')} className="bg-white hover:bg-slate-50 border border-slate-300 rounded-xl p-3 flex items-center justify-center gap-2 font-bold text-slate-700">
+          <Calendar size={18} /> スケジュール
+        </button>
+        <button onClick={() => onOpenAction('visitors')} className="bg-white hover:bg-slate-50 border border-slate-300 rounded-xl p-3 flex items-center justify-center gap-2 font-bold text-slate-700">
+          <Users size={18} /> 来場者管理
+        </button>
+        <button onClick={() => onOpenAction('lectures')} className="bg-white hover:bg-slate-50 border border-slate-300 rounded-xl p-3 flex items-center justify-center gap-2 font-bold text-slate-700">
+          <Mic size={18} /> 講演会確認
+        </button>
+        <button onClick={() => onOpenAction('files')} className="bg-white hover:bg-slate-50 border border-slate-300 rounded-xl p-3 flex items-center justify-center gap-2 font-bold text-slate-700">
+          <Folder size={18} /> 資料確認
+        </button>
+        <button onClick={() => onOpenAction('info')} className="bg-white hover:bg-slate-50 border border-slate-300 rounded-xl p-3 flex items-center justify-center gap-2 font-bold text-slate-700">
+          <FileText size={18} /> 展示会情報
+        </button>
+        <button onClick={() => onOpenAction('manual')} className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl p-3 flex items-center justify-center gap-2 font-bold">
+          <BookOpen size={18} /> 当日運営編
+        </button>
+      </section>
+    </div>
+  );
+}
+
 function App() {
   const [view, setView] = useState('loading');
   const [exhibitions, setExhibitions] = useState(null);
@@ -7435,6 +7987,14 @@ function App() {
   const [targetExhibitionId, setTargetExhibitionId] = useState(null);
   const [dashboardMaker, setDashboardMaker] = useState(null);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [manualInitialTab, setManualInitialTab] = useState('preparation');
+  const [exhibitionEntranceModes, setExhibitionEntranceModes] = useState({}); // { [exhibitionId]: 'dashboard' | 'scanner' }
+  const [mobileAdminMode, setMobileAdminMode] = useState(() => {
+    const stored = localStorage.getItem('mobile_admin_mode');
+    if (window.innerWidth < 768) return 'simple';
+    return stored || 'full';
+  });
+  const [isMobileViewport, setIsMobileViewport] = useState(() => window.innerWidth < 768);
 
   const {
     masterMakers,
@@ -7450,6 +8010,40 @@ function App() {
   useEffect(() => {
     selectedExhibitionRef.current = selectedExhibition;
   }, [selectedExhibition]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setIsMobileViewport(window.innerWidth < 768);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('mobile_admin_mode', mobileAdminMode);
+  }, [mobileAdminMode]);
+
+  const isSimpleMobileMode = isMobileViewport && mobileAdminMode === 'simple';
+  const closestExhibition = useMemo(() => {
+    return getClosestExhibitionByDate(exhibitions || [], new Date());
+  }, [exhibitions]);
+  const wasSimpleModeRef = useRef(false);
+  const hasAutoSelectedSimpleRef = useRef(false);
+
+  useEffect(() => {
+    if (isSimpleMobileMode && !wasSimpleModeRef.current) {
+      hasAutoSelectedSimpleRef.current = false;
+    }
+    wasSimpleModeRef.current = isSimpleMobileMode;
+  }, [isSimpleMobileMode]);
+
+  useEffect(() => {
+    if (!isSimpleMobileMode) return;
+    if (!closestExhibition) return;
+    if (hasAutoSelectedSimpleRef.current) return;
+    setSelectedExhibition(closestExhibition);
+    hasAutoSelectedSimpleRef.current = true;
+  }, [closestExhibition, isSimpleMobileMode]);
 
   // Login State
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
@@ -7518,13 +8112,39 @@ function App() {
           }
         }
 
-        uniqueData.sort((a, b) => b.createdAt - a.createdAt);
-        setExhibitions(uniqueData);
+        const normalizationTargets = [];
+        const normalizedData = uniqueData.map((item) => {
+          const normalizedVisitorFormConfig = normalizeVisitorFormConfig(item.visitorFormConfig);
+          const rawConfig = JSON.stringify(item.visitorFormConfig || {});
+          const normalizedConfig = JSON.stringify(normalizedVisitorFormConfig || {});
+          if (rawConfig !== normalizedConfig) {
+            normalizationTargets.push({ id: item.id, visitorFormConfig: normalizedVisitorFormConfig });
+            return { ...item, visitorFormConfig: normalizedVisitorFormConfig };
+          }
+          return item;
+        });
+
+        normalizedData.sort((a, b) => b.createdAt - a.createdAt);
+        setExhibitions(normalizedData);
+
+        if (normalizationTargets.length > 0) {
+          Promise.allSettled(
+            normalizationTargets.map((target) => {
+              const targetRef = doc(db, 'artifacts', appId, 'public', 'data', 'exhibitions', target.id);
+              return updateDoc(targetRef, { visitorFormConfig: target.visitorFormConfig });
+            })
+          ).then((results) => {
+            const rejected = results.filter(r => r.status === 'rejected');
+            if (rejected.length > 0) {
+              console.warn('[VisitorForm] normalization update partially failed', rejected);
+            }
+          });
+        }
 
         // ★最適化: onSnapshot内でselectedExhibitionを直接同期（不要なEffect再実行を防止）
         const currentSelectedId = selectedExhibitionRef.current?.id;
         if (currentSelectedId) {
-          const latest = uniqueData.find(e => e.id === currentSelectedId);
+          const latest = normalizedData.find(e => e.id === currentSelectedId);
           if (latest) {
             selectedExhibitionRef.current = latest;
             setSelectedExhibition(latest);
@@ -8001,6 +8621,63 @@ function App() {
     setView(nextView);
   };
 
+  const navigateToManual = (tab = 'preparation') => {
+    setManualInitialTab(tab);
+    navigateTo('manual');
+  };
+
+  const switchMobileAdminMode = (mode) => {
+    setMobileAdminMode(mode);
+    setIsMobileMenuOpen(false);
+    if (mode === 'simple') {
+      setView('dashboard');
+    }
+  };
+
+  const handleSimpleSelectExhibition = (exhibitionId) => {
+    const target = (exhibitions || []).find(ex => ex.id === exhibitionId);
+    if (!target) return;
+    setSelectedExhibition(target);
+    hasAutoSelectedSimpleRef.current = true;
+  };
+
+  const openSimpleAction = (actionKey) => {
+    const target = selectedExhibition || closestExhibition || (exhibitions || [])[0];
+    if (!target && actionKey !== 'manual') {
+      alert('展示会データがありません。');
+      return;
+    }
+
+    if (actionKey === 'manual') {
+      navigateToManual('dayOf');
+      return;
+    }
+
+    let tabToOpen = 'main';
+    let entranceModeToOpen = 'dashboard';
+
+    if (actionKey === 'qr') {
+      tabToOpen = 'entrance';
+      entranceModeToOpen = 'scanner';
+    } else if (actionKey === 'visitors') {
+      tabToOpen = 'entrance';
+      entranceModeToOpen = 'dashboard';
+    } else if (actionKey === 'schedule') {
+      tabToOpen = 'schedule';
+    } else if (actionKey === 'lectures') {
+      tabToOpen = 'lectures';
+    } else if (actionKey === 'files') {
+      tabToOpen = 'files';
+    } else if (actionKey === 'info') {
+      tabToOpen = 'main';
+    }
+
+    setSelectedExhibition(target);
+    setExhibitionTabs(prev => ({ ...prev, [target.id]: tabToOpen }));
+    setExhibitionEntranceModes(prev => ({ ...prev, [target.id]: entranceModeToOpen }));
+    navigateTo('detail');
+  };
+
   useLayoutEffect(() => {
     if (mainRef.current) {
       // Restore scroll position for the new view (default to 0)
@@ -8008,6 +8685,8 @@ function App() {
       mainRef.current.scrollTop = savedPos;
     }
   }, [view]);
+
+  const showSimpleHome = isSimpleMobileMode && view !== 'detail' && view !== 'manual';
 
   if (view === 'loading') return <div className="min-h-screen flex items-center justify-center bg-slate-50"><div className="text-center"><Loader className="animate-spin text-blue-600 mb-2 mx-auto" size={40} /><p className="text-slate-500 font-bold">Connecting to Database...</p></div></div>;
   if (view === 'not_found') return <div className="min-h-screen flex items-center justify-center bg-slate-50 text-slate-500">プロジェクトが見つかりません。URLを確認してください。</div>;
@@ -8064,11 +8743,47 @@ function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 font-sans flex flex-col md:flex-row">
-      <div className="md:hidden bg-slate-900 text-white p-4 flex items-center gap-4 sticky top-0 z-50">
-        <button onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}><Menu size={24} /></button>
-        <h1 className="text-lg font-bold flex items-center gap-2"><Ghost className="text-red-500" size={20} /> Kaientai-X</h1>
+      <div className="md:hidden bg-slate-900 text-white p-4 sticky top-0 z-50">
+        {isSimpleMobileMode ? (
+          <div className="flex items-center justify-between">
+            <h1 className="text-lg font-bold flex items-center gap-2">
+              <Ghost className="text-red-500" size={20} /> 展示会用簡易ビュー
+            </h1>
+            <button
+              onClick={() => setView('dashboard')}
+              className="bg-slate-700 hover:bg-slate-600 text-white text-sm font-bold px-3 py-2 rounded-lg"
+            >
+              TOP
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-4">
+            <button onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}><Menu size={24} /></button>
+            <h1 className="text-lg font-bold flex items-center gap-2"><Ghost className="text-red-500" size={20} /> Kaientai-X</h1>
+          </div>
+        )}
       </div>
 
+      {isMobileViewport && (
+        <div className="md:hidden bg-white border-b border-slate-200 px-3 py-3 sticky top-[60px] z-40">
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              onClick={() => switchMobileAdminMode('full')}
+              className={`col-span-1 rounded-xl font-bold text-sm transition-all ${mobileAdminMode === 'full' ? 'bg-slate-900 text-white py-3' : 'bg-slate-100 text-slate-700 py-3 hover:bg-slate-200'}`}
+            >
+              管理画面
+            </button>
+            <button
+              onClick={() => switchMobileAdminMode('simple')}
+              className={`col-span-2 rounded-xl font-bold text-base transition-all ${mobileAdminMode === 'simple' ? 'bg-blue-600 text-white py-4 shadow-md' : 'bg-blue-100 text-blue-700 py-4 hover:bg-blue-200'}`}
+            >
+              展示会用簡易ビュー
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!isSimpleMobileMode && (
       <aside className={`fixed inset-y-0 left-0 z-40 w-64 bg-slate-900 text-white transform transition-transform duration-300 ease-in-out md:relative md:translate-x-0 ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}`}>
         <div className="p-6 border-b border-slate-800 flex justify-between items-center">
           <div onClick={() => { navigateTo('dashboard'); setIsMobileMenuOpen(false); }} className="cursor-pointer transition-opacity hover:opacity-80">
@@ -8080,7 +8795,7 @@ function App() {
         <nav className="flex-1 p-4 space-y-2">
           <button onClick={() => { navigateTo('dashboard'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'dashboard' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-slate-300'}`}><LayoutDashboard size={20} /> ダッシュボード</button>
           <button onClick={() => { navigateTo('enterprise'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'enterprise' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-slate-300'}`}><Building2 size={20} /> 企業管理コンソール</button>
-          <button onClick={() => { navigateTo('manual'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'manual' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-slate-300'}`}><BookOpen size={20} /> 運用マニュアル</button>
+          <button onClick={() => { navigateToManual('preparation'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'manual' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-slate-300'}`}><BookOpen size={20} /> 運用マニュアル</button>
           <button onClick={() => { navigateTo('analysis'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'analysis' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-slate-300'}`}><BarChart3 size={20} /> 実績分析</button>
 
           {/* Resume Project Button */}
@@ -8097,22 +8812,34 @@ function App() {
             </div>
           )}
         </nav>
-        <div className="p-4 border-t border-slate-800">
+      <div className="p-4 border-t border-slate-800">
           <div className="flex items-center gap-3 mb-3"><img src="/ship_blue_icon.png" alt="Admin" className="w-10 h-10 rounded-full object-cover border border-slate-700 bg-white" /><div><p className="text-sm font-medium">caremax-corp</p><p className="text-xs text-slate-400 truncate max-w-[150px]" title="seisaku.tokyo@kaientaiweb.jp">seisaku.tokyo@kaientaiweb.jp</p></div></div>
           <button onClick={handleLogout} className="w-full text-red-400 hover:bg-red-500/10 px-3 py-2 rounded-lg text-sm flex items-center gap-2"><LogOut size={16} /> ログアウト</button>
         </div>
       </aside>
+      )}
 
-      {isMobileMenuOpen && <div className="fixed inset-0 bg-black/50 z-30 md:hidden" onClick={() => setIsMobileMenuOpen(false)}></div>}
+      {!isSimpleMobileMode && isMobileMenuOpen && <div className="fixed inset-0 bg-black/50 z-30 md:hidden" onClick={() => setIsMobileMenuOpen(false)}></div>}
 
       <main ref={mainRef} className="flex-1 h-[calc(100vh-60px)] md:h-screen overflow-y-auto bg-slate-50 relative">
         <div className="p-4 md:p-10 max-w-7xl mx-auto">
-          {view === 'dashboard' && <DashboardView exhibitions={exhibitions || []} onCreateClick={() => navigateTo('create')} onCardClick={(ex) => { setSelectedExhibition(ex); navigateTo('detail'); }} onDeleteClick={deleteExhibition} onScanClick={(ex) => { setSelectedExhibition(ex); setExhibitionTabs(prev => ({ ...prev, [ex.id]: 'entrance' })); navigateTo('detail'); }} />}
-          {view === 'create' && <CreateExhibitionForm data={newExhibition} setData={setNewExhibition} onCancel={() => navigateTo('dashboard')} onSubmit={handleCreate} />}
-          {view === 'enterprise' && <EnterpriseConsole masterMakers={masterMakers} setMasterMakers={setMasterMakers} db={db} appId={appId} />}
-          {view === 'manual' && <OperationalManualView />}
-          {view === 'analysis' && <PerformanceAnalysisView exhibitions={exhibitions || []} />}
-          {view === 'detail' && selectedExhibition && <ExhibitionDetail exhibition={selectedExhibition} onBack={() => navigateTo('dashboard')} onNavigate={navigateTo} updateVisitorCount={updateVisitorCount} updateExhibitionData={updateExhibitionData} batchUpdateExhibitionData={batchUpdateExhibitionData} masterMakers={masterMakers} initialTab={exhibitionTabs[selectedExhibition.id]} onTabChange={(tab) => setExhibitionTabs(prev => ({ ...prev, [selectedExhibition.id]: tab }))} storage={storage} allExhibitions={exhibitions || []} />}
+          {showSimpleHome ? (
+            <MobileEventSimpleView
+              exhibitions={exhibitions || []}
+              selectedExhibition={selectedExhibition}
+              onSelectExhibition={handleSimpleSelectExhibition}
+              onOpenAction={openSimpleAction}
+            />
+          ) : (
+            <>
+              {view === 'dashboard' && <DashboardView exhibitions={exhibitions || []} onCreateClick={() => navigateTo('create')} onCardClick={(ex) => { setSelectedExhibition(ex); navigateTo('detail'); }} onDeleteClick={deleteExhibition} onScanClick={(ex) => { setSelectedExhibition(ex); setExhibitionTabs(prev => ({ ...prev, [ex.id]: 'entrance' })); setExhibitionEntranceModes(prev => ({ ...prev, [ex.id]: 'scanner' })); navigateTo('detail'); }} />}
+              {view === 'create' && <CreateExhibitionForm data={newExhibition} setData={setNewExhibition} onCancel={() => navigateTo('dashboard')} onSubmit={handleCreate} />}
+              {view === 'enterprise' && <EnterpriseConsole masterMakers={masterMakers} setMasterMakers={setMasterMakers} db={db} appId={appId} />}
+              {view === 'manual' && <OperationalManualView initialTab={manualInitialTab} />}
+              {view === 'analysis' && <PerformanceAnalysisView exhibitions={exhibitions || []} />}
+              {view === 'detail' && selectedExhibition && <ExhibitionDetail exhibition={selectedExhibition} onBack={() => navigateTo('dashboard')} onNavigate={navigateTo} updateVisitorCount={updateVisitorCount} updateExhibitionData={updateExhibitionData} batchUpdateExhibitionData={batchUpdateExhibitionData} masterMakers={masterMakers} initialTab={exhibitionTabs[selectedExhibition.id]} onTabChange={(tab) => setExhibitionTabs(prev => ({ ...prev, [selectedExhibition.id]: tab }))} storage={storage} allExhibitions={exhibitions || []} allowedTabs={isSimpleMobileMode ? ['main', 'schedule', 'entrance', 'lectures', 'files'] : null} initialEntranceMode={exhibitionEntranceModes[selectedExhibition.id] || 'dashboard'} />}
+            </>
+          )}
         </div>
       </main>
 

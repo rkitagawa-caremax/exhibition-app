@@ -89,6 +89,26 @@ const getMakerCompanyKey = (maker) => {
   return null;
 };
 
+const parseBoothCount = (value, fallback = 1) => {
+  const m = String(value ?? '').match(/\d+/);
+  if (!m) return fallback;
+  const parsed = Number(m[0]);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+};
+
+const toFiniteNumber = (value, fallback = 0) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+const buildExhibitionSortTime = (ex, fallbackOrder) => {
+  const dateStr = ex?.dates?.[0];
+  const parsed = dateStr ? new Date(dateStr).getTime() : NaN;
+  if (Number.isFinite(parsed)) return parsed;
+  return fallbackOrder;
+};
+
 export const normalizeMakerStatusForAnalysis = (rawStatus) => {
   const s = String(rawStatus || '').trim().toLowerCase();
   if (!s) return '';
@@ -140,6 +160,174 @@ export const buildYearlyStats = (exhibitions) => {
     ...data,
     profit: data.income - data.expense
   })).sort((a, b) => b.year.localeCompare(a.year));
+};
+
+export const buildVisitorForecast = (exhibitions) => {
+  const rows = (exhibitions || []).map((ex, idx) => {
+    const visitors = ex.visitors || [];
+    const checkedIn = visitors.filter((v) => isCheckedInVisitor(v)).length;
+    return {
+      id: ex.id || `ex-${idx}`,
+      title: ex.title || `展示会${idx + 1}`,
+      visitors: visitors.length,
+      checkedIn,
+      sortTime: buildExhibitionSortTime(ex, idx)
+    };
+  }).sort((a, b) => a.sortTime - b.sortTime);
+
+  if (rows.length === 0) {
+    return {
+      dataPoints: 0,
+      latestVisitors: 0,
+      averageVisitors: 0,
+      trendPerExhibition: 0,
+      predictedVisitors: 0,
+      predictedCheckedIn: 0,
+      predictedMin: 0,
+      predictedMax: 0,
+      avgCheckinRate: 0
+    };
+  }
+
+  const visitorCounts = rows.map((row) => row.visitors);
+  const recent = visitorCounts.slice(-6);
+  const weightTotal = recent.reduce((sum, _v, idx) => sum + (idx + 1), 0) || 1;
+  const weightedAverage = recent.reduce((sum, value, idx) => sum + (value * (idx + 1)), 0) / weightTotal;
+
+  const trendPerExhibition = rows.length >= 2
+    ? (visitorCounts[visitorCounts.length - 1] - visitorCounts[0]) / (rows.length - 1)
+    : 0;
+
+  const blendedPrediction = weightedAverage + (trendPerExhibition * 0.7);
+  const predictedVisitors = Math.max(0, Math.round(blendedPrediction));
+
+  const averageVisitors = visitorCounts.reduce((sum, value) => sum + value, 0) / visitorCounts.length;
+  const variance = visitorCounts.reduce((sum, value) => sum + ((value - averageVisitors) ** 2), 0) / visitorCounts.length;
+  const stddev = Math.sqrt(variance);
+  const rangeMargin = Math.max(10, Math.round(stddev * 0.8));
+
+  const totalVisitors = rows.reduce((sum, row) => sum + row.visitors, 0);
+  const totalCheckedIn = rows.reduce((sum, row) => sum + row.checkedIn, 0);
+  const avgCheckinRate = totalVisitors > 0 ? (totalCheckedIn / totalVisitors) : 0;
+  const predictedCheckedIn = Math.round(predictedVisitors * avgCheckinRate);
+
+  return {
+    dataPoints: rows.length,
+    latestVisitors: rows[rows.length - 1]?.visitors || 0,
+    averageVisitors: Math.round(averageVisitors),
+    trendPerExhibition: Number(trendPerExhibition.toFixed(1)),
+    predictedVisitors,
+    predictedCheckedIn,
+    predictedMin: Math.max(0, predictedVisitors - rangeMargin),
+    predictedMax: predictedVisitors + rangeMargin,
+    avgCheckinRate: Number((avgCheckinRate * 100).toFixed(1))
+  };
+};
+
+export const buildRevenueSimulation = (exhibitions, additionalCompanies = 0) => {
+  const safeAdditionalCompanies = Math.max(0, Math.floor(toFiniteNumber(additionalCompanies, 0)));
+
+  const perEx = (exhibitions || []).map((ex, exIndex) => {
+    const makers = ex.makers || [];
+    const confirmedMakers = makers.filter((m) => normalizeMakerStatusForAnalysis(m?.status) === 'confirmed');
+    const confirmedCount = confirmedMakers.length;
+    const feePerBooth = toFiniteNumber(ex.formConfig?.settings?.feePerBooth, 30000);
+
+    const totalBooths = confirmedMakers.reduce((sum, maker) => {
+      const boothCountRaw = getMakerField(maker, 'boothCount') || maker.boothCount || 1;
+      return sum + parseBoothCount(boothCountRaw, 1);
+    }, 0);
+    const boothIncome = totalBooths * feePerBooth;
+    const otherIncomes = (ex.otherBudgets || [])
+      .filter((b) => b.type === 'income')
+      .reduce((sum, b) => sum + toFiniteNumber(b.amount, 0), 0);
+    const venueCost = toFiniteNumber(ex.venueDetails?.cost, 0);
+    const equipmentTotal = (ex.venueDetails?.equipment || [])
+      .reduce((sum, item) => sum + (toFiniteNumber(item.count, 0) * toFiniteNumber(item.price, 0)), 0);
+    const lectureFees = (ex.lectures || [])
+      .reduce((sum, lecture) => sum + toFiniteNumber(lecture.speakerFee ?? lecture.fee, 0) + toFiniteNumber(lecture.transportFee, 0), 0);
+    const otherExpenses = (ex.otherBudgets || [])
+      .filter((b) => b.type === 'expense')
+      .reduce((sum, b) => sum + toFiniteNumber(b.amount, 0), 0);
+
+    const income = boothIncome + otherIncomes;
+    const expense = venueCost + equipmentTotal + lectureFees + otherExpenses;
+    const variableExpense = equipmentTotal + otherExpenses;
+
+    return {
+      id: ex.id || `ex-${exIndex}`,
+      confirmedCount,
+      totalBooths,
+      feePerBooth,
+      boothIncome,
+      income,
+      expense,
+      profit: income - expense,
+      variableExpense
+    };
+  });
+
+  const baseCount = perEx.length || 1;
+  const totalConfirmed = perEx.reduce((sum, row) => sum + row.confirmedCount, 0);
+  const totalBooths = perEx.reduce((sum, row) => sum + row.totalBooths, 0);
+  const totalBoothIncome = perEx.reduce((sum, row) => sum + row.boothIncome, 0);
+  const totalVariableExpense = perEx.reduce((sum, row) => sum + row.variableExpense, 0);
+  const totalIncome = perEx.reduce((sum, row) => sum + row.income, 0);
+  const totalExpense = perEx.reduce((sum, row) => sum + row.expense, 0);
+  const totalProfit = perEx.reduce((sum, row) => sum + row.profit, 0);
+
+  const avgIncome = Math.round(totalIncome / baseCount);
+  const avgExpense = Math.round(totalExpense / baseCount);
+  const avgProfit = Math.round(totalProfit / baseCount);
+  const avgRevenuePerCompany = totalConfirmed > 0
+    ? (totalBoothIncome / totalConfirmed)
+    : 30000;
+  const avgVariableExpensePerCompany = totalConfirmed > 0
+    ? (totalVariableExpense / totalConfirmed)
+    : 0;
+  const avgBoothsPerCompany = totalConfirmed > 0
+    ? (totalBooths / totalConfirmed)
+    : 1;
+  const avgFeePerBooth = totalBooths > 0
+    ? (totalBoothIncome / totalBooths)
+    : 30000;
+
+  const additionalIncome = Math.round(safeAdditionalCompanies * avgRevenuePerCompany);
+  const additionalExpense = Math.round(safeAdditionalCompanies * avgVariableExpensePerCompany);
+  const projectedIncome = avgIncome + additionalIncome;
+  const projectedExpense = avgExpense + additionalExpense;
+  const projectedProfit = projectedIncome - projectedExpense;
+  const profitDelta = projectedProfit - avgProfit;
+  const additionalBooths = Number((safeAdditionalCompanies * avgBoothsPerCompany).toFixed(1));
+  const roi = additionalExpense > 0
+    ? Number((((additionalIncome - additionalExpense) / additionalExpense) * 100).toFixed(1))
+    : null;
+
+  return {
+    dataPoints: perEx.length,
+    scenario: {
+      additionalCompanies: safeAdditionalCompanies,
+      additionalBooths
+    },
+    baseline: {
+      avgIncome,
+      avgExpense,
+      avgProfit,
+      avgRevenuePerCompany: Math.round(avgRevenuePerCompany),
+      avgVariableExpensePerCompany: Math.round(avgVariableExpensePerCompany),
+      avgBoothsPerCompany: Number(avgBoothsPerCompany.toFixed(2)),
+      avgFeePerBooth: Math.round(avgFeePerBooth)
+    },
+    projected: {
+      additionalIncome,
+      additionalExpense,
+      projectedIncome,
+      projectedExpense,
+      projectedProfit,
+      profitDelta,
+      roi
+    }
+  };
 };
 
 export const buildTotalVisitors = (exhibitions) => {

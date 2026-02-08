@@ -63,15 +63,20 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     const scrollContainerRef = useRef(null); // Add ref for scroll container
     const panInfoRef = useRef(null);
     const suppressCanvasClickRef = useRef(false);
+    const centerMainAreaInViewport = (behavior = 'auto') => {
+        const container = scrollContainerRef.current;
+        if (!container) return;
+
+        const centerX = (mainAreaOffsetX + (mainAreaWidth / 2)) * zoomScale;
+        const centerY = (mainAreaOffsetY + (mainAreaHeight / 2)) * zoomScale;
+        const nextLeft = Math.max(0, centerX - (container.clientWidth / 2));
+        const nextTop = Math.max(0, centerY - (container.clientHeight / 2));
+        container.scrollTo({ left: nextLeft, top: nextTop, behavior });
+    };
 
     // Auto-scroll to center on mount
     useEffect(() => {
-        if (scrollContainerRef.current) {
-            const { scrollWidth, scrollHeight, clientWidth, clientHeight } = scrollContainerRef.current;
-            const scrollX = (scrollWidth - clientWidth) / 2;
-            const scrollY = (scrollHeight - clientHeight) / 2;
-            scrollContainerRef.current.scrollTo(scrollX, scrollY);
-        }
+        requestAnimationFrame(() => centerMainAreaInViewport());
     }, [scrollContainerRef.current]); // Only run once on mount (or when ref is attached)
 
     // ============================================================================
@@ -1330,6 +1335,12 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                             <span className="text-xs font-bold w-12 text-center">{Math.round(zoomScale * 100)}%</span>
                             <span className="text-[10px] text-slate-500 whitespace-nowrap">ホイールで拡大縮小</span>
                         </div>
+                        <button
+                            onClick={() => centerMainAreaInViewport('smooth')}
+                            className="bg-slate-100 text-slate-700 px-3 py-2 rounded-lg font-bold hover:bg-slate-200 text-sm"
+                        >
+                            中央に戻る
+                        </button>
                         <button onClick={() => setShowSettings(true)} className="bg-slate-100 text-slate-600 px-3 py-2 rounded-lg font-bold hover:bg-slate-200 flex items-center gap-2 text-sm">
                             <Settings size={16} /> 設定
                         </button>

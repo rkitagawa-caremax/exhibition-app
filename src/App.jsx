@@ -9,7 +9,7 @@ import {
   GripVertical, UserX, UserCheck, List, Edit3, Flag,
   AlertTriangle, ExternalLink, Copy, Check, FileSpreadsheet,
   UserPlus, Settings, Download, Eye, Folder, PackageCheck,
-  Camera, Loader, Ghost, BedDouble, CalendarDays, Menu,
+  Camera, Loader, BedDouble, CalendarDays, Menu,
   ChevronDown, ChevronUp, ChevronRight, Trash, GitBranch, Mic, Truck, Layout, User, Info, LogOut, Maximize,
   Box, BookOpen, Star, LayoutGrid, Grid, Image, Radio, ArrowRight, XCircle, History as HistoryIcon, Minus, Inbox, Square, Trophy, BarChart3, Wand2
 } from 'lucide-react';
@@ -67,6 +67,22 @@ const PREFECTURES = [
 
 const EQUIPMENT_OPTIONS = ["長机", "椅子", "プロジェクター", "マイク", "マイクスタンド", "スクリーン", "演台", "パーテーション"];
 const MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1hnZdkquaybY-bBSAevnW2BOLn83OdITzNvt-hmZkmVI/edit?gid=0#gid=0";
+const BRAND_NAME = "Kaientai-X 2.0";
+const BRAND_ICON_PATH = "/icon.png";
+
+const BrandIcon = ({ size = 24, className = "", alt = BRAND_NAME }) => (
+  <img
+    src={BRAND_ICON_PATH}
+    alt={alt}
+    className={`object-contain ${className}`.trim()}
+    style={{ width: size, height: size }}
+  />
+);
+
+const BrandTabIcon = ({ size = 18, className = "" }) => (
+  <BrandIcon size={size} className={className} alt="" />
+);
+
 const INITIAL_INTERNAL_SUPPLIES = [
   "メジャー", "テープ", "消毒液", "音楽用CD", "ダンボール", "ヤマト佐川送り状",
   "ラミネート看板", "介援隊袋", "横断幕", "延長ケーブル",
@@ -1014,11 +1030,90 @@ function VisitorFormEditor({ config, onSave }) {
   );
 }
 
-function SimulatedPublicVisitorForm({ config, onClose, onSubmit }) {
+const formatExhibitionDateText = (dates = []) => {
+  if (!Array.isArray(dates) || dates.length === 0) return '日程未設定';
+  return dates
+    .map((dateStr) => {
+      const date = new Date(dateStr);
+      if (Number.isNaN(date.getTime())) return dateStr;
+      return date.toLocaleDateString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit' });
+    })
+    .join(' / ');
+};
+
+const formatExhibitionTimeText = (openTime, closeTime) => {
+  if (openTime && closeTime) return `${openTime} - ${closeTime}`;
+  if (openTime) return `${openTime} -`;
+  if (closeTime) return `- ${closeTime}`;
+  return '未設定';
+};
+
+const isMobileClient = () => /iPhone|iPad|iPod|Android/i.test(window.navigator.userAgent || '');
+
+const openQrImageInNewTab = (imageUrl) => {
+  const popup = window.open('', '_blank', 'noopener,noreferrer');
+  if (!popup) return false;
+  popup.document.write(`
+    <!doctype html>
+    <html lang="ja">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>入場用QRコード</title>
+      </head>
+      <body style="margin:0;padding:16px;font-family:sans-serif;background:#f8fafc;color:#0f172a;">
+        <p style="margin:0 0 12px;font-size:14px;">画像を長押しして保存してください。</p>
+        <img src="${imageUrl}" alt="入場用QRコード" style="width:100%;max-width:420px;height:auto;border:1px solid #cbd5e1;border-radius:12px;background:white;" />
+      </body>
+    </html>
+  `);
+  popup.document.close();
+  return true;
+};
+
+const saveQrImageWithFallback = async ({ imageUrl, fileName, shareText }) => {
+  if (!imageUrl) {
+    alert('QR画像を準備中です。数秒後にもう一度お試しください。');
+    return;
+  }
+
+  try {
+    const response = await fetch(imageUrl);
+    const blob = await response.blob();
+    const file = new File([blob], fileName, { type: 'image/png' });
+    if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({
+        title: '入場用QRコード',
+        text: shareText,
+        files: [file]
+      });
+      return;
+    }
+  } catch (error) {
+    console.error('QR share failed', error);
+  }
+
+  if (isMobileClient() && openQrImageInNewTab(imageUrl)) {
+    return;
+  }
+
+  const link = document.createElement('a');
+  link.href = imageUrl;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+};
+
+function SimulatedPublicVisitorForm({ config, exhibition, onClose, onSubmit }) {
   const [formData, setFormData] = useState({});
   const [submittedData, setSubmittedData] = useState(null);
+  const [qrImageUrl, setQrImageUrl] = useState('');
+  const qrCanvasRef = useRef(null);
   const normalizedConfig = useMemo(() => normalizeVisitorFormConfig(config), [config]);
   const isContactDisabled = isContactDisabledByVisitorType(formData.type);
+  const exhibitionDateText = useMemo(() => formatExhibitionDateText(exhibition?.dates), [exhibition?.dates]);
+  const exhibitionTimeText = useMemo(() => formatExhibitionTimeText(exhibition?.openTime, exhibition?.closeTime), [exhibition?.openTime, exhibition?.closeTime]);
 
   const handleChange = (id, val) => {
     const next = { ...formData, [id]: val };
@@ -1035,35 +1130,84 @@ function SimulatedPublicVisitorForm({ config, onClose, onSubmit }) {
     setSubmittedData(finalData);
   };
 
+  useEffect(() => {
+    if (!submittedData?.id) return;
+    setQrImageUrl('');
+    let rafId = null;
+    const generateQrImage = () => {
+      const canvas = qrCanvasRef.current?.querySelector('canvas');
+      if (!canvas) {
+        rafId = requestAnimationFrame(generateQrImage);
+        return;
+      }
+      try {
+        setQrImageUrl(canvas.toDataURL('image/png'));
+      } catch (error) {
+        console.error('QR image conversion failed', error);
+      }
+    };
+    rafId = requestAnimationFrame(generateQrImage);
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [submittedData?.id]);
+
   if (submittedData) {
     return (
       <div className="fixed inset-0 bg-slate-900/90 z-[90] flex items-center justify-center p-4">
-        <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden animate-slide-up relative p-8 text-center">
+        <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-slide-up relative p-8 text-center">
           <button onClick={onClose} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><X /></button>
           <div className="mb-4 text-green-500 flex justify-center"><CheckCircle size={64} /></div>
           <h2 className="text-2xl font-bold text-slate-800 mb-2">登録完了</h2>
-          <p className="text-slate-500 mb-6">ご来場ありがとうございます。<br />以下のQRコードを受付にご提示ください。</p>
-          <div className="bg-white p-4 rounded-xl border-2 border-slate-100 inline-block mb-6 shadow-sm">
-            {/* QR Code Canvas */}
-            <QRCodeCanvas
-              value={JSON.stringify({ id: submittedData.id, type: 'visitor', name: submittedData.repName })}
-              size={200}
-              level={"H"}
-              includeMargin={true}
-            />
+          <p className="text-slate-600 text-sm mb-4">ご来場ありがとうございます。<br />以下のQRコードを保存し、当日受付でご提示ください。</p>
+
+          <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 text-left text-sm mb-4">
+            <div className="grid grid-cols-[90px_1fr] gap-x-2 gap-y-1">
+              <span className="text-slate-500">展示会名</span>
+              <span className="font-bold text-slate-800 break-words">{exhibition?.title || '展示会'}</span>
+              <span className="text-slate-500">会場名</span>
+              <span className="font-bold text-slate-800 break-words">{exhibition?.place || '未設定'}</span>
+              <span className="text-slate-500">住所</span>
+              <span className="font-bold text-slate-800 break-words">{exhibition?.venueAddress || '未設定'}</span>
+              <span className="text-slate-500">開催日時</span>
+              <span className="font-bold text-slate-800 break-words">{exhibitionDateText} / {exhibitionTimeText}</span>
+            </div>
           </div>
-          <p className="text-xs text-slate-400 mb-4 font-mono">ID: {submittedData.id.slice(0, 8)}...</p>
-          <button onClick={() => {
-            // 画像として保存するロジックなどもここに追加可能
-            const canvas = document.querySelector('canvas');
-            if (canvas) {
-              const url = canvas.toDataURL("image/png");
-              const link = document.createElement('a');
-              link.download = `visitor_qr_${submittedData.id}.png`;
-              link.href = url;
-              link.click();
-            }
-          }} className="mb-2 w-full border border-blue-200 text-blue-600 font-bold py-2 rounded-lg hover:bg-blue-50 text-sm flex items-center justify-center gap-2"><Download size={16} /> QR画像を保存</button>
+
+          <p className="text-xs font-bold text-red-600 mb-4">※入場にはQRコードの提示が必須です。QRコードがない場合は入場できません。</p>
+
+          <div className="bg-white p-4 rounded-xl border-2 border-slate-100 inline-block mb-4 shadow-sm">
+            {qrImageUrl ? (
+              <img src={qrImageUrl} alt="入場用QRコード" className="w-[200px] h-[200px] object-contain" />
+            ) : (
+              <div ref={qrCanvasRef}>
+                <QRCodeCanvas
+                  value={JSON.stringify({ id: submittedData.id, type: 'visitor', name: submittedData.repName })}
+                  size={200}
+                  level={"H"}
+                  includeMargin={true}
+                />
+              </div>
+            )}
+          </div>
+
+          <p className="text-xs text-slate-400 mb-3 font-mono">ID: {submittedData.id.slice(0, 8)}...</p>
+
+          <button
+            onClick={() => saveQrImageWithFallback({
+              imageUrl: qrImageUrl,
+              fileName: `visitor_qr_${submittedData.id}.png`,
+              shareText: '入場時にこのQRコードを提示してください。'
+            })}
+            className="mb-2 w-full border border-blue-200 text-blue-600 font-bold py-2 rounded-lg hover:bg-blue-50 text-sm flex items-center justify-center gap-2"
+          >
+            <Download size={16} /> 画像として保存
+          </button>
+          <p className="text-xs text-slate-400 mb-6">
+            ※ボタンで保存できない場合は、画像を長押しして保存してください。<br />
+            それでも難しい場合はスクリーンショットで保存をお願い致します。
+          </p>
+
           <button onClick={onClose} className="w-full bg-slate-800 text-white font-bold py-3 rounded-lg hover:bg-slate-700 transition-colors">閉じる</button>
         </div>
       </div>
@@ -3466,9 +3610,17 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
 }
 
 // TabEntrance: QRスキャン実装 (修正版: 連打防止・URL表示)
-function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, updateMainData, initialMode }) {
+function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, updateMainData, updateBatch, initialMode }) {
   const { formUrlVisitor, visitorFormConfig } = exhibition;
   const normalizedVisitorFormConfig = useMemo(() => normalizeVisitorFormConfig(visitorFormConfig), [visitorFormConfig]);
+  const canonicalVisitorFormUrl = useMemo(() => {
+    const baseUrl = `${window.location.origin}${window.location.pathname}`;
+    return `${baseUrl}?mode=visitor_register&id=${exhibition.id}`;
+  }, [exhibition.id]);
+  const isLocalHost = useMemo(() => {
+    const host = window.location.hostname;
+    return host === 'localhost' || host === '127.0.0.1';
+  }, []);
   const [mode, setMode] = useState(initialMode || 'dashboard');
   const [showSimulatedPublicForm, setShowSimulatedPublicForm] = useState(false);
   const [lastScannedVisitor, setLastScannedVisitor] = useState(null);
@@ -3490,7 +3642,7 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
 
   // Copy function for TabEntrance
   const copyVisitorFormUrl = () => {
-    const urlToCopy = formUrlVisitor;
+    const urlToCopy = (formUrlVisitor || '').trim() || canonicalVisitorFormUrl;
     if (!urlToCopy) return;
     navigator.clipboard.writeText(urlToCopy);
     setIsCopied(true);
@@ -3509,6 +3661,14 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
     }
   }, [normalizedVisitorFormConfig, updateMainData, visitorFormConfig]);
 
+  useEffect(() => {
+    if (isLocalHost) return;
+    const current = (formUrlVisitor || '').trim();
+    if (!current || current !== canonicalVisitorFormUrl) {
+      updateMainData('formUrlVisitor', canonicalVisitorFormUrl);
+    }
+  }, [canonicalVisitorFormUrl, formUrlVisitor, isLocalHost, updateMainData]);
+
   const handleConfigSave = (newConfig) => {
     updateMainData('visitorFormConfig', normalizeVisitorFormConfig(newConfig));
     setMode('dashboard');
@@ -3523,29 +3683,34 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
     if (now - lastScanTime.current < 2000) return;
     lastScanTime.current = now;
 
+    let searchId = String(dataString).trim();
     try {
-      const data = JSON.parse(dataString);
-
-      // データ形式チェック
-      if (!data.id) return;
-
-      const exists = visitors.find(v => v.id === data.id);
-
-      if (exists) {
-        if (exists.status !== 'checked-in') {
-          const checkedInAt = Date.now();
-          const updated = visitors.map(v => v.id === data.id ? { ...v, status: 'checked-in', checkedIn: true, checkedInAt } : v);
-          updateMainData('visitors', updated);
-          updateVisitorCount(exhibition.id, exhibition.currentVisitors + 1);
-          setLastScannedVisitor({ ...exists, status: 'checked-in', checkedIn: true, checkedInAt, isNew: false });
-        } else {
-          setLastScannedVisitor({ ...exists, msg: '既に入場済みです' });
-        }
-      } else {
-        alert("未登録のQRコードです");
+      const parsed = JSON.parse(searchId);
+      if (typeof parsed === 'string' && parsed.trim()) {
+        searchId = parsed.trim();
+      } else if (parsed && typeof parsed === 'object' && parsed.id) {
+        searchId = String(parsed.id).trim();
       }
-    } catch (e) {
-      console.log('Invalid QR Data', e);
+    } catch {
+      // JSON形式でない場合は、そのままID文字列として扱う
+    }
+
+    if (!searchId) return;
+
+    const exists = visitors.find(v => v.id === searchId);
+
+    if (exists) {
+      if (exists.status !== 'checked-in') {
+        const checkedInAt = Date.now();
+        const updated = visitors.map(v => v.id === searchId ? { ...v, status: 'checked-in', checkedIn: true, checkedInAt } : v);
+        updateMainData('visitors', updated);
+        updateVisitorCount(exhibition.id, exhibition.currentVisitors + 1);
+        setLastScannedVisitor({ ...exists, status: 'checked-in', checkedIn: true, checkedInAt, isNew: false });
+      } else {
+        setLastScannedVisitor({ ...exists, msg: '既に入場済みです' });
+      }
+    } else {
+      alert("未登録のQRコードです");
     }
   };
 
@@ -3580,7 +3745,7 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
                 <div className="relative w-full">
                   <input
                     type="text"
-                    value={formUrlVisitor}
+                    value={formUrlVisitor || canonicalVisitorFormUrl}
                     onChange={(e) => updateMainData('formUrlVisitor', e.target.value)}
                     className="bg-slate-800 text-blue-300 text-xs px-3 py-2 rounded border border-slate-700 w-full focus:ring-1 focus:ring-blue-500 outline-none"
                     placeholder="https://..."
@@ -3629,8 +3794,23 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
                       <td className="p-4">
                         <button onClick={() => {
                           if (window.confirm(`${v.repName} 様の来場記録を削除しますか？`)) {
-                            const updated = visitors.filter(item => item.id !== v.id);
-                            updateMainData('visitors', updated);
+                            const updatedVisitors = visitors.filter(item => item.id !== v.id);
+                            const updatedScanLogs = (exhibition.scanLogs || []).filter((log) => log?.visitorId !== v.id);
+                            const checkedInCount = updatedVisitors.filter(
+                              (item) => item?.status === 'checked-in' || item?.checkedIn
+                            ).length;
+
+                            if (typeof updateBatch === 'function') {
+                              updateBatch({
+                                visitors: updatedVisitors,
+                                scanLogs: updatedScanLogs,
+                                currentVisitors: checkedInCount
+                              });
+                            } else {
+                              updateMainData('visitors', updatedVisitors);
+                              updateMainData('scanLogs', updatedScanLogs);
+                              updateVisitorCount(exhibition.id, checkedInCount);
+                            }
                           }
                         }} className="text-slate-400 hover:text-red-500 p-2 rounded-full hover:bg-red-50 transition-colors"><Trash2 size={16} /></button>
                       </td>
@@ -3720,7 +3900,7 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
 
         {mode === 'editForm' && <VisitorFormEditor config={normalizedVisitorFormConfig} onSave={handleConfigSave} />}
       </div>
-      {showSimulatedPublicForm && <SimulatedPublicVisitorForm config={normalizedVisitorFormConfig} onClose={() => setShowSimulatedPublicForm(false)} onSubmit={handlePublicRegister} />}
+      {showSimulatedPublicForm && <SimulatedPublicVisitorForm config={normalizedVisitorFormConfig} exhibition={exhibition} onClose={() => setShowSimulatedPublicForm(false)} onSubmit={handlePublicRegister} />}
     </div>
   );
 }
@@ -5392,7 +5572,11 @@ function PublicVisitorView({ exhibition, onSubmit }) {
   const [formData, setFormData] = useState({});
   const [submitted, setSubmitted] = useState(false);
   const [qrData, setQrData] = useState(null);
+  const [qrImageUrl, setQrImageUrl] = useState('');
+  const qrCanvasRef = useRef(null);
   const isContactDisabled = isContactDisabledByVisitorType(formData.type);
+  const exhibitionDateText = useMemo(() => formatExhibitionDateText(exhibition?.dates), [exhibition?.dates]);
+  const exhibitionTimeText = useMemo(() => formatExhibitionTimeText(exhibition?.openTime, exhibition?.closeTime), [exhibition?.openTime, exhibition?.closeTime]);
 
   const handleChange = (id, value) => {
     const next = { ...formData, [id]: value };
@@ -5403,6 +5587,7 @@ function PublicVisitorView({ exhibition, onSubmit }) {
     e.preventDefault();
     const visitorId = crypto.randomUUID();
     // QRコードにはIDのみ埋め込む（シンプルなQRで読み取りやすく）
+    setQrImageUrl('');
     setQrData(visitorId);
 
     const finalData = { ...normalizeVisitorContactFields(formData), id: visitorId };
@@ -5410,29 +5595,35 @@ function PublicVisitorView({ exhibition, onSubmit }) {
     if (success) setSubmitted(true);
   };
 
-  // 画像保存処理
-  const downloadQR = () => {
-    // ラッパーdivの中にあるcanvas要素を確実に探す
-    const canvas = document.querySelector('#qr-wrapper canvas');
-
-    if (canvas) {
-      try {
-        const pngUrl = canvas.toDataURL("image/png");
-
-        // ダウンロード用リンクを作成してクリック
-        const downloadLink = document.createElement("a");
-        downloadLink.href = pngUrl;
-        downloadLink.download = `visitor_qr_${Date.now()}.png`; // ユニークなファイル名
-        document.body.appendChild(downloadLink);
-        downloadLink.click();
-        document.body.removeChild(downloadLink);
-      } catch (e) {
-        // エラー時はアラートを出す
-        alert("保存に失敗しました。QRコードを長押しして「写真に保存」してください。");
+  useEffect(() => {
+    if (!submitted || !qrData) return;
+    setQrImageUrl('');
+    let rafId = null;
+    const generateQrImage = () => {
+      const canvas = qrCanvasRef.current?.querySelector('canvas');
+      if (!canvas) {
+        rafId = requestAnimationFrame(generateQrImage);
+        return;
       }
-    } else {
-      alert("QRコードの生成待ちです。もう一度押してください。");
-    }
+      try {
+        setQrImageUrl(canvas.toDataURL('image/png'));
+      } catch (error) {
+        console.error('QR image conversion failed', error);
+      }
+    };
+    rafId = requestAnimationFrame(generateQrImage);
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [submitted, qrData]);
+
+  // 画像保存処理
+  const downloadQR = async () => {
+    await saveQrImageWithFallback({
+      imageUrl: qrImageUrl,
+      fileName: `visitor_qr_${qrData || Date.now()}.png`,
+      shareText: '入場時にこのQRコードを提示してください。'
+    });
   };
 
   if (submitted) {
@@ -5441,23 +5632,46 @@ function PublicVisitorView({ exhibition, onSubmit }) {
         <div className="bg-white max-w-md w-full rounded-2xl shadow-xl p-8 text-center animate-fade-in">
           <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center text-green-600 mx-auto mb-4"><Check size={32} strokeWidth={3} /></div>
           <h2 className="text-2xl font-bold text-slate-800 mb-2">登録完了</h2>
-          <p className="text-slate-600 text-sm mb-6">以下のQRコードを保存し、当日受付にご提示ください。</p>
+          <p className="text-slate-600 text-sm mb-4">以下のQRコードを保存し、当日受付にご提示ください。</p>
+
+          <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 text-left text-sm mb-4">
+            <div className="grid grid-cols-[90px_1fr] gap-x-2 gap-y-1">
+              <span className="text-slate-500">展示会名</span>
+              <span className="font-bold text-slate-800 break-words">{exhibition?.title || '展示会'}</span>
+              <span className="text-slate-500">会場名</span>
+              <span className="font-bold text-slate-800 break-words">{exhibition?.place || '未設定'}</span>
+              <span className="text-slate-500">住所</span>
+              <span className="font-bold text-slate-800 break-words">{exhibition?.venueAddress || '未設定'}</span>
+              <span className="text-slate-500">開催日時</span>
+              <span className="font-bold text-slate-800 break-words">{exhibitionDateText} / {exhibitionTimeText}</span>
+            </div>
+          </div>
+
+          <p className="text-xs font-bold text-red-600 mb-4">※入場にはQRコードの提示が必須です。QRコードがない場合は入場できません。</p>
 
           {/* ID付きのdivで囲む (ダウンロード機能用) */}
           <div id="qr-wrapper" className="bg-white border-2 border-slate-800 p-4 rounded-xl inline-block mb-6">
-            <QRCodeCanvas
-              value={qrData}
-              size={200}
-              level={"H"}
-              includeMargin={true}
-            />
+            {qrImageUrl ? (
+              <img src={qrImageUrl} alt="入場用QRコード" className="w-[200px] h-[200px] object-contain" />
+            ) : (
+              <div ref={qrCanvasRef}>
+                <QRCodeCanvas
+                  value={qrData}
+                  size={200}
+                  level={"H"}
+                  includeMargin={true}
+                />
+              </div>
+            )}
           </div>
 
           <button onClick={downloadQR} className="w-full bg-slate-800 text-white font-bold py-3 rounded-xl mb-2 flex items-center justify-center gap-2 hover:bg-slate-700">
             <Download size={18} /> 画像として保存
           </button>
-          {/* スマホユーザーへの案内 */}
-          <p className="text-xs text-slate-400 mb-6">※ボタンで保存できない場合は、<br />QRコードを長押しして「写真に保存」してください。</p>
+          <p className="text-xs text-slate-400 mb-6">
+            ※ボタンで保存できない場合は、画像を長押しして保存してください。<br />
+            それでも難しい場合はスクリーンショットで保存をお願い致します。
+          </p>
 
           <div className="bg-slate-50 p-4 rounded-lg text-left text-sm space-y-2 mb-6">
             {visitorFormConfig?.items?.map(item => (
@@ -5667,7 +5881,7 @@ const ExhibitionCard = ({ exhibition, status, onAction, onScan }) => {
   );
 };
 
-function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessageAsRead, initialExhibition }) {
+function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessageAsRead, initialExhibition, onDeleteScanLog, onUpdateScanLogNote }) {
   const [activeTab, setActiveTab] = useState('home');
   // Initialize with initialExhibition if provided
   const [selectedExhibition, setSelectedExhibition] = useState(initialExhibition || null);
@@ -5677,6 +5891,8 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
   const [showResponseForm, setShowResponseForm] = useState(null); // 招待中タップ時のアンケートフォーム表示
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false); // Mobile Menu State
   const [isDescriptionOpen, setIsDescriptionOpen] = useState(false); // 詳細説明の開閉
+  const [scanLogNoteDrafts, setScanLogNoteDrafts] = useState({});
+  const [scanLogActionState, setScanLogActionState] = useState({});
   const [seenInvitations, setSeenInvitations] = useState(() => {
     const saved = localStorage.getItem(`seen_invitations_${maker.code}`);
     return saved ? JSON.parse(saved) : [];
@@ -5720,19 +5936,19 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
     }
   }, [exhibitions, selectedExhibition, initialExhibition]); // Remove myExhibitions from deps to avoid loop, use within effect
 
-  // Filter exhibitions where this maker is invited AND Deduplicate by content (Title + Dates)
-  // This safeguards against duplicate exhibition data causing UI glitches and double counting
+  // Filter exhibitions where this maker is invited (idでのみ重複排除)
+  // NOTE: タイトル/日付で重複排除すると、別展示会の履歴が見えなくなるため禁止
   const myExhibitions = useMemo(() => {
     const raw = exhibitions.filter(ex => {
       const makers = ex.makers || [];
       return makers.some(m => m.code === maker.code);
     });
-    // Deduplicate
-    return raw.filter((ex, index, self) =>
-      index === self.findIndex(t => (
-        t.title === ex.title && JSON.stringify(t.dates) === JSON.stringify(ex.dates)
-      ))
-    );
+    const seenIds = new Set();
+    return raw.filter((ex) => {
+      if (!ex?.id || seenIds.has(ex.id)) return false;
+      seenIds.add(ex.id);
+      return true;
+    });
   }, [exhibitions, maker.code]);
 
   // Categorize exhibitions
@@ -5784,7 +6000,7 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
     const rawCode = result[0]?.rawValue;
     if (!rawCode) return;
     setShowScanner(false);
-    const res = await onScan(rawCode, selectedExhibition?.id);
+    const res = await onScan(rawCode, selectedExhibition?.id, maker);
     setScanResult(res);
   };
 
@@ -5798,7 +6014,83 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
   // Get scan logs for selected exhibition
   const getMyLogs = (ex) => {
     if (!ex) return [];
-    return (ex.scanLogs || []).filter(l => l.makerId === maker.code);
+    const myKeys = new Set(
+      [maker.code, maker.id]
+        .filter(Boolean)
+        .map((v) => String(v))
+    );
+    return (ex.scanLogs || []).filter((log) => {
+      const candidates = [log?.makerCode, log?.makerId, log?.makerRefId]
+        .filter(Boolean)
+        .map((v) => String(v));
+      return candidates.some((key) => myKeys.has(key));
+    });
+  };
+
+  const getScanLogDraft = (log) => {
+    if (Object.prototype.hasOwnProperty.call(scanLogNoteDrafts, log.id)) {
+      return scanLogNoteDrafts[log.id];
+    }
+    return log.note || '';
+  };
+
+  const setScanLogBusy = (logId, actionType) => {
+    setScanLogActionState((prev) => {
+      const next = { ...prev };
+      if (actionType) {
+        next[logId] = actionType;
+      } else {
+        delete next[logId];
+      }
+      return next;
+    });
+  };
+
+  const handleSaveScanLogNote = async (log) => {
+    if (!selectedExhibition || typeof onUpdateScanLogNote !== 'function') return;
+    const draft = getScanLogDraft(log);
+    setScanLogBusy(log.id, 'save');
+    try {
+      const result = await onUpdateScanLogNote(selectedExhibition.id, log.id, draft, maker);
+      if (!result?.success) {
+        alert(result?.message || 'メモの保存に失敗しました。');
+        return;
+      }
+      if (Array.isArray(result.updatedLogs)) {
+        setSelectedExhibition((prev) => {
+          if (!prev || prev.id !== selectedExhibition.id) return prev;
+          return { ...prev, scanLogs: result.updatedLogs };
+        });
+      }
+    } finally {
+      setScanLogBusy(log.id, null);
+    }
+  };
+
+  const handleDeleteScanLog = async (log) => {
+    if (!selectedExhibition || typeof onDeleteScanLog !== 'function') return;
+    if (!window.confirm('このスキャン履歴を削除しますか？')) return;
+    setScanLogBusy(log.id, 'delete');
+    try {
+      const result = await onDeleteScanLog(selectedExhibition.id, log.id, maker);
+      if (!result?.success) {
+        alert(result?.message || 'スキャン履歴の削除に失敗しました。');
+        return;
+      }
+      if (Array.isArray(result.updatedLogs)) {
+        setSelectedExhibition((prev) => {
+          if (!prev || prev.id !== selectedExhibition.id) return prev;
+          return { ...prev, scanLogs: result.updatedLogs };
+        });
+      }
+      setScanLogNoteDrafts((prev) => {
+        const next = { ...prev };
+        delete next[log.id];
+        return next;
+      });
+    } finally {
+      setScanLogBusy(log.id, null);
+    }
   };
 
 
@@ -5809,7 +6101,7 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
       <div className="md:hidden bg-slate-900 text-white p-4 flex items-center justify-between sticky top-0 z-50">
         <div className="flex items-center gap-4">
           <button onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}><Menu size={24} /></button>
-          <h1 className="text-lg font-bold flex items-center gap-2"><Ghost className="text-red-500" size={20} /> Kaientai-X</h1>
+          <h1 className="text-lg font-bold flex items-center gap-2"><BrandIcon size={20} /> {BRAND_NAME}</h1>
         </div>
       </div>
 
@@ -5817,7 +6109,7 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
       <div className={`fixed inset-y-0 left-0 z-40 w-64 bg-slate-900 text-white flex flex-col transform transition-transform duration-300 ease-in-out md:relative md:translate-x-0 ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}`}>
         <div className="p-6 border-b border-slate-700 flex justify-between items-center">
           <div>
-            <h1 className="text-xl font-bold tracking-tighter text-blue-400 flex items-center gap-2"><Ghost className="text-red-500" size={24} /> Kaientai-X</h1>
+            <h1 className="text-xl font-bold tracking-tighter text-blue-400 flex items-center gap-2"><BrandIcon size={24} /> {BRAND_NAME}</h1>
             <p className="text-xs text-slate-400 mt-1">Event Management System</p>
           </div>
           <button onClick={() => setIsMobileMenuOpen(false)} className="md:hidden text-slate-400"><X /></button>
@@ -5867,7 +6159,7 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
           </button>
         </nav>
         <div className="p-4 border-t border-slate-700 text-xs text-slate-500">
-          c Kaientai-X
+          c {BRAND_NAME}
         </div>
       </div>
 
@@ -6373,30 +6665,40 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
                 <div className="flex justify-between items-center mb-6">
                   <h3 className="font-bold text-slate-800 flex items-center gap-2"><HistoryIcon size={18} className="text-amber-500" /> スキャン履歴 <span className="text-sm bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">{getMyLogs(selectedExhibition).length}件</span></h3>
                   <button
-                    onClick={() => {
+                    onClick={async () => {
                       const logs = getMyLogs(selectedExhibition);
                       if (logs.length === 0) { alert('データがありません'); return; }
-                      const wb = new ExcelJS.Workbook();
-                      const ws = wb.addWorksheet('ScanLogs');
-                      ws.addRow(['日時', '会社名', '氏名', '電話', 'メール']);
-                      logs.forEach(l => {
-                        ws.addRow([
-                          new Date(l.scannedAt).toLocaleString(),
-                          l.visitorSnapshot?.companyName || '',
-                          l.visitorSnapshot?.repName || '',
-                          l.visitorSnapshot?.phone || '',
-                          l.visitorSnapshot?.email || ''
-                        ]);
-                      });
-                      wb.xlsx.writeBuffer().then(buffer => {
-                        saveAs(new Blob([buffer]), `scan_logs_${selectedExhibition.title}.xlsx`);
-                      });
+                      try {
+                        const ExcelJSImport = await import('exceljs');
+                        const ExcelJS = ExcelJSImport.default || ExcelJSImport;
+                        const wb = new ExcelJS.Workbook();
+                        const ws = wb.addWorksheet('ScanLogs');
+                        ws.addRow(['日時', '受付区分', '会社名', '氏名', '電話', 'メール', 'メモ']);
+                        logs.forEach(l => {
+                          ws.addRow([
+                            new Date(l.scannedAt).toLocaleString(),
+                            l.visitorSnapshot?.type || '',
+                            l.visitorSnapshot?.companyName || '',
+                            l.visitorSnapshot?.repName || '',
+                            l.visitorSnapshot?.phone || '',
+                            l.visitorSnapshot?.email || '',
+                            l.note || ''
+                          ]);
+                        });
+                        const safeTitle = String(selectedExhibition?.title || 'exhibition').replace(/[\\/:*?"<>|]/g, '_');
+                        const buffer = await wb.xlsx.writeBuffer();
+                        saveAs(new Blob([buffer]), `scan_logs_${safeTitle}.xlsx`);
+                      } catch (e) {
+                        console.error('Excel出力エラー:', e);
+                        alert('Excel出力エラー: ' + (e?.message || '不明なエラー'));
+                      }
                     }}
                     className="text-xs font-bold bg-emerald-50 text-emerald-600 hover:bg-emerald-100 border border-emerald-200 px-3 py-1.5 rounded-lg flex items-center gap-1 transition-colors"
                   >
                     <Download size={14} /> Excel出力
                   </button>
                 </div>
+                <p className="text-xs text-slate-500 mb-4">※エクセル出力で来場者の電話番号及びメールアドレスが出力できます。</p>
 
                 <div className="divide-y divide-slate-50 max-h-80 overflow-y-auto pr-2 custom-scrollbar">
                   {getMyLogs(selectedExhibition).length === 0 ? (
@@ -6407,13 +6709,45 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
                     </div>
                   ) : (
                     getMyLogs(selectedExhibition).map(log => (
-                      <div key={log.id} className="py-3 flex items-center gap-3 group hover:bg-slate-50 rounded-lg px-2 transition-colors">
-                        <div className="bg-slate-100 p-2.5 rounded-full text-slate-400 group-hover:bg-white group-hover:text-blue-500 group-hover:shadow-sm transition-all"><User size={16} /></div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-bold text-slate-700 truncate">{log.visitorSnapshot?.repName || 'Unknown'}</p>
-                          <p className="text-xs text-slate-400 truncate">{log.visitorSnapshot?.companyName}</p>
+                      <div key={log.id} className="py-3 px-2 hover:bg-slate-50 rounded-lg transition-colors">
+                        <div className="flex items-start gap-3">
+                          <div className="bg-slate-100 p-2.5 rounded-full text-slate-400"><User size={16} /></div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="text-sm font-bold text-slate-700 truncate">{log.visitorSnapshot?.repName || 'Unknown'}</p>
+                                <p className="text-xs text-slate-400 truncate">{log.visitorSnapshot?.companyName}</p>
+                                <p className="text-[11px] text-blue-600">受付区分: {log.visitorSnapshot?.type || '-'}</p>
+                              </div>
+                              <span className="text-xs font-mono text-slate-400 shrink-0">{new Date(log.scannedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                            </div>
+                            <div className="mt-2">
+                              <textarea
+                                value={getScanLogDraft(log)}
+                                onChange={(e) => setScanLogNoteDrafts((prev) => ({ ...prev, [log.id]: e.target.value }))}
+                                placeholder="会話内容・ネクストアクションを記載"
+                                rows={2}
+                                className="w-full text-xs border border-slate-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-300"
+                              />
+                              <div className="mt-2 flex gap-2">
+                                <button
+                                  onClick={() => handleSaveScanLogNote(log)}
+                                  disabled={!!scanLogActionState[log.id]}
+                                  className="text-xs font-bold bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 px-2.5 py-1 rounded-lg flex items-center gap-1 disabled:opacity-50"
+                                >
+                                  <Save size={12} /> {scanLogActionState[log.id] === 'save' ? '保存中...' : 'メモ保存'}
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteScanLog(log)}
+                                  disabled={!!scanLogActionState[log.id]}
+                                  className="text-xs font-bold bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 px-2.5 py-1 rounded-lg flex items-center gap-1 disabled:opacity-50"
+                                >
+                                  <Trash2 size={12} /> {scanLogActionState[log.id] === 'delete' ? '削除中...' : '削除'}
+                                </button>
+                              </div>
+                            </div>
+                          </div>
                         </div>
-                        <span className="text-xs font-mono text-slate-300 group-hover:text-slate-500">{new Date(log.scannedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                       </div>
                     ))
                   )}
@@ -6536,15 +6870,15 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
 }
 
 // Legacy wrapper for compatibility
-function MakerDashboard({ maker, exhibitionName, scanLogs, onScan, exhibitions, onResponseSubmit }) {
+function MakerDashboard({ maker, exhibitionName, scanLogs, onScan, exhibitions, onResponseSubmit, onDeleteScanLog, onUpdateScanLogNote }) {
   // If exhibitions array is provided, use new MakerPortal
   if (exhibitions && exhibitions.length > 0) {
-    return <MakerPortal maker={maker} exhibitions={exhibitions} onScan={onScan} onResponseSubmit={onResponseSubmit} />;
+    return <MakerPortal maker={maker} exhibitions={exhibitions} onScan={onScan} onResponseSubmit={onResponseSubmit} onDeleteScanLog={onDeleteScanLog} onUpdateScanLogNote={onUpdateScanLogNote} />;
   }
 
   // Fallback to single-exhibition mode (legacy)
   const singleExhibition = { title: exhibitionName, scanLogs: scanLogs, id: 'legacy' };
-  return <MakerPortal maker={maker} exhibitions={[singleExhibition]} onScan={onScan} onResponseSubmit={onResponseSubmit} />;
+  return <MakerPortal maker={maker} exhibitions={[singleExhibition]} onScan={onScan} onResponseSubmit={onResponseSubmit} onDeleteScanLog={onDeleteScanLog} onUpdateScanLogNote={onUpdateScanLogNote} />;
 }
 
 // EnterpriseConsole moved to components/EnterpriseConsole.jsx
@@ -7753,7 +8087,7 @@ function ExhibitionDetail({
   };
 
   const ALL_TAB_DEFINITIONS = [
-    { id: 'main', label: '基本情報', icon: Ghost },
+    { id: 'main', label: '基本情報', icon: BrandTabIcon },
     { id: 'schedule', label: 'スケジュール', icon: Calendar },
     { id: 'equipment', label: '会場・備品', icon: Box },
     { id: 'makers', label: '招待メーカー', icon: Building2 },
@@ -7829,7 +8163,7 @@ function ExhibitionDetail({
         {activeTab === 'makers' && <TabMakers exhibition={exhibition} setMakers={setMakers} updateMainData={updateMainData} masterMakers={masterMakers} onNavigate={onNavigate} storage={storage} allExhibitions={allExhibitions} />}
         {activeTab === 'tasks' && <TabTasks tasks={exhibition.tasks || []} setTasks={setTasks} staff={exhibition.staff || ''} />}
         {activeTab === 'budget' && <TabBudget exhibition={exhibition} updateMainData={updateMainData} />}
-        {activeTab === 'entrance' && <TabEntrance exhibition={exhibition} updateVisitorCount={updateVisitorCount} visitors={exhibition.visitors || []} setVisitors={setVisitors} updateMainData={updateMainData} initialMode={entranceMode} />}
+        {activeTab === 'entrance' && <TabEntrance exhibition={exhibition} updateVisitorCount={updateVisitorCount} visitors={exhibition.visitors || []} setVisitors={setVisitors} updateMainData={updateMainData} updateBatch={updateMainDataBatch} initialMode={entranceMode} />}
         {activeTab === 'lectures' && <TabLectures lectures={exhibition.lectures || []} updateMainData={updateMainData} updateBatch={updateMainDataBatch} staff={exhibition.staff || ''} scheduleData={exhibition.schedule} />}
         {activeTab === 'files' && <TabFiles materials={exhibition.materials || {}} updateMainData={updateMainData} />}
       </div>
@@ -7912,6 +8246,10 @@ function MobileEventSimpleView({
   const datesText = (selectedExhibition?.dates || []).join(' / ') || '未設定';
   const venueText = selectedExhibition?.place || selectedExhibition?.venueAddress || '未設定';
   const staffText = selectedExhibition?.staff || '未設定';
+  const checkedInVisitors = (selectedExhibition?.visitors || []).filter(
+    (visitor) => visitor?.status === 'checked-in' || visitor?.checkedIn
+  ).length;
+  const currentVisitors = checkedInVisitors;
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -7945,6 +8283,12 @@ function MobileEventSimpleView({
             <p><span className="text-slate-500">開催日:</span> <span className="font-medium text-slate-800">{datesText}</span></p>
             <p><span className="text-slate-500">会場:</span> <span className="font-medium text-slate-800">{venueText}</span></p>
             <p><span className="text-slate-500">担当:</span> <span className="font-medium text-slate-800">{staffText}</span></p>
+          </div>
+          <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3">
+            <p className="text-xs font-bold text-emerald-700 mb-1">現在来場者数</p>
+            <p className="text-2xl font-extrabold text-emerald-800 leading-none">
+              {currentVisitors.toLocaleString()}<span className="ml-1 text-sm font-bold">名</span>
+            </p>
           </div>
         </section>
       )}
@@ -8240,7 +8584,7 @@ function App() {
           setSelectedExhibition(targetDemoEx);
         } else {
           setSelectedExhibition({
-            title: 'Kaientai-X Demo Exhibition',
+            title: `${BRAND_NAME} Demo Exhibition`,
             id: 'demo',
             scanLogs: [],
             dates: ['2026-10-01', '2026-10-02'],
@@ -8450,18 +8794,97 @@ function App() {
     } catch (e) { alert("送信エラー: " + e.message); return false; }
   };
 
-  const handleVisitorScan = async (code) => {
-    if (!selectedExhibition || !dashboardMaker) return { success: false, type: 'error', message: 'System error: Missing context' };
-    const current = selectedExhibition;
+  const getMakerKeys = (makerContext) => {
+    return [makerContext?.code, makerContext?.id]
+      .filter(Boolean)
+      .map((v) => String(v));
+  };
+
+  const isLogOwnedByMaker = (log, makerKeys) => {
+    const candidates = [log?.makerCode, log?.makerId, log?.makerRefId]
+      .filter(Boolean)
+      .map((v) => String(v));
+    return candidates.some((key) => makerKeys.includes(key));
+  };
+
+  const handleDeleteMakerScanLog = async (exhibitionId, logId, makerContext) => {
+    const current = (exhibitionId ? exhibitions.find(e => e.id === exhibitionId) : null) || selectedExhibition;
+    const currentMaker = makerContext || dashboardMaker;
+    if (!current || !currentMaker) {
+      return { success: false, message: '対象データが見つかりませんでした。' };
+    }
+
+    const makerKeys = getMakerKeys(currentMaker);
+    const currentLogs = current.scanLogs || [];
+    const targetLog = currentLogs.find((log) => log?.id === logId);
+    if (!targetLog || !isLogOwnedByMaker(targetLog, makerKeys)) {
+      return { success: false, message: '削除対象の履歴が見つかりませんでした。' };
+    }
+
+    const updatedLogs = currentLogs.filter(
+      (log) => !(log?.id === logId && isLogOwnedByMaker(log, makerKeys))
+    );
+    try {
+      await updateExhibitionData(current.id, 'scanLogs', updatedLogs);
+      return { success: true, updatedLogs };
+    } catch (e) {
+      return { success: false, message: e?.message || '削除に失敗しました。' };
+    }
+  };
+
+  const handleUpdateMakerScanLogNote = async (exhibitionId, logId, note, makerContext) => {
+    const current = (exhibitionId ? exhibitions.find(e => e.id === exhibitionId) : null) || selectedExhibition;
+    const currentMaker = makerContext || dashboardMaker;
+    if (!current || !currentMaker) {
+      return { success: false, message: '対象データが見つかりませんでした。' };
+    }
+
+    const makerKeys = getMakerKeys(currentMaker);
+    let updated = false;
+    const safeNote = String(note || '').slice(0, 2000);
+    const updatedLogs = (current.scanLogs || []).map((log) => {
+      if (log?.id !== logId) return log;
+      if (!isLogOwnedByMaker(log, makerKeys)) return log;
+      updated = true;
+      return {
+        ...log,
+        note: safeNote,
+        noteUpdatedAt: Date.now(),
+        noteUpdatedBy: currentMaker?.code || currentMaker?.id || ''
+      };
+    });
+
+    if (!updated) {
+      return { success: false, message: '更新対象の履歴が見つかりませんでした。' };
+    }
+
+    try {
+      await updateExhibitionData(current.id, 'scanLogs', updatedLogs);
+      return { success: true, updatedLogs };
+    } catch (e) {
+      return { success: false, message: e?.message || 'メモ保存に失敗しました。' };
+    }
+  };
+
+  const handleVisitorScan = async (code, exhibitionId, makerContext) => {
+    const current = (exhibitionId ? exhibitions.find(e => e.id === exhibitionId) : null) || selectedExhibition;
+    const currentMaker = makerContext || dashboardMaker;
+    if (!current || !currentMaker) {
+      return { success: false, type: 'error', message: 'スキャン対象の展示会情報を取得できませんでした。展示会を選択し直してください。' };
+    }
+    const makerKeys = getMakerKeys(currentMaker);
+    const primaryMakerId = makerKeys[0] || '';
 
     console.log('[DEBUG] handleVisitorScan code:', code);
 
     // 1. Find Visitor (Handle JSON or Raw ID)
-    let searchId = code;
+    let searchId = String(code || '').trim();
     try {
-      const parsed = JSON.parse(code);
-      if (parsed && parsed.id) {
-        searchId = parsed.id;
+      const parsed = JSON.parse(searchId);
+      if (typeof parsed === 'string' && parsed.trim()) {
+        searchId = parsed.trim();
+      } else if (parsed && parsed.id) {
+        searchId = String(parsed.id).trim();
       }
     } catch {
       // Not JSON, use as is
@@ -8474,7 +8897,10 @@ function App() {
 
     // 2. Check Duplicates
     const alreadyScanned = (current.scanLogs || []).some(log =>
-      log.makerId === (dashboardMaker.id || dashboardMaker.code) &&
+      [log?.makerCode, log?.makerId, log?.makerRefId]
+        .filter(Boolean)
+        .map((v) => String(v))
+        .some((key) => makerKeys.includes(key)) &&
       log.visitorId === visitor.id
     );
 
@@ -8485,9 +8911,12 @@ function App() {
     // 3. Create Scan Log (Save ALL visitor data)
     const newLog = {
       id: crypto.randomUUID(),
-      makerId: dashboardMaker.id || dashboardMaker.code,
+      makerId: primaryMakerId,
+      makerCode: currentMaker.code || '',
+      makerRefId: currentMaker.id || '',
       visitorId: visitor.id,
       scannedAt: Date.now(),
+      note: '',
       visitorSnapshot: { ...visitor } // Save ALL visitor data
     };
 
@@ -8693,7 +9122,7 @@ function App() {
   if (view === 'public_visitor_form') return <PublicVisitorView exhibition={selectedExhibition} onSubmit={(d) => handlePublicSubmit('visitor', d)} />;
   if (view === 'public_maker_form') return <PublicMakerView exhibition={selectedExhibition} onSubmit={(d) => handlePublicSubmit('maker', d)} />;
   if (view === 'maker_dashboard' && dashboardMaker) {
-    return <MakerPortal maker={dashboardMaker} exhibitionName={selectedExhibition?.title} scanLogs={selectedExhibition?.scanLogs || []} onScan={handleVisitorScan} exhibitions={exhibitions || []} onResponseSubmit={handleMakerResponse} markMessageAsRead={markMessageAsRead} initialExhibition={selectedExhibition} />;
+    return <MakerPortal maker={dashboardMaker} exhibitionName={selectedExhibition?.title} scanLogs={selectedExhibition?.scanLogs || []} onScan={handleVisitorScan} exhibitions={exhibitions || []} onResponseSubmit={handleMakerResponse} markMessageAsRead={markMessageAsRead} initialExhibition={selectedExhibition} onDeleteScanLog={handleDeleteMakerScanLog} onUpdateScanLogNote={handleUpdateMakerScanLogNote} />;
   }
 
   // Login Screen
@@ -8703,8 +9132,8 @@ function App() {
         <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md">
           <div className="text-center mb-8">
             <div className="inline-flex items-center gap-2 bg-slate-900 text-white px-4 py-2 rounded-full mb-4">
-              <Ghost className="text-red-500" size={24} />
-              <span className="font-bold text-lg">Kaientai-X</span>
+              <BrandIcon size={24} />
+              <span className="font-bold text-lg">{BRAND_NAME}</span>
             </div>
             <h2 className="text-2xl font-bold text-slate-800">ログイン</h2>
             <p className="text-slate-500 text-sm mt-2">パスワードを入力してください</p>
@@ -8747,7 +9176,7 @@ function App() {
         {isSimpleMobileMode ? (
           <div className="flex items-center justify-between">
             <h1 className="text-lg font-bold flex items-center gap-2">
-              <Ghost className="text-red-500" size={20} /> 展示会用簡易ビュー
+              <BrandIcon size={20} /> 展示会用簡易ビュー
             </h1>
             <button
               onClick={() => setView('dashboard')}
@@ -8759,7 +9188,7 @@ function App() {
         ) : (
           <div className="flex items-center gap-4">
             <button onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}><Menu size={24} /></button>
-            <h1 className="text-lg font-bold flex items-center gap-2"><Ghost className="text-red-500" size={20} /> Kaientai-X</h1>
+            <h1 className="text-lg font-bold flex items-center gap-2"><BrandIcon size={20} /> {BRAND_NAME}</h1>
           </div>
         )}
       </div>
@@ -8787,7 +9216,7 @@ function App() {
       <aside className={`fixed inset-y-0 left-0 z-40 w-64 bg-slate-900 text-white transform transition-transform duration-300 ease-in-out md:relative md:translate-x-0 ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}`}>
         <div className="p-6 border-b border-slate-800 flex justify-between items-center">
           <div onClick={() => { navigateTo('dashboard'); setIsMobileMenuOpen(false); }} className="cursor-pointer transition-opacity hover:opacity-80">
-            <h1 className="text-2xl font-bold tracking-tighter text-blue-400 flex items-center gap-2"><Ghost className="text-red-500" size={28} /> Kaientai-X</h1>
+            <h1 className="text-2xl font-bold tracking-tighter text-blue-400 flex items-center gap-2"><BrandIcon size={28} /> {BRAND_NAME}</h1>
             <p className="text-xs text-slate-400 mt-1">Event Management System</p>
           </div>
           <button onClick={() => setIsMobileMenuOpen(false)} className="md:hidden text-slate-400"><X /></button>

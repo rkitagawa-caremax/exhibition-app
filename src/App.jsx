@@ -43,6 +43,7 @@ import {
   exportConfirmedMakersExcel,
   exportInvitedMakersExcel
 } from './features/makers/makerExcelExports';
+import { buildAiInviteRecommendations } from './features/makers/aiRecommendations';
 import { useMakerActions } from './features/makers/useMakerActions';
 import { useMakerViewModel } from './features/makers/useMakerViewModel';
 import { useInvoiceDownloads } from './features/invoice/useInvoiceDownloads';
@@ -2356,7 +2357,7 @@ function TabFiles({ materials, updateMainData }) {
   );
 }
 // ============================================================================
-function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavigate, storage }) {
+function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavigate, storage, allExhibitions = [] }) {
   const [activeTab, setActiveTab] = useState('invited'); // invited, confirmed, declined, unanswered
   const [searchTerm, setSearchTerm] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
@@ -2367,10 +2368,14 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
   const [confirmedFilter, setConfirmedFilter] = useState('all'); // 'all', 'power', 'lunch'
   const [editingMaker, setEditingMaker] = useState(null); // 編集中のメーカー
   const [selectedMakerIds, setSelectedMakerIds] = useState(new Set());
+  const [aiRecommendations, setAiRecommendations] = useState([]);
+  const [selectedAiRecommendationCodes, setSelectedAiRecommendationCodes] = useState(new Set());
+  const [aiRecommendationGeneratedAt, setAiRecommendationGeneratedAt] = useState(0);
 
   const makers = exhibition.makers || [];
   const formConfig = exhibition.formConfig || DEFAULT_FORM_CONFIG;
   const [isSendingDocs, setIsSendingDocs] = useState(false);
+  const normalizeCode = (rawCode) => String(rawCode || '').trim();
   const {
     isBulkInvoiceDownloading,
     bulkInvoiceProgress,
@@ -2510,6 +2515,88 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
     }
   };
 
+  const handleGenerateAiRecommendations = () => {
+    const recommendations = buildAiInviteRecommendations({
+      masterMakers,
+      currentMakers: makers,
+      allExhibitions,
+      currentExhibitionId: exhibition.id,
+      limit: 30
+    });
+
+    setAiRecommendations(recommendations);
+    setSelectedAiRecommendationCodes(new Set(recommendations.map((item) => item.code)));
+    setAiRecommendationGeneratedAt(Date.now());
+
+    if (recommendations.length === 0) {
+      alert('提案対象の企業が見つかりませんでした（全て招待リスト登録済み、または企業マスター未登録）。');
+    }
+  };
+
+  const toggleAiRecommendation = (code) => {
+    setSelectedAiRecommendationCodes((prev) => {
+      const next = new Set(prev);
+      if (next.has(code)) next.delete(code);
+      else next.add(code);
+      return next;
+    });
+  };
+
+  const toggleSelectAllAiRecommendations = () => {
+    if (selectedAiRecommendationCodes.size === aiRecommendations.length) {
+      setSelectedAiRecommendationCodes(new Set());
+    } else {
+      setSelectedAiRecommendationCodes(new Set(aiRecommendations.map((item) => item.code)));
+    }
+  };
+
+  const handleApplyAiRecommendations = () => {
+    const selectedRecommendations = aiRecommendations.filter((item) => selectedAiRecommendationCodes.has(item.code));
+    if (selectedRecommendations.length === 0) {
+      alert('追加する企業を選択してください。');
+      return;
+    }
+
+    const existingCodes = new Set(makers.map((maker) => normalizeCode(maker.code)).filter(Boolean));
+    const candidatesToAdd = selectedRecommendations.filter((item) => !existingCodes.has(item.code));
+
+    if (candidatesToAdd.length === 0) {
+      alert('選択された企業は既に招待リストに追加されています。');
+      return;
+    }
+
+    if (!window.confirm(`これらの企業を追加しますか？\n${candidatesToAdd.length}社を招待リストに追加します。`)) {
+      return;
+    }
+
+    const generatedAtIso = new Date().toISOString();
+    const newMakers = candidatesToAdd.map((item) => ({
+      id: crypto.randomUUID(),
+      code: item.code,
+      companyName: item.companyName,
+      category: item.category || 'その他',
+      status: 'listed',
+      invitationSentAt: null,
+      response: {},
+      note: `[AI提案] ${item.reason}`,
+      aiRecommendation: {
+        score: item.score,
+        invitedCount: item.invitedCount,
+        confirmedCount: item.confirmedCount,
+        declinedCount: item.declinedCount,
+        participationRate: item.participationRate,
+        declineRate: item.declineRate,
+        generatedAt: generatedAtIso
+      }
+    }));
+
+    setMakers([...makers, ...newMakers]);
+    const addedCodeSet = new Set(newMakers.map((item) => item.code));
+    setAiRecommendations((prev) => prev.filter((item) => !addedCodeSet.has(item.code)));
+    setSelectedAiRecommendationCodes((prev) => new Set([...prev].filter((code) => !addedCodeSet.has(code))));
+    alert(`${newMakers.length}社を招待リストに追加しました。`);
+  };
+
   const handleExportInvitedExcel = async () => {
     try {
       const result = await exportInvitedMakersExcel({
@@ -2600,6 +2687,18 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
   useEffect(() => {
     setSelectedMakerIds(new Set());
   }, [activeTab]);
+
+  useEffect(() => {
+    if (aiRecommendations.length === 0) return;
+
+    const existingCodes = new Set(makers.map((maker) => normalizeCode(maker.code)).filter(Boolean));
+    const remaining = aiRecommendations.filter((item) => !existingCodes.has(item.code));
+
+    if (remaining.length !== aiRecommendations.length) {
+      setAiRecommendations(remaining);
+      setSelectedAiRecommendationCodes((prev) => new Set([...prev].filter((code) => !existingCodes.has(code))));
+    }
+  }, [aiRecommendations, makers]);
 
   const toggleSelect = (id) => {
     const newSet = new Set(selectedMakerIds);
@@ -2858,8 +2957,15 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
             {activeTab === 'invited' && (
               <>
                 <button
-                  onClick={handleNormalizeMakers}
+                  onClick={handleGenerateAiRecommendations}
                   className="flex items-center gap-2 bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white px-4 py-2 rounded-lg text-sm font-bold hover:opacity-90 shadow-sm whitespace-nowrap"
+                  title="企業管理コンソール未追加企業から、参加可能性の高い企業を提案します"
+                >
+                  <Wand2 size={16} /> AI提案
+                </button>
+                <button
+                  onClick={handleNormalizeMakers}
+                  className="flex items-center gap-2 bg-gradient-to-r from-indigo-600 to-blue-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:opacity-90 shadow-sm whitespace-nowrap"
                   title="重複データを整理します"
                 >
                   <Wand2 size={16} /> データ整理
@@ -2901,6 +3007,100 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
 
           </div>
         </div>
+
+        {/* AI Recommendation Panel */}
+        {activeTab === 'invited' && (aiRecommendations.length > 0 || aiRecommendationGeneratedAt > 0) && (
+          <div className="border-b border-indigo-100 bg-indigo-50/50 p-4 animate-fade-in">
+            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-3">
+              <h4 className="font-bold text-indigo-800 flex items-center gap-2">
+                <Wand2 size={16} />
+                AIアドバイス: 招待候補ランキング
+              </h4>
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="px-2 py-1 rounded-full bg-white border border-indigo-200 text-indigo-700 font-bold">
+                  提案 {aiRecommendations.length}社 (最大30社)
+                </span>
+                <span className="px-2 py-1 rounded-full bg-white border border-indigo-200 text-indigo-700 font-bold">
+                  選択 {selectedAiRecommendationCodes.size}社
+                </span>
+                {aiRecommendationGeneratedAt > 0 && (
+                  <span className="text-slate-500">
+                    生成: {new Date(aiRecommendationGeneratedAt).toLocaleString()}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {aiRecommendations.length === 0 ? (
+              <p className="text-sm text-slate-500">提案対象の企業はありませんでした。必要に応じて「AI提案」を再実行してください。</p>
+            ) : (
+              <>
+                <div className="overflow-x-auto bg-white rounded-lg border border-indigo-100">
+                  <table className="w-full text-xs">
+                    <thead className="bg-indigo-50 text-indigo-800">
+                      <tr>
+                        <th className="p-2 text-center w-10">
+                          <input
+                            type="checkbox"
+                            checked={aiRecommendations.length > 0 && selectedAiRecommendationCodes.size === aiRecommendations.length}
+                            onChange={toggleSelectAllAiRecommendations}
+                            className="w-4 h-4 rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                          />
+                        </th>
+                        <th className="p-2 text-center w-12">順位</th>
+                        <th className="p-2 text-left w-24">コード</th>
+                        <th className="p-2 text-left min-w-[220px]">会社名</th>
+                        <th className="p-2 text-right w-24">AIスコア</th>
+                        <th className="p-2 text-right w-20">参加回数</th>
+                        <th className="p-2 text-right w-20">辞退率</th>
+                        <th className="p-2 text-left min-w-[260px]">提案理由</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-indigo-50">
+                      {aiRecommendations.map((item) => (
+                        <tr key={item.code} className={selectedAiRecommendationCodes.has(item.code) ? 'bg-indigo-50/40' : 'hover:bg-slate-50'}>
+                          <td className="p-2 text-center">
+                            <input
+                              type="checkbox"
+                              checked={selectedAiRecommendationCodes.has(item.code)}
+                              onChange={() => toggleAiRecommendation(item.code)}
+                              className="w-4 h-4 rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                            />
+                          </td>
+                          <td className="p-2 text-center font-bold text-indigo-700">{item.rank}</td>
+                          <td className="p-2 font-mono text-slate-700">{item.code}</td>
+                          <td className="p-2 text-slate-800 font-bold">{item.companyName}</td>
+                          <td className="p-2 text-right font-bold text-indigo-700">{item.score}</td>
+                          <td className="p-2 text-right text-slate-700">{item.confirmedCount}回</td>
+                          <td className="p-2 text-right text-slate-700">{item.declineRate}%</td>
+                          <td className="p-2 text-slate-600">{item.reason}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="mt-3 flex justify-end gap-2">
+                  <button
+                    onClick={() => {
+                      setAiRecommendations([]);
+                      setSelectedAiRecommendationCodes(new Set());
+                    }}
+                    className="px-4 py-2 border border-slate-300 bg-white text-slate-600 rounded-lg text-sm font-bold hover:bg-slate-50"
+                  >
+                    提案を閉じる
+                  </button>
+                  <button
+                    onClick={handleApplyAiRecommendations}
+                    className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 shadow-sm"
+                  >
+                    これらの企業を追加
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {/* Confirmed Aggregates Bar */}
         {activeTab === 'confirmed' && (
@@ -7125,7 +7325,7 @@ function CreateExhibitionForm({ data, setData, onCancel, onSubmit }) {
 
 
 
-function ExhibitionDetail({ exhibition, onBack, onNavigate, updateVisitorCount, updateExhibitionData, batchUpdateExhibitionData, masterMakers, initialTab, onTabChange, storage }) {
+function ExhibitionDetail({ exhibition, onBack, onNavigate, updateVisitorCount, updateExhibitionData, batchUpdateExhibitionData, masterMakers, initialTab, onTabChange, storage, allExhibitions = [] }) {
   const [activeTab, setActiveTab] = useState(initialTab || 'main');
   const [entranceMode, setEntranceMode] = useState('dashboard'); // QRスキャナーモード制御用
 
@@ -7213,7 +7413,7 @@ function ExhibitionDetail({ exhibition, onBack, onNavigate, updateVisitorCount, 
         {activeTab === 'main' && <TabMainBoard exhibition={exhibition} updateMainData={updateMainData} updateBatch={updateMainDataBatch} tasks={exhibition.tasks || []} onNavigate={handleTabChange} />}
         {activeTab === 'schedule' && <TabSchedule scheduleData={exhibition.schedule} updateMainData={updateMainData} staff={exhibition.staff || ''} dates={exhibition.dates || []} preDates={exhibition.preDates || []} />}
         {activeTab === 'equipment' && <TabEquipment exhibition={exhibition} details={exhibition.venueDetails || {}} setDetails={setVenueDetails} masterMakers={masterMakers} />}
-        {activeTab === 'makers' && <TabMakers exhibition={exhibition} setMakers={setMakers} updateMainData={updateMainData} masterMakers={masterMakers} onNavigate={onNavigate} storage={storage} />}
+        {activeTab === 'makers' && <TabMakers exhibition={exhibition} setMakers={setMakers} updateMainData={updateMainData} masterMakers={masterMakers} onNavigate={onNavigate} storage={storage} allExhibitions={allExhibitions} />}
         {activeTab === 'tasks' && <TabTasks tasks={exhibition.tasks || []} setTasks={setTasks} staff={exhibition.staff || ''} />}
         {activeTab === 'budget' && <TabBudget exhibition={exhibition} updateMainData={updateMainData} />}
         {activeTab === 'entrance' && <TabEntrance exhibition={exhibition} updateVisitorCount={updateVisitorCount} visitors={exhibition.visitors || []} setVisitors={setVisitors} updateMainData={updateMainData} initialMode={entranceMode} />}
@@ -7912,7 +8112,7 @@ function App() {
           {view === 'enterprise' && <EnterpriseConsole masterMakers={masterMakers} setMasterMakers={setMasterMakers} db={db} appId={appId} />}
           {view === 'manual' && <OperationalManualView />}
           {view === 'analysis' && <PerformanceAnalysisView exhibitions={exhibitions || []} />}
-          {view === 'detail' && selectedExhibition && <ExhibitionDetail exhibition={selectedExhibition} onBack={() => navigateTo('dashboard')} onNavigate={navigateTo} updateVisitorCount={updateVisitorCount} updateExhibitionData={updateExhibitionData} batchUpdateExhibitionData={batchUpdateExhibitionData} masterMakers={masterMakers} initialTab={exhibitionTabs[selectedExhibition.id]} onTabChange={(tab) => setExhibitionTabs(prev => ({ ...prev, [selectedExhibition.id]: tab }))} storage={storage} />}
+          {view === 'detail' && selectedExhibition && <ExhibitionDetail exhibition={selectedExhibition} onBack={() => navigateTo('dashboard')} onNavigate={navigateTo} updateVisitorCount={updateVisitorCount} updateExhibitionData={updateExhibitionData} batchUpdateExhibitionData={batchUpdateExhibitionData} masterMakers={masterMakers} initialTab={exhibitionTabs[selectedExhibition.id]} onTabChange={(tab) => setExhibitionTabs(prev => ({ ...prev, [selectedExhibition.id]: tab }))} storage={storage} allExhibitions={exhibitions || []} />}
         </div>
       </main>
 

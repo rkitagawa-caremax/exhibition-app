@@ -43,6 +43,7 @@ import {
 } from './features/performanceAnalysis/analysisEngine';
 import {
   exportConfirmedMakersExcel,
+  exportConfirmedMakersAccountingExcel,
   exportInvitedMakersExcel
 } from './features/makers/makerExcelExports';
 import { buildAiInviteRecommendations } from './features/makers/aiRecommendations';
@@ -283,13 +284,22 @@ const VISITOR_CONTACT_DISABLED_TYPES = new Set([
   '一般・個人'
 ]);
 
+const PRIVACY_CONSENT_ITEM_ID = 'privacyConsent';
+const VISITOR_PRIVACY_CONSENT_LABEL = '上記の個人情報の取り扱いに同意する';
+const VISITOR_PRIVACY_USAGE_PURPOSES = [
+  '本展示会の運営・受付業務',
+  '展示会に関する各種ご連絡',
+  '出展メーカーによる来場者対応（※詳細は下記）'
+];
+
 const getDefaultVisitorFormItems = () => ([
   { id: 'type', label: '★受付区分', type: 'select', options: [...VISITOR_TYPE_OPTIONS], required: true, isFixed: true },
   { id: 'companyName', label: '★会社名・法人名', type: 'text', help: '個人の場合は「個人」とご明記ください (例：株式会社ケアマックスコーポレーション)', required: true, isFixed: true },
   { id: 'repName', label: '★代表者名', type: 'text', help: '', required: true, isFixed: true },
   { id: 'phone', label: '★電話番号', type: 'text', help: 'ハイフンなしでも可', required: true, isFixed: true },
   { id: 'email', label: '★メールアドレス', type: 'email', help: '', required: true, isFixed: true },
-  { id: 'invitedBy', label: '★招待企業様名', type: 'text', help: '招待状をお持ちの場合、企業名をご記入ください（任意）', required: false, isFixed: true }
+  { id: 'invitedBy', label: '★招待企業様名', type: 'text', help: '招待状をお持ちの場合、企業名をご記入ください（任意）', required: false, isFixed: true },
+  { id: PRIVACY_CONSENT_ITEM_ID, label: '★個人情報の取り扱い同意', type: 'checkbox', help: '', required: true, isFixed: true }
 ]);
 
 const FIXED_VISITOR_ITEM_IDS = new Set(getDefaultVisitorFormItems().map(item => item.id));
@@ -327,6 +337,49 @@ const normalizeVisitorFormConfig = (config) => {
     items: [...defaults, ...customItems]
   };
 };
+
+function VisitorPrivacyConsentField({ checked, onChange, required = true }) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 space-y-3">
+      <details className="group">
+        <summary className="cursor-pointer list-none font-bold text-slate-800 flex items-center justify-between gap-2">
+          <span>【個人情報の取り扱いについて】</span>
+          <span className="text-slate-400 text-xs group-open:rotate-180 transition-transform">▼</span>
+        </summary>
+        <div className="mt-3 text-sm text-slate-700 leading-relaxed space-y-3">
+          <p>ご入力いただいた個人情報は、以下の目的で使用いたします。</p>
+          <ul className="space-y-1 pl-4">
+            {VISITOR_PRIVACY_USAGE_PURPOSES.map((line) => (
+              <li key={line}>・{line}</li>
+            ))}
+          </ul>
+          <div className="pt-1">
+            <p className="font-bold text-slate-800">【出展メーカーへの情報提供について】</p>
+            <p className="mt-1">
+              展示会場内にて、出展メーカーがお客様の入場QRコードを読み取った場合、
+              お客様のご登録情報（会社名・お名前・連絡先等）が当該メーカーに共有されます。
+              これは、メーカーからのご連絡やアフターフォローを目的としています。
+            </p>
+          </div>
+          <p className="text-xs text-slate-500">※ご本人の同意なく、上記以外の第三者への提供は行いません。</p>
+        </div>
+      </details>
+
+      <label className="flex items-start gap-2 text-sm font-bold text-slate-700">
+        <input
+          type="checkbox"
+          checked={!!checked}
+          onChange={(e) => onChange(e.target.checked)}
+          required={required}
+          className="mt-0.5 h-4 w-4 rounded border-slate-300 text-blue-600"
+        />
+        <span>
+          □ {VISITOR_PRIVACY_CONSENT_LABEL} {required && <span className="text-red-500">*</span>}
+        </span>
+      </label>
+    </div>
+  );
+}
 
 const DEFAULT_VISITOR_FORM_CONFIG = normalizeVisitorFormConfig({
   title: '来場者事前登録',
@@ -1142,6 +1195,10 @@ function SimulatedPublicVisitorForm({ config, exhibition, onClose, onSubmit }) {
 
   const handleSubmit = (e) => {
     e.preventDefault();
+    if (!formData[PRIVACY_CONSENT_ITEM_ID]) {
+      alert('個人情報の取り扱いへの同意が必要です。');
+      return;
+    }
     // Simulate ID generation
     const newId = crypto.randomUUID();
     const finalData = { ...normalizeVisitorContactFields(formData), id: newId, status: 'registered' };
@@ -1241,6 +1298,16 @@ function SimulatedPublicVisitorForm({ config, exhibition, onClose, onSubmit }) {
         <div className="bg-blue-600 p-8 text-white"><h2 className="text-2xl font-bold mb-2">{normalizedConfig.title}</h2><p className="text-blue-100 text-sm">{normalizedConfig.description}</p></div>
         <form onSubmit={handleSubmit} className="p-8 space-y-6 max-h-[70vh] overflow-y-auto">
           {normalizedConfig.items && normalizedConfig.items.map(item => {
+            if (item.id === PRIVACY_CONSENT_ITEM_ID) {
+              return (
+                <VisitorPrivacyConsentField
+                  key={item.id}
+                  checked={!!formData[item.id]}
+                  onChange={(checked) => handleChange(item.id, checked)}
+                  required={item.required !== false}
+                />
+              );
+            }
             const disabledField = isContactDisabled && (item.id === 'phone' || item.id === 'email');
             const requiredField = disabledField ? false : item.required;
             const baseClass = `w-full border border-slate-300 p-3 rounded-lg outline-none focus:ring-2 focus:ring-blue-400 ${disabledField ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white'}`;
@@ -1298,6 +1365,7 @@ function MakerDataEditModal({ maker, onSave, onClose }) {
     boothCount: getInitVal('boothCount'),
     staffCount: getInitVal('staffCount'),
     lunchCount: getInitVal('lunchCount'),
+    moveInDate: getInitVal('moveInDate'),
     itemsDesk: getInitVal('itemsDesk') || getInitVal('desk'),
     itemsChair: getInitVal('itemsChair') || getInitVal('chair'),
     itemsPower: getInitVal('itemsPower') || getInitVal('power'),
@@ -1307,6 +1375,7 @@ function MakerDataEditModal({ maker, onSave, onClose }) {
   });
 
   const handleChange = (k, v) => setFormData(prev => ({ ...prev, [k]: v }));
+  const moveInDateOptions = ['前日搬入', '当日搬入'];
 
   return (
     <div className="fixed inset-0 bg-black/50 z-[80] flex items-center justify-center p-4">
@@ -1340,6 +1409,18 @@ function MakerDataEditModal({ maker, onSave, onClose }) {
             <div>
               <label className="block text-xs font-bold text-slate-500 mb-1">昼食数</label>
               <input className="w-full border p-2 rounded" value={formData.lunchCount} onChange={e => handleChange('lunchCount', e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-500 mb-1">搬入日時</label>
+              <select className="w-full border p-2 rounded bg-white" value={formData.moveInDate || ''} onChange={e => handleChange('moveInDate', e.target.value)}>
+                <option value="">未設定</option>
+                {formData.moveInDate && !moveInDateOptions.includes(formData.moveInDate) && (
+                  <option value={formData.moveInDate}>{formData.moveInDate}</option>
+                )}
+                {moveInDateOptions.map(option => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
             </div>
           </div>
 
@@ -2882,10 +2963,23 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
 
   const handleExportConfirmedExcel = async () => {
     try {
-      await exportConfirmedMakersExcel({ makers });
+      await exportConfirmedMakersExcel({ makers, formConfig });
     } catch (e) {
       console.error(e);
       alert('Excel出力エラー: ' + e.message);
+    }
+  };
+
+  const handleExportAccountingExcel = async () => {
+    try {
+      await exportConfirmedMakersAccountingExcel({
+        makers,
+        formConfig,
+        exhibitionTitle: exhibition?.title
+      });
+    } catch (e) {
+      console.error(e);
+      alert('経理用Excel出力エラー: ' + e.message);
     }
   };
 
@@ -3364,6 +3458,9 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
                 </select>
                 <button onClick={handleExportConfirmedExcel} className="flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-green-700 shadow-sm whitespace-nowrap">
                   <Download size={16} /> 回答Excel
+                </button>
+                <button onClick={handleExportAccountingExcel} className="flex items-center gap-2 bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-emerald-800 shadow-sm whitespace-nowrap">
+                  <FileSpreadsheet size={16} /> 経理用Excel
                 </button>
                 <button
                   onClick={handleDownloadInvoicesBulk}
@@ -5605,6 +5702,10 @@ function PublicVisitorView({ exhibition, onSubmit }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (!formData[PRIVACY_CONSENT_ITEM_ID]) {
+      alert('個人情報の取り扱いへの同意が必要です。');
+      return;
+    }
     const visitorId = crypto.randomUUID();
     // QRコードにはIDのみ埋め込む（シンプルなQRで読み取りやすく）
     setQrImageUrl('');
@@ -5697,7 +5798,7 @@ function PublicVisitorView({ exhibition, onSubmit }) {
             {visitorFormConfig?.items?.map(item => (
               <div key={item.id} className="flex justify-between">
                 <span className="text-slate-500">{item.label}</span>
-                <span className="font-bold">{formData[item.id] || '-'}</span>
+                <span className="font-bold">{item.id === PRIVACY_CONSENT_ITEM_ID ? (formData[item.id] ? '同意済み' : '未同意') : (formData[item.id] || '-')}</span>
               </div>
             ))}
           </div>
@@ -5713,6 +5814,16 @@ function PublicVisitorView({ exhibition, onSubmit }) {
         <div className="p-6 md:p-8">
           <form onSubmit={handleSubmit} className="space-y-5">
             {visitorFormConfig.items.map(item => {
+              if (item.id === PRIVACY_CONSENT_ITEM_ID) {
+                return (
+                  <VisitorPrivacyConsentField
+                    key={item.id}
+                    checked={!!formData[item.id]}
+                    onChange={(checked) => handleChange(item.id, checked)}
+                    required={item.required !== false}
+                  />
+                );
+              }
               const disabledField = isContactDisabled && (item.id === 'phone' || item.id === 'email');
               const requiredField = disabledField ? false : item.required;
               const baseClass = `w-full border border-slate-300 p-3 rounded-lg outline-none ${disabledField ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white'}`;
@@ -7023,15 +7134,19 @@ function PerformanceAnalysisView({ exhibitions }) {
 
   const handleExportMakerStrategyReport = () => {
     const report = makerStrategyReport;
+    const watchlist = (report.autoDeclineWatchlist || []).slice(0, 10);
     const header = `# 出展メーカー戦略レポート\n- 生成日時: ${formatReportTimestamp(report.generatedAt)}\n- 対象企業数: ${report.totals.companies}社\n`;
-    const kpi = `\n## KPI\n- 招待回数合計: ${report.totals.invited}回\n- 出展回数合計: ${report.totals.confirmed}回\n- 辞退回数合計: ${report.totals.declined}回\n- 平均出展率: ${report.kpi.participationRate.toFixed(1)}%\n- 平均辞退率: ${report.kpi.declineRate.toFixed(1)}%\n`;
+    const kpi = `\n## KPI\n- 招待回数合計: ${report.totals.invited}回\n- 出展回数合計: ${report.totals.confirmed}回\n- 辞退回数合計: ${report.totals.declined}回\n- 自動辞退回数合計（受付締切時/未回答）: ${report.totals.autoDeclined || 0}回\n- 平均出展率: ${report.kpi.participationRate.toFixed(1)}%\n- 平均辞退率: ${report.kpi.declineRate.toFixed(1)}%\n- 自動辞退率（全招待比）: ${report.kpi.autoDeclineRate.toFixed(1)}%\n`;
     const segments = `\n## セグメント\n- 重点育成: ${report.segmentCounts.core}社\n- 成長余地: ${report.segmentCounts.growth}社\n- 辞退高リスク: ${report.segmentCounts.caution}社\n- 休眠: ${report.segmentCounts.dormant}社\n`;
     const summary = `\n## サマリー\n${report.executiveSummary.map((x) => `- ${x}`).join('\n')}\n`;
     const policy = `\n## 方針提案\n${report.policyRecommendations.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n`;
     const actions = `\n## 次回アクション\n${report.nextActions.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n`;
     const top = `\n## 出展回数上位企業\n${report.topParticipants.slice(0, 30).map((company, i) => `${i + 1}. ${company.name}${company.code ? ` (code:${company.code})` : ''} / 出展:${company.confirmed} / 招待:${company.invited} / 辞退率:${company.declineRate.toFixed(1)}% / 方針:${company.strategy}`).join('\n')}\n`;
     const decline = `\n## 辞退率上位企業\n${report.highDecliners.slice(0, 30).map((company, i) => `${i + 1}. ${company.name}${company.code ? ` (code:${company.code})` : ''} / 招待:${company.invited} / 辞退:${company.declined} / 辞退率:${company.declineRate.toFixed(1)}% / 方針:${company.strategy}`).join('\n')}\n`;
-    const body = `${header}${kpi}${segments}${summary}${policy}${actions}${top}${decline}`;
+    const autoDecline = `\n## 要注意企業（未回答自動辞退率 高位）\n${watchlist.length > 0
+      ? watchlist.map((company, i) => `${i + 1}. ${company.name}${company.code ? ` (code:${company.code})` : ''} / 招待:${company.invited} / 自動辞退:${company.autoDeclined || 0} / 自動辞退率:${company.autoDeclineRate.toFixed(1)}% / 方針:${company.strategy}`).join('\n')
+      : '- 該当なし'}\n`;
+    const body = `${header}${kpi}${segments}${summary}${policy}${actions}${top}${decline}${autoDecline}`;
     const blob = new Blob([body], { type: 'text/markdown;charset=utf-8' });
     const now = new Date();
     const fileName = `出展メーカー戦略レポート_${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.md`;
@@ -7349,18 +7464,23 @@ function PerformanceAnalysisView({ exhibitions }) {
         {isMakerStrategyOpen && (
           <div className="mt-4">
             <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2 mb-4">
-              <p className="text-xs text-slate-500">最終生成: {formatReportTimestamp(makerStrategyReport.generatedAt)} / 出展回数・辞退率・次回方針</p>
+              <p className="text-xs text-slate-500">最終生成: {formatReportTimestamp(makerStrategyReport.generatedAt)} / 出展回数・辞退率・未回答自動辞退率・次回方針</p>
               <button onClick={handleExportMakerStrategyReport} className="px-3 py-1.5 text-xs font-bold rounded-lg border border-emerald-200 bg-white text-emerald-700 hover:bg-emerald-50">
                 Markdown出力
               </button>
             </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-4">
               <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">対象企業数</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.totals.companies}社</p></div>
               <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">招待回数合計</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.totals.invited}回</p></div>
               <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">出展回数合計</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.totals.confirmed}回</p></div>
               <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">平均出展率</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.kpi.participationRate.toFixed(1)}%</p></div>
               <div className="bg-white/80 border border-emerald-100 rounded-lg p-3"><p className="text-[11px] text-slate-500">平均辞退率</p><p className="text-lg font-bold text-slate-800">{makerStrategyReport.kpi.declineRate.toFixed(1)}%</p></div>
+              <div className="bg-white/80 border border-amber-200 rounded-lg p-3">
+                <p className="text-[11px] text-slate-500">未回答自動辞退率</p>
+                <p className="text-lg font-bold text-amber-700">{makerStrategyReport.kpi.autoDeclineRate.toFixed(1)}%</p>
+                <p className="text-[10px] text-slate-500 mt-0.5">自動辞退 {makerStrategyReport.totals.autoDeclined || 0}回</p>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-4">
@@ -7390,7 +7510,7 @@ function PerformanceAnalysisView({ exhibitions }) {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
               <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
                 <p className="text-sm font-bold text-slate-700 mb-3">出展回数 上位10社</p>
                 <div className="space-y-2">
@@ -7415,6 +7535,21 @@ function PerformanceAnalysisView({ exhibitions }) {
                     </div>
                   ))}
                   {makerStrategyReport.highDecliners.length === 0 && <p className="text-sm text-slate-500">対象データがありません。</p>}
+                </div>
+              </div>
+              <div className="bg-white/80 rounded-lg border border-amber-200 p-4">
+                <p className="text-sm font-bold text-amber-800 mb-3">要注意 受付締切時 自動辞退率 高位5社</p>
+                <div className="space-y-2">
+                  {(makerStrategyReport.autoDeclineWatchlist || []).slice(0, 5).map((company, idx) => (
+                    <div key={company.key || idx} className="rounded-md border border-amber-100 bg-white p-2">
+                      <p className="text-sm font-bold text-slate-800">{idx + 1}. {company.name}</p>
+                      <p className="text-xs text-slate-600 mt-0.5">
+                        招待:{company.invited}回 / 自動辞退:{company.autoDeclined || 0}回 / 自動辞退率:{company.autoDeclineRate.toFixed(1)}%
+                      </p>
+                      <p className="text-xs text-amber-700 mt-1">方針: {company.strategy}</p>
+                    </div>
+                  ))}
+                  {(makerStrategyReport.autoDeclineWatchlist || []).length === 0 && <p className="text-sm text-slate-500">対象データがありません。</p>}
                 </div>
               </div>
             </div>

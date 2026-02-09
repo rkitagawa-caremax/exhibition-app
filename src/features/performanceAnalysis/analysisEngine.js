@@ -89,6 +89,33 @@ const getMakerCompanyKey = (maker) => {
   return null;
 };
 
+const AUTO_DECLINE_NOTE_HINTS = ['受付締切', '自動辞退', '締切'];
+
+const hasResponsePayload = (maker) => {
+  const sources = [maker?.response, maker?.formData];
+  return sources.some((source) => {
+    if (!source || typeof source !== 'object') return false;
+    return Object.values(source).some((value) => {
+      if (value === null || value === undefined) return false;
+      if (typeof value === 'string') return value.trim() !== '';
+      if (Array.isArray(value)) return value.length > 0;
+      return true;
+    });
+  });
+};
+
+const isAutoDeclinedByReceptionClose = (maker) => {
+  if (!maker) return false;
+  const status = normalizeMakerStatusForAnalysis(maker.status);
+  if (status !== 'declined') return false;
+
+  const note = String(maker.note || '');
+  if (AUTO_DECLINE_NOTE_HINTS.some((keyword) => note.includes(keyword))) return true;
+
+  // Legacy fallback: treated as auto-close decline when there is no response payload.
+  return !hasResponsePayload(maker);
+};
+
 const parseBoothCount = (value, fallback = 1) => {
   const m = String(value ?? '').match(/\d+/);
   if (!m) return fallback;
@@ -458,10 +485,18 @@ export const buildCompanyPerformanceStats = (exhibitions) => {
       if (!companyKey) return;
 
       if (!perExCompany.has(companyKey)) {
-        perExCompany.set(companyKey, { statuses: new Set(), nameVotes: new globalThis.Map(), codeVotes: new globalThis.Map() });
+        perExCompany.set(companyKey, {
+          statuses: new Set(),
+          nameVotes: new globalThis.Map(),
+          codeVotes: new globalThis.Map(),
+          autoDeclined: false
+        });
       }
       const perEx = perExCompany.get(companyKey);
       perEx.statuses.add(status);
+      if (status === 'declined' && isAutoDeclinedByReceptionClose(maker)) {
+        perEx.autoDeclined = true;
+      }
 
       const name = getMakerDisplayName(maker);
       if (name) perEx.nameVotes.set(name, (perEx.nameVotes.get(name) || 0) + 1);
@@ -478,7 +513,8 @@ export const buildCompanyPerformanceStats = (exhibitions) => {
           code: '',
           invitedExhibitions: new Set(),
           confirmedExhibitions: new Set(),
-          declinedExhibitions: new Set()
+          declinedExhibitions: new Set(),
+          autoDeclinedExhibitions: new Set()
         });
       }
       const company = statsByCompany.get(companyKey);
@@ -490,6 +526,7 @@ export const buildCompanyPerformanceStats = (exhibitions) => {
       company.invitedExhibitions.add(exhibitionKey);
       if (perEx.statuses.has('confirmed')) company.confirmedExhibitions.add(exhibitionKey);
       if (perEx.statuses.has('declined')) company.declinedExhibitions.add(exhibitionKey);
+      if (perEx.autoDeclined && !perEx.statuses.has('confirmed')) company.autoDeclinedExhibitions.add(exhibitionKey);
     });
   });
 
@@ -497,8 +534,10 @@ export const buildCompanyPerformanceStats = (exhibitions) => {
     const invited = company.invitedExhibitions.size;
     const confirmed = company.confirmedExhibitions.size;
     const declined = company.declinedExhibitions.size;
+    const autoDeclined = company.autoDeclinedExhibitions.size;
     const declineRate = invited > 0 ? Number(((declined / invited) * 100).toFixed(1)) : 0;
     const participationRate = invited > 0 ? Number(((confirmed / invited) * 100).toFixed(1)) : 0;
+    const autoDeclineRate = invited > 0 ? Number(((autoDeclined / invited) * 100).toFixed(1)) : 0;
     return {
       key: company.key,
       name: company.name,
@@ -506,8 +545,10 @@ export const buildCompanyPerformanceStats = (exhibitions) => {
       invited,
       confirmed,
       declined,
+      autoDeclined,
       declineRate,
-      participationRate
+      participationRate,
+      autoDeclineRate
     };
   });
 };
@@ -798,13 +839,16 @@ export const buildMakerStrategyReport = ({ companyPerformanceStats, generatedAt 
     acc.invited += company.invited;
     acc.confirmed += company.confirmed;
     acc.declined += company.declined;
+    acc.autoDeclined += company.autoDeclined || 0;
     return acc;
-  }, { invited: 0, confirmed: 0, declined: 0 });
+  }, { invited: 0, confirmed: 0, declined: 0, autoDeclined: 0 });
 
   const participationRate = totals.invited > 0 ? Number(((totals.confirmed / totals.invited) * 100).toFixed(1)) : 0;
   const declineRate = totals.invited > 0 ? Number(((totals.declined / totals.invited) * 100).toFixed(1)) : 0;
+  const autoDeclineRate = totals.invited > 0 ? Number(((totals.autoDeclined / totals.invited) * 100).toFixed(1)) : 0;
 
   const strategyLabel = (company) => {
+    if (company.invited >= 2 && company.autoDeclineRate >= 50) return '要注意（未回答のまま自動辞退が多い）';
     if (company.invited >= 3 && company.declineRate >= 50) return '要因ヒアリング後に再招待';
     if (company.confirmed >= 3 && company.participationRate >= 70) return '先行招待＋ブース拡張提案';
     if (company.confirmed === 0 && company.invited >= 3) return '招待優先度を下げて保留';
@@ -824,6 +868,21 @@ export const buildMakerStrategyReport = ({ companyPerformanceStats, generatedAt 
     .filter((company) => company.invited >= 2)
     .sort((a, b) => b.declineRate - a.declineRate || b.declined - a.declined || b.invited - a.invited || a.name.localeCompare(b.name, 'ja'))
     .slice(0, 30)
+    .map((company) => ({
+      ...company,
+      strategy: strategyLabel(company)
+    }));
+
+  const autoDeclineWatchlist = [...companies]
+    .filter((company) => company.invited >= 2 && (company.autoDeclined || 0) >= 1)
+    .sort((a, b) => (
+      b.autoDeclineRate - a.autoDeclineRate
+      || (b.autoDeclined || 0) - (a.autoDeclined || 0)
+      || b.invited - a.invited
+      || b.declineRate - a.declineRate
+      || a.name.localeCompare(b.name, 'ja')
+    ))
+    .slice(0, 5)
     .map((company) => ({
       ...company,
       strategy: strategyLabel(company)
@@ -854,12 +913,19 @@ export const buildMakerStrategyReport = ({ companyPerformanceStats, generatedAt 
     `重点育成${segmentCounts.core}社 / 成長余地${segmentCounts.growth}社 / 辞退高リスク${segmentCounts.caution}社 / 休眠${segmentCounts.dormant}社。`
   ];
 
+  if (totals.autoDeclined > 0) {
+    executiveSummary.push(`未回答のまま受付締切で自動辞退となった件数は ${totals.autoDeclined} 回（全招待の ${autoDeclineRate.toFixed(1)}%）。`);
+  }
+
   const policyRecommendations = [];
   if (coreFocus.length > 0) {
     policyRecommendations.push(`重点育成候補（${coreFocus.map((x) => x.name).join(' / ')}）には先行招待とブース拡張提案を実施する。`);
   }
   if (cautionFocus.length > 0) {
     policyRecommendations.push(`辞退高リスク（${cautionFocus.map((x) => x.name).join(' / ')}）は、次回招待前に不参加要因ヒアリングを必須化する。`);
+  }
+  if (autoDeclineWatchlist.length > 0) {
+    policyRecommendations.push(`要注意（未回答自動辞退率が高い企業: ${autoDeclineWatchlist.map((x) => x.name).join(' / ')}）は、招待後フォロー頻度と期限管理を強化する。`);
   }
   if (dormantFocus.length > 0) {
     policyRecommendations.push(`連続未出展（${dormantFocus.map((x) => x.name).join(' / ')}）は、招待頻度と優先度を見直して母集団を再編する。`);
@@ -869,6 +935,7 @@ export const buildMakerStrategyReport = ({ companyPerformanceStats, generatedAt 
   }
 
   const nextActions = [];
+  if (autoDeclineWatchlist.length > 0) nextActions.push('要注意企業には、受付締切の7日前・3日前・前日に個別リマインドを実施する。');
   if (segmentCounts.caution > 0) nextActions.push('辞退率50%以上かつ招待3回以上の企業を次回招待前にレビューし、個別連絡で条件調整する。');
   if (segmentCounts.core > 0) nextActions.push('出展上位企業に対して、次回展示会の先行案内と追加コマ提案を標準運用に組み込む。');
   if (segmentCounts.dormant > 0) nextActions.push('3回以上招待で未出展の企業は、優先度を下げた再分類リストへ移して招待効率を改善する。');
@@ -880,18 +947,21 @@ export const buildMakerStrategyReport = ({ companyPerformanceStats, generatedAt 
       companies: companies.length,
       invited: totals.invited,
       confirmed: totals.confirmed,
-      declined: totals.declined
+      declined: totals.declined,
+      autoDeclined: totals.autoDeclined
     },
     kpi: {
       participationRate,
-      declineRate
+      declineRate,
+      autoDeclineRate
     },
     segmentCounts,
     executiveSummary,
     policyRecommendations: policyRecommendations.slice(0, 5),
     nextActions: nextActions.slice(0, 5),
     topParticipants,
-    highDecliners
+    highDecliners,
+    autoDeclineWatchlist
   };
 };
 

@@ -277,7 +277,7 @@ export default function EnterpriseConsole({ masterMakers, setMasterMakers, db, a
             const baseUrl = window.location.origin + window.location.pathname;
 
             filteredMakers.forEach(m => {
-                const demoUrl = `${baseUrl}?mode=demo_portal&code=${m.code}`;
+                const demoUrl = `${baseUrl}?mode=maker&code=${m.code}`;
                 ws.addRow([
                     m.code || '',
                     m.name || '',
@@ -299,7 +299,7 @@ export default function EnterpriseConsole({ masterMakers, setMasterMakers, db, a
         const catStyle = MAKER_CATEGORIES[maker.category] || MAKER_CATEGORIES['その他'];
         // Assuming we are in a sub-path, window.location might work
         const baseUrl = window.location.origin + window.location.pathname;
-        const demoUrl = `${baseUrl}?mode=demo_portal&code=${maker.code}`;
+        const demoUrl = `${baseUrl}?mode=maker&code=${maker.code}`;
 
         return (
             <div className={`bg-white rounded-lg shadow-sm border border-slate-200 hover:shadow-md transition-shadow ${viewMode === 'micro' ? 'p-2' : 'p-4'}`}>

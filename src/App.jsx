@@ -269,19 +269,21 @@ const DEFAULT_FORM_CONFIG = {
   }
 };
 
+const VISITOR_TYPE_GENERAL_INDIVIDUAL = '一般・個人';
+
 const VISITOR_TYPE_OPTIONS = [
   '福祉用具貸与事業所',
   '医療機器販売',
   '介護施設・病院管理者様',
   '介護・看護従事者様(看護師・介護士・ケアマネ等)',
   'メーカー・製造業',
-  '一般・個人',
+  VISITOR_TYPE_GENERAL_INDIVIDUAL,
   'その他'
 ];
 
 const VISITOR_CONTACT_DISABLED_TYPES = new Set([
   '介護・看護従事者様(看護師・介護士・ケアマネ等)',
-  '一般・個人'
+  VISITOR_TYPE_GENERAL_INDIVIDUAL
 ]);
 
 const PRIVACY_CONSENT_ITEM_ID = 'privacyConsent';
@@ -295,7 +297,7 @@ const VISITOR_PRIVACY_USAGE_PURPOSES = [
 const getDefaultVisitorFormItems = () => ([
   { id: 'type', label: '★受付区分', type: 'select', options: [...VISITOR_TYPE_OPTIONS], required: true, isFixed: true },
   { id: 'companyName', label: '★会社名・法人名', type: 'text', help: '個人の場合は「個人」とご明記ください (例：株式会社ケアマックスコーポレーション)', required: true, isFixed: true },
-  { id: 'repName', label: '★代表者名', type: 'text', help: '', required: true, isFixed: true },
+  { id: 'repName', label: '★お名前', type: 'text', help: '', required: true, isFixed: true },
   { id: 'phone', label: '★電話番号', type: 'text', help: 'ハイフンなしでも可', required: true, isFixed: true },
   { id: 'email', label: '★メールアドレス', type: 'email', help: '', required: true, isFixed: true },
   { id: 'invitedBy', label: '★招待企業様名', type: 'text', help: '招待状をお持ちの場合、企業名をご記入ください（任意）', required: false, isFixed: true },
@@ -309,16 +311,18 @@ const isVisitorFixedQuestion = (itemOrId) => {
 };
 
 const isContactDisabledByVisitorType = (typeValue) => VISITOR_CONTACT_DISABLED_TYPES.has(typeValue || '');
+const isCompanyNameDisabledByVisitorType = (typeValue) => typeValue === VISITOR_TYPE_GENERAL_INDIVIDUAL;
 
 const normalizeVisitorContactFields = (formData = {}) => {
-  if (!isContactDisabledByVisitorType(formData.type)) {
-    return formData;
+  const next = { ...formData };
+  if (isContactDisabledByVisitorType(next.type)) {
+    next.phone = '';
+    next.email = '';
   }
-  return {
-    ...formData,
-    phone: '',
-    email: ''
-  };
+  if (isCompanyNameDisabledByVisitorType(next.type)) {
+    next.companyName = '';
+  }
+  return next;
 };
 
 const normalizeVisitorFormConfig = (config) => {
@@ -1185,6 +1189,7 @@ function SimulatedPublicVisitorForm({ config, exhibition, onClose, onSubmit }) {
   const qrCanvasRef = useRef(null);
   const normalizedConfig = useMemo(() => normalizeVisitorFormConfig(config), [config]);
   const isContactDisabled = isContactDisabledByVisitorType(formData.type);
+  const isCompanyNameDisabled = isCompanyNameDisabledByVisitorType(formData.type);
   const exhibitionDateText = useMemo(() => formatExhibitionDateText(exhibition?.dates), [exhibition?.dates]);
   const exhibitionTimeText = useMemo(() => formatExhibitionTimeText(exhibition?.openTime, exhibition?.closeTime), [exhibition?.openTime, exhibition?.closeTime]);
 
@@ -1308,7 +1313,9 @@ function SimulatedPublicVisitorForm({ config, exhibition, onClose, onSubmit }) {
                 />
               );
             }
-            const disabledField = isContactDisabled && (item.id === 'phone' || item.id === 'email');
+            const disabledField =
+              (isContactDisabled && (item.id === 'phone' || item.id === 'email')) ||
+              (isCompanyNameDisabled && item.id === 'companyName');
             const requiredField = disabledField ? false : item.required;
             const baseClass = `w-full border border-slate-300 p-3 rounded-lg outline-none focus:ring-2 focus:ring-blue-400 ${disabledField ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white'}`;
             return (
@@ -5692,6 +5699,7 @@ function PublicVisitorView({ exhibition, onSubmit }) {
   const [qrImageUrl, setQrImageUrl] = useState('');
   const qrCanvasRef = useRef(null);
   const isContactDisabled = isContactDisabledByVisitorType(formData.type);
+  const isCompanyNameDisabled = isCompanyNameDisabledByVisitorType(formData.type);
   const exhibitionDateText = useMemo(() => formatExhibitionDateText(exhibition?.dates), [exhibition?.dates]);
   const exhibitionTimeText = useMemo(() => formatExhibitionTimeText(exhibition?.openTime, exhibition?.closeTime), [exhibition?.openTime, exhibition?.closeTime]);
 
@@ -5824,7 +5832,9 @@ function PublicVisitorView({ exhibition, onSubmit }) {
                   />
                 );
               }
-              const disabledField = isContactDisabled && (item.id === 'phone' || item.id === 'email');
+              const disabledField =
+                (isContactDisabled && (item.id === 'phone' || item.id === 'email')) ||
+                (isCompanyNameDisabled && item.id === 'companyName');
               const requiredField = disabledField ? false : item.required;
               const baseClass = `w-full border border-slate-300 p-3 rounded-lg outline-none ${disabledField ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white'}`;
 

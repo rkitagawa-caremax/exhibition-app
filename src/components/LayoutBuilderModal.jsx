@@ -74,6 +74,17 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
         container.scrollTo({ left: nextLeft, top: nextTop, behavior });
     };
 
+    const centerItemInViewport = (item, behavior = 'smooth') => {
+        const container = scrollContainerRef.current;
+        if (!container || !item) return;
+
+        const itemCenterX = ((item.x || 0) + ((item.w || 0) / 2)) * zoomScale;
+        const itemCenterY = ((item.y || 0) + ((item.h || 0) / 2)) * zoomScale;
+        const nextLeft = Math.max(0, itemCenterX - (container.clientWidth / 2));
+        const nextTop = Math.max(0, itemCenterY - (container.clientHeight / 2));
+        container.scrollTo({ left: nextLeft, top: nextTop, behavior });
+    };
+
     // Auto-scroll to center on mount
     useEffect(() => {
         requestAnimationFrame(() => centerMainAreaInViewport());
@@ -445,6 +456,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
         setItems([...items, newItem]);
         setSelectedIds(new Set([newItem.id]));
         setIsDirty(true);
+        requestAnimationFrame(() => centerItemInViewport(newItem));
     };
 
     const handleViewportMouseDown = (e) => {
@@ -661,6 +673,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 setArrowStart(null);
                 setActiveTool(null);
                 setIsDirty(true);
+                requestAnimationFrame(() => centerItemInViewport(newArrow));
             }
         } else if (activeTool === 'text') {
             const rect = canvasRef.current.getBoundingClientRect();
@@ -682,6 +695,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
             setActiveTool(null);
             setSelectedIds(new Set([newItem.id]));
             setIsDirty(true);
+            requestAnimationFrame(() => centerItemInViewport(newItem));
         } else {
             setSelectedIds(new Set());
             setIsDirty(true); // Should we dirty on deselect? Maybe not needed but consistent.
@@ -930,6 +944,8 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
 
         setItems([...items, newItem]);
         setSelectedIds(new Set([newItem.id]));
+        setIsDirty(true);
+        requestAnimationFrame(() => centerItemInViewport(newItem));
     };
 
     // ============================================================================
@@ -1075,6 +1091,58 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
         }
     };
 
+    const createPdfDoorSymbol = (doc, doorDirection = 'bottom') => {
+        const ns = 'http://www.w3.org/2000/svg';
+        const svg = doc.createElementNS(ns, 'svg');
+        svg.setAttribute('viewBox', '0 0 100 100');
+        svg.setAttribute('width', '100%');
+        svg.setAttribute('height', '100%');
+        svg.style.display = 'block';
+
+        const group = doc.createElementNS(ns, 'g');
+        const rotateMap = { bottom: 0, right: 90, top: 180, left: 270 };
+        const rotateDeg = rotateMap[doorDirection] ?? 0;
+        group.setAttribute('transform', `rotate(${rotateDeg} 50 50)`);
+
+        const wall = doc.createElementNS(ns, 'line');
+        wall.setAttribute('x1', '12');
+        wall.setAttribute('y1', '90');
+        wall.setAttribute('x2', '90');
+        wall.setAttribute('y2', '90');
+        wall.setAttribute('stroke', '#065f46');
+        wall.setAttribute('stroke-width', '7');
+        wall.setAttribute('stroke-linecap', 'round');
+
+        const doorLeaf = doc.createElementNS(ns, 'line');
+        doorLeaf.setAttribute('x1', '20');
+        doorLeaf.setAttribute('y1', '90');
+        doorLeaf.setAttribute('x2', '20');
+        doorLeaf.setAttribute('y2', '22');
+        doorLeaf.setAttribute('stroke', '#16a34a');
+        doorLeaf.setAttribute('stroke-width', '5');
+        doorLeaf.setAttribute('stroke-linecap', 'round');
+
+        const swingArc = doc.createElementNS(ns, 'path');
+        swingArc.setAttribute('d', 'M20 22 A68 68 0 0 1 88 90');
+        swingArc.setAttribute('fill', 'none');
+        swingArc.setAttribute('stroke', '#16a34a');
+        swingArc.setAttribute('stroke-width', '4');
+        swingArc.setAttribute('stroke-dasharray', '6 5');
+
+        const hinge = doc.createElementNS(ns, 'circle');
+        hinge.setAttribute('cx', '20');
+        hinge.setAttribute('cy', '90');
+        hinge.setAttribute('r', '4');
+        hinge.setAttribute('fill', '#16a34a');
+
+        group.appendChild(wall);
+        group.appendChild(swingArc);
+        group.appendChild(doorLeaf);
+        group.appendChild(hinge);
+        svg.appendChild(group);
+        return svg;
+    };
+
     /* -------------------------------------------------------------------------- */
     /*                            PDF生成 (Clean Re-render)                       */
     /* -------------------------------------------------------------------------- */
@@ -1084,6 +1152,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
         // レンダリング待ち
         await new Promise(resolve => setTimeout(resolve, 500));
 
+        let sandboxFrame = null;
         try {
             // 1. バウンディングボックス = メインエリアの範囲（ブースがない部分も含む）
             // 追加エリアがあればそれも含める
@@ -1101,32 +1170,46 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
             });
 
             // メインエリアの幅と高さ（ワークスペースのオフセットは含めない）
-            const cropWidth = maxX - minX;
-            const cropHeight = maxY - minY;
+            const cropWidth = Math.max(1, Math.round(maxX - minX));
+            const cropHeight = Math.max(1, Math.round(maxY - minY));
 
-            // 2. PDF用の一時コンテナを作成
-            // 座標を(0, 0)基準に正規化するため、minX/minYは後でアイテム配置時に使う
-            const container = document.createElement('div');
-            container.style.position = 'fixed';
-            container.style.top = '0';
-            container.style.left = '0';
+            // 2. oklchの影響を避けるため、隔離したiframe上にPDF用DOMを構築
+            sandboxFrame = document.createElement('iframe');
+            sandboxFrame.setAttribute('aria-hidden', 'true');
+            sandboxFrame.style.position = 'fixed';
+            sandboxFrame.style.left = '-10000px';
+            sandboxFrame.style.top = '0';
+            sandboxFrame.style.width = `${cropWidth}px`;
+            sandboxFrame.style.height = `${cropHeight}px`;
+            sandboxFrame.style.border = '0';
+            sandboxFrame.style.opacity = '0';
+            sandboxFrame.style.pointerEvents = 'none';
+            document.body.appendChild(sandboxFrame);
+
+            const frameDoc = sandboxFrame.contentDocument;
+            if (!frameDoc) throw new Error('PDF描画用ドキュメントの初期化に失敗しました。');
+            frameDoc.open();
+            frameDoc.write('<!doctype html><html><head><meta charset="utf-8" /></head><body style="margin:0;background:#ffffff;"></body></html>');
+            frameDoc.close();
+
+            const container = frameDoc.createElement('div');
+            container.style.position = 'relative';
             container.style.width = `${cropWidth}px`;
             container.style.height = `${cropHeight}px`;
             container.style.backgroundColor = '#ffffff';
-            container.style.zIndex = '-9999';
             container.style.overflow = 'hidden';
-            // グリッド線
             container.style.backgroundImage = `
         linear-gradient(to right, #e2e8f0 1px, transparent 1px),
         linear-gradient(to bottom, #e2e8f0 1px, transparent 1px)
       `;
             container.style.backgroundSize = `${pixelsPerMeter}px ${pixelsPerMeter}px`;
+            frameDoc.body.appendChild(container);
 
             // 3. アイテムの配置（座標を正規化）
             // アイテムの座標からminX/minYを引くことで、(0, 0)基準に変換
 
             // A. メインエリアの描画（白背景の矩形として配置）
-            const mainArea = document.createElement('div');
+            const mainArea = frameDoc.createElement('div');
             mainArea.style.position = 'absolute';
             mainArea.style.left = `${mainAreaOffsetX - minX}px`;
             mainArea.style.top = `${mainAreaOffsetY - minY}px`;
@@ -1138,7 +1221,8 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
 
             // B. 全アイテムの配置
             items.forEach(item => {
-                const el = document.createElement('div');
+                const el = frameDoc.createElement('div');
+                el.setAttribute('data-pdf-item-type', item.type || '');
                 el.style.position = 'absolute';
                 el.style.left = `${item.x - minX}px`;
                 el.style.top = `${item.y - minY}px`;
@@ -1168,7 +1252,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                     el.style.overflow = 'hidden';
 
                     // ブース内テキスト
-                    const label = document.createElement('div');
+                    const label = frameDoc.createElement('div');
                     label.textContent = item.label || 'ブース';
                     label.style.fontSize = '12px'; // 少し大きめに
                     label.style.fontWeight = 'bold';
@@ -1182,33 +1266,40 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
 
                     // 詳細情報 (Clean Modeでない場合)
                     if (!showCleanPdf && item.boothNo) {
-                        const info = document.createElement('div');
+                        const info = frameDoc.createElement('div');
                         info.textContent = item.boothNo;
                         info.style.fontSize = '9px';
                         info.style.marginTop = '2px';
                         info.style.color = '#333333';
                         el.appendChild(info);
                     }
+                } else if (item.type === 'pillar') {
+                    el.style.backgroundColor = '#64748b'; // slate-500
+                    el.style.border = '1px solid #475569';
                 } else if (item.type === 'text') {
                     el.textContent = item.label;
                     el.style.fontSize = '14px';
                     el.style.color = '#000000';
                     el.style.whiteSpace = 'pre-wrap';
                 } else if (item.type === 'door') {
-                    el.style.backgroundColor = '#cbd5e1'; // slate-300
-                    el.textContent = '出入口';
-                    el.style.fontSize = '10px';
+                    el.style.backgroundColor = 'transparent';
+                    el.style.border = 'none';
                     el.style.display = 'flex';
                     el.style.justifyContent = 'center';
                     el.style.alignItems = 'center';
+                    el.style.overflow = 'visible';
+
+                    const symbolSize = Math.max(item.w || 0, item.h || 0, metersToPixels(1));
+                    const symbolWrap = frameDoc.createElement('div');
+                    symbolWrap.style.width = `${symbolSize}px`;
+                    symbolWrap.style.height = `${symbolSize}px`;
+                    symbolWrap.style.marginTop = `${((item.h || 0) - symbolSize) / 2}px`;
+                    symbolWrap.style.pointerEvents = 'none';
+                    symbolWrap.appendChild(createPdfDoorSymbol(frameDoc, item.doorDirection || 'bottom'));
+                    el.appendChild(symbolWrap);
                 } else if (item.type === 'obstacle') {
-                    el.style.backgroundColor = '#f1f5f9'; // slate-100
-                    el.style.border = '1px dashed #94a3b8';
-                    el.style.display = 'flex';
-                    el.style.justifyContent = 'center';
-                    el.style.alignItems = 'center';
-                    el.style.fontSize = '10px';
-                    el.textContent = '柱/障害物';
+                    el.style.backgroundColor = '#e2e8f0'; // slate-200
+                    el.style.border = '1px dashed #64748b';
                 }
 
                 // 回転の適用
@@ -1219,48 +1310,16 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 container.appendChild(el);
             });
 
-            // 4. コンテナを追加してキャプチャ
-            document.body.appendChild(container);
-
+            // 4. iframe上の隔離DOMをキャプチャ
             const canvas = await html2canvas(container, {
                 scale: 2,
                 logging: false,
                 useCORS: true,
                 backgroundColor: '#ffffff',
-                // 明示的にサイズを指定してキャプチャ範囲を固定
                 width: cropWidth,
                 height: cropHeight,
                 windowWidth: cropWidth,
-                windowHeight: cropHeight,
-                onclone: (clonedDoc) => {
-                    // カラーサニタイズ
-                    const allElements = clonedDoc.querySelectorAll('*');
-                    Array.from(allElements).forEach(el => {
-                        el.style.color = '#000000';
-                        if (el.style.border) {
-                            el.style.borderColor = '#64748b';
-                        }
-                        const computedStyle = window.getComputedStyle(el);
-                        const bg = computedStyle.backgroundColor;
-                        if (bg && (bg.includes('oklch') || bg.includes('oklab'))) {
-                            if (el.textContent === '柱/障害物') {
-                                el.style.backgroundColor = '#f1f5f9';
-                            } else if (el.textContent === '出入口') {
-                                el.style.backgroundColor = '#cbd5e1';
-                            } else {
-                                el.style.backgroundColor = '#ffffff';
-                            }
-                        }
-                        const borderColor = computedStyle.borderColor;
-                        if (borderColor && (borderColor.includes('oklch') || borderColor.includes('oklab'))) {
-                            el.style.borderColor = '#64748b';
-                        }
-                        const color = computedStyle.color;
-                        if (color && (color.includes('oklch') || color.includes('oklab'))) {
-                            el.style.color = '#000000';
-                        }
-                    });
-                }
+                windowHeight: cropHeight
             });
 
             // デバッグ: キャプチャサイズを確認
@@ -1274,8 +1333,6 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 minX,
                 minY
             });
-
-            document.body.removeChild(container);
 
             // 5. PDF生成
             // 会場の縦横比に応じてPDFの向きを自動選択
@@ -1312,6 +1369,10 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
         } catch (err) {
             console.error('PDF Generation Error:', err);
             alert('PDF生成に失敗しました: ' + err.message);
+        } finally {
+            if (sandboxFrame && sandboxFrame.parentNode) {
+                sandboxFrame.parentNode.removeChild(sandboxFrame);
+            }
         }
     };
     // ============================================================================

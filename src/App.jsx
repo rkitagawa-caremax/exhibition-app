@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 // import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
-import { collection, updateDoc, doc, deleteDoc, onSnapshot, setDoc } from "firebase/firestore";
+import { collection, onSnapshot, updateDoc as updateDocRaw, doc, deleteDoc, setDoc } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 // QRコード用ライブラリ
 import { QRCodeCanvas } from 'qrcode.react';
@@ -331,6 +331,11 @@ const normalizeVisitorFormConfig = (config) => {
   const sourceItems = Array.isArray(base.items) ? base.items : [];
   const customItems = sourceItems
     .filter(item => !isVisitorFixedQuestion(item?.id))
+    .filter((item) => {
+      const id = String(item?.id || '');
+      // Legacy schema items can leak into visitor forms; only keep editor-generated custom IDs.
+      return id.startsWith('custom-') || id.startsWith('custom_');
+    })
     .map(item => ({ ...item, isFixed: false }));
 
   return {
@@ -390,6 +395,70 @@ const DEFAULT_VISITOR_FORM_CONFIG = normalizeVisitorFormConfig({
   description: '当日のスムーズな入場のため、事前登録にご協力をお願いいたします。登録完了後、入場用QRコードが発行されます。',
   items: getDefaultVisitorFormItems()
 });
+
+const EXHIBITION_WRITE_DEDUP_WINDOW_MS = 1500;
+const PROTECTED_EXHIBITION_WRITE_KEYS = new Set(['visitorFormConfig', 'formConfig']);
+// Permanent policy: visitor pre-registration questions are fixed (7 items).
+// Admin users can view the configuration but cannot add/edit/save question definitions.
+const VISITOR_FORM_POLICY_LOCKED = true;
+const EMERGENCY_DISABLE_VISITOR_FORM_CONFIG_WRITES = VISITOR_FORM_POLICY_LOCKED;
+const EMERGENCY_PUBLIC_VISITOR_FORM_FIXED_ONLY = VISITOR_FORM_POLICY_LOCKED;
+const PUBLIC_VISITOR_FORM_URL_VERSION = '20260212a';
+const APP_BUILD_TAG = '2026-02-12-writeguard2';
+const BLOCKED_UPDATE_FIELD_PREFIXES = ['visitorFormConfig'];
+
+const isBlockedUpdateFieldPath = (key) => {
+  const normalized = String(key || '').trim();
+  if (!normalized) return false;
+  return BLOCKED_UPDATE_FIELD_PREFIXES.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix}.`));
+};
+
+const hasBlockedUpdateFieldPath = (payload) => {
+  if (!payload || typeof payload !== 'object') return false;
+  return Object.keys(payload).some((key) => isBlockedUpdateFieldPath(key));
+};
+
+const guardedUpdateDoc = async (docRef, payload, context = '') => {
+  if (hasBlockedUpdateFieldPath(payload)) {
+    console.error('[WriteGuard] Blocked direct updateDoc for protected field path', {
+      context,
+      keys: Object.keys(payload || {})
+    });
+    return false;
+  }
+  await updateDocRaw(docRef, payload);
+  return true;
+};
+
+const buildVisitorRegisterUrl = (exhibitionId) => {
+  const baseUrl = `${window.location.origin}${window.location.pathname}`;
+  const params = new URLSearchParams({
+    mode: 'visitor_register',
+    id: exhibitionId,
+    v: PUBLIC_VISITOR_FORM_URL_VERSION
+  });
+  return `${baseUrl}?${params.toString()}`;
+};
+
+const getPublicVisitorFormConfig = (config) => {
+  const normalized = normalizeVisitorFormConfig(config);
+  if (!EMERGENCY_PUBLIC_VISITOR_FORM_FIXED_ONLY) return normalized;
+  return {
+    ...normalized,
+    items: getDefaultVisitorFormItems()
+  };
+};
+
+const safeJsonStringify = (value) => {
+  try {
+    return JSON.stringify(value);
+  } catch (error) {
+    console.warn('[Serialize] Failed to stringify value', error);
+    return '__SERIALIZE_ERROR__';
+  }
+};
+
+const isDeepEqual = (left, right) => safeJsonStringify(left) === safeJsonStringify(right);
 
 const downloadCSV = (data, filename) => {
   if (!data || !data.length) return;
@@ -971,136 +1040,55 @@ ${place}
 }
 
 
-function VisitorFormEditor({ config, onSave }) {
-  const [localConfig, setLocalConfig] = useState(() => normalizeVisitorFormConfig(config));
-  const [newItemName, setNewItemName] = useState('');
-  useEffect(() => {
-    setLocalConfig(normalizeVisitorFormConfig(config));
-  }, [config]);
-
-  const updateField = (key, val) => setLocalConfig(prev => ({ ...prev, [key]: val }));
-
-  const updateItem = (id, key, val) => {
-    if (isVisitorFixedQuestion(id)) return;
-    const newItems = localConfig.items.map(item => {
-      if (item.id !== id) return item;
-      return { ...item, [key]: val };
-    });
-    setLocalConfig(prev => ({ ...prev, items: newItems }));
-  };
-  const deleteItem = (id) => {
-    if (isVisitorFixedQuestion(id)) {
-      alert('固定質問は削除できません。');
-      return;
-    }
-    if (window.confirm('削除しますか？')) {
-      setLocalConfig(prev => ({ ...prev, items: prev.items.filter(i => i.id !== id) }));
-    }
-  };
-  const addItem = () => {
-    const trimmed = newItemName.trim();
-    if (!trimmed) return;
-    setLocalConfig(prev => ({
-      ...prev,
-      items: [...prev.items, { id: `custom-${Date.now()}`, label: trimmed, type: 'text', help: '', required: false, isFixed: false }]
-    }));
-    setNewItemName('');
-  };
-
-  const handleSave = () => {
-    onSave(normalizeVisitorFormConfig(localConfig));
-  };
+function VisitorFormEditor({ config }) {
+  const normalizedConfig = useMemo(() => normalizeVisitorFormConfig(config), [config]);
+  const fixedItems = useMemo(
+    () => normalizedConfig.items.filter(item => isVisitorFixedQuestion(item)),
+    [normalizedConfig.items]
+  );
 
   return (
-    <div className="animate-fade-in max-w-3xl mx-auto">
-      <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-bold text-slate-800">登録フォーム編集</h2>
-        <button onClick={handleSave} className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-blue-700 flex items-center gap-2">
-          <Save size={18} /> 保存する
-        </button>
+    <div className="animate-fade-in max-w-3xl mx-auto space-y-6">
+      <div className="bg-amber-50 border border-amber-200 rounded-xl p-5">
+        <h2 className="text-xl font-bold text-amber-900">事前登録フォーム設定（閲覧のみ）</h2>
+        <p className="text-sm text-amber-800 mt-2">
+          管理者権限ポリシーにより、質問事項の追加・編集・削除はできません。事前登録フォームは固定7項目で運用されます。
+        </p>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-xl p-6 mb-6 shadow-sm">
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-bold text-slate-500 mb-1">フォームタイトル</label>
-            <input className="w-full border p-2 rounded" value={localConfig.title} onChange={e => updateField('title', e.target.value)} />
-          </div>
-          <div>
-            <label className="block text-sm font-bold text-slate-500 mb-1">説明文</label>
-            <textarea className="w-full border p-2 rounded h-24" value={localConfig.description} onChange={e => updateField('description', e.target.value)} />
-          </div>
+      <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-4">
+        <div>
+          <p className="text-xs font-bold text-slate-500 mb-1">フォームタイトル</p>
+          <p className="text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded p-3">{normalizedConfig.title}</p>
+        </div>
+        <div>
+          <p className="text-xs font-bold text-slate-500 mb-1">説明文</p>
+          <p className="text-sm text-slate-700 whitespace-pre-wrap bg-slate-50 border border-slate-200 rounded p-3">
+            {normalizedConfig.description || '-'}
+          </p>
         </div>
       </div>
 
       <div className="bg-slate-50 border border-slate-200 rounded-xl p-6">
-        <h3 className="font-bold text-slate-700 border-b pb-2 mb-4">質問項目</h3>
+        <h3 className="font-bold text-slate-700 border-b pb-2 mb-4">固定質問 7項目</h3>
         <div className="space-y-3">
-          {localConfig.items.map((item, idx) => {
-            const itemIsFixed = isVisitorFixedQuestion(item);
-            return (
-              <div key={item.id} className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm group">
-                <div className="flex justify-between items-start mb-2">
-                  <span className="text-xs font-bold text-slate-400">
-                    項目 {idx + 1} ({item.type}) {itemIsFixed && <span className="ml-1 text-blue-600">固定</span>}
-                  </span>
-                  <button
-                    onClick={() => deleteItem(item.id)}
-                    className={itemIsFixed ? 'text-slate-200 cursor-not-allowed' : 'text-slate-300 hover:text-red-500'}
-                    disabled={itemIsFixed}
-                    title={itemIsFixed ? '固定質問は削除できません' : '削除'}
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-bold mb-1">質問ラベル</label>
-                    <input
-                      className={`w-full border p-2 rounded text-sm ${itemIsFixed ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
-                      value={item.label}
-                      onChange={e => updateItem(item.id, 'label', e.target.value)}
-                      disabled={itemIsFixed}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold mb-1">補足説明</label>
-                    <input
-                      className={`w-full border p-2 rounded text-sm ${itemIsFixed ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
-                      value={item.help || ''}
-                      onChange={e => updateItem(item.id, 'help', e.target.value)}
-                      disabled={itemIsFixed}
-                    />
-                  </div>
-                </div>
-                <div className="mt-2 flex items-center gap-2">
-                  <label className={`flex items-center gap-1 text-sm ${itemIsFixed ? 'text-slate-400 cursor-not-allowed' : 'cursor-pointer'}`}>
-                    <input
-                      type="checkbox"
-                      checked={item.required}
-                      onChange={e => updateItem(item.id, 'required', e.target.checked)}
-                      disabled={itemIsFixed}
-                    /> 必須項目
-                  </label>
-                  {item.type === 'select' && (
-                    <div className="flex-1 ml-4">
-                      <label className="block text-xs font-bold mb-1">選択肢 (カンマ区切り)</label>
-                      <input
-                        className={`w-full border p-1 rounded text-xs ${itemIsFixed ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
-                        value={item.options ? item.options.join(',') : ''}
-                        onChange={e => updateItem(item.id, 'options', e.target.value.split(','))}
-                        disabled={itemIsFixed}
-                      />
-                    </div>
-                  )}
-                </div>
+          {fixedItems.map((item, idx) => (
+            <div key={item.id} className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="text-xs font-bold text-slate-500">
+                  項目 {idx + 1} ({item.type})
+                </span>
+                <span className="text-xs font-bold bg-blue-100 text-blue-700 px-2 py-0.5 rounded">固定</span>
               </div>
-            );
-          })}
-        </div>
-        <div className="mt-6 flex gap-2">
-          <input className="flex-1 border p-2 rounded" placeholder="新しい質問タイトル..." value={newItemName} onChange={e => setNewItemName(e.target.value)} />
-          <button onClick={addItem} className="bg-slate-700 text-white px-4 py-2 rounded font-bold text-sm">新規追加</button>
+              <p className="text-sm font-bold text-slate-800">{item.label}</p>
+              <p className="text-xs text-slate-500 mt-1">{item.help || '補足説明なし'}</p>
+              <p className="text-xs mt-2">
+                <span className={`font-bold ${item.required ? 'text-red-600' : 'text-slate-500'}`}>
+                  {item.required ? '必須' : '任意'}
+                </span>
+              </p>
+            </div>
+          ))}
         </div>
       </div>
     </div>
@@ -1187,7 +1175,7 @@ function SimulatedPublicVisitorForm({ config, exhibition, onClose, onSubmit }) {
   const [submittedData, setSubmittedData] = useState(null);
   const [qrImageUrl, setQrImageUrl] = useState('');
   const qrCanvasRef = useRef(null);
-  const normalizedConfig = useMemo(() => normalizeVisitorFormConfig(config), [config]);
+  const normalizedConfig = useMemo(() => getPublicVisitorFormConfig(config), [config]);
   const isContactDisabled = isContactDisabledByVisitorType(formData.type);
   const isCompanyNameDisabled = isCompanyNameDisabledByVisitorType(formData.type);
   const exhibitionDateText = useMemo(() => formatExhibitionDateText(exhibition?.dates), [exhibition?.dates]);
@@ -3737,14 +3725,7 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
 function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, updateMainData, updateBatch, initialMode }) {
   const { formUrlVisitor, visitorFormConfig } = exhibition;
   const normalizedVisitorFormConfig = useMemo(() => normalizeVisitorFormConfig(visitorFormConfig), [visitorFormConfig]);
-  const canonicalVisitorFormUrl = useMemo(() => {
-    const baseUrl = `${window.location.origin}${window.location.pathname}`;
-    return `${baseUrl}?mode=visitor_register&id=${exhibition.id}`;
-  }, [exhibition.id]);
-  const isLocalHost = useMemo(() => {
-    const host = window.location.hostname;
-    return host === 'localhost' || host === '127.0.0.1';
-  }, []);
+  const canonicalVisitorFormUrl = useMemo(() => buildVisitorRegisterUrl(exhibition.id), [exhibition.id]);
   const [mode, setMode] = useState(initialMode || 'dashboard');
   const [showSimulatedPublicForm, setShowSimulatedPublicForm] = useState(false);
   const [lastScannedVisitor, setLastScannedVisitor] = useState(null);
@@ -3766,7 +3747,7 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
 
   // Copy function for TabEntrance
   const copyVisitorFormUrl = () => {
-    const urlToCopy = (formUrlVisitor || '').trim() || canonicalVisitorFormUrl;
+    const urlToCopy = canonicalVisitorFormUrl;
     if (!urlToCopy) return;
     navigator.clipboard.writeText(urlToCopy);
     setIsCopied(true);
@@ -3778,25 +3759,10 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
   }, [initialMode]);
 
   useEffect(() => {
-    const raw = JSON.stringify(visitorFormConfig || {});
-    const normalized = JSON.stringify(normalizedVisitorFormConfig || {});
-    if (raw !== normalized) {
-      updateMainData('visitorFormConfig', normalizedVisitorFormConfig);
-    }
-  }, [normalizedVisitorFormConfig, updateMainData, visitorFormConfig]);
-
-  useEffect(() => {
-    if (isLocalHost) return;
-    const current = (formUrlVisitor || '').trim();
-    if (!current || current !== canonicalVisitorFormUrl) {
-      updateMainData('formUrlVisitor', canonicalVisitorFormUrl);
-    }
-  }, [canonicalVisitorFormUrl, formUrlVisitor, isLocalHost, updateMainData]);
-
-  const handleConfigSave = (newConfig) => {
-    updateMainData('visitorFormConfig', normalizeVisitorFormConfig(newConfig));
-    setMode('dashboard');
-  };
+    const currentUrl = (formUrlVisitor || '').trim();
+    if (currentUrl === canonicalVisitorFormUrl) return;
+    updateMainData('formUrlVisitor', canonicalVisitorFormUrl);
+  }, [canonicalVisitorFormUrl, formUrlVisitor, updateMainData]);
 
   // 実機スキャン用ハンドラ (react-qr-scanner用) - 修正版
   const handleRealScan = (dataString) => {
@@ -3855,7 +3821,7 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
         <button onClick={() => setMode('dashboard')} className={`flex-1 md:flex-none text-left px-4 py-3 rounded-lg font-bold flex items-center justify-center md:justify-start gap-2 whitespace-nowrap ${mode === 'dashboard' ? 'bg-blue-100 text-blue-700' : 'hover:bg-slate-100 text-slate-600'}`}><List size={18} /> <span className="hidden md:inline">来場者リスト</span><span className="md:hidden">リスト</span></button>
         <button onClick={() => setMode('scanner')} className={`flex-1 md:flex-none text-left px-4 py-3 rounded-lg font-bold flex items-center justify-center md:justify-start gap-2 whitespace-nowrap ${mode === 'scanner' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-100 text-slate-600'}`}><ScanLine size={18} /> <span className="hidden md:inline">QR受付スキャン</span><span className="md:hidden">スキャン</span></button>
         <div className="border-t my-2 hidden md:block"></div>
-        <button onClick={() => setMode('editForm')} className={`flex-1 md:flex-none text-left px-4 py-3 rounded-lg font-bold flex items-center justify-center md:justify-start gap-2 whitespace-nowrap ${mode === 'editForm' ? 'bg-indigo-100 text-indigo-700' : 'hover:bg-slate-100 text-slate-600'}`}><Settings size={18} /> <span className="hidden md:inline">登録フォーム編集</span><span className="md:hidden">設定</span></button>
+        <button onClick={() => setMode('editForm')} className={`flex-1 md:flex-none text-left px-4 py-3 rounded-lg font-bold flex items-center justify-center md:justify-start gap-2 whitespace-nowrap ${mode === 'editForm' ? 'bg-indigo-100 text-indigo-700' : 'hover:bg-slate-100 text-slate-600'}`}><Settings size={18} /> <span className="hidden md:inline">登録フォーム（閲覧のみ）</span><span className="md:hidden">閲覧</span></button>
       </div>
 
       <div className="flex-1 overflow-y-auto bg-white p-4 md:p-8">
@@ -3869,8 +3835,8 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
                 <div className="relative w-full">
                   <input
                     type="text"
-                    value={formUrlVisitor || canonicalVisitorFormUrl}
-                    onChange={(e) => updateMainData('formUrlVisitor', e.target.value)}
+                    value={canonicalVisitorFormUrl}
+                    readOnly
                     className="bg-slate-800 text-blue-300 text-xs px-3 py-2 rounded border border-slate-700 w-full focus:ring-1 focus:ring-blue-500 outline-none"
                     placeholder="https://..."
                   />
@@ -4022,7 +3988,7 @@ function TabEntrance({ exhibition, updateVisitorCount, visitors, setVisitors, up
           </div>
         )}
 
-        {mode === 'editForm' && <VisitorFormEditor config={normalizedVisitorFormConfig} onSave={handleConfigSave} />}
+        {mode === 'editForm' && <VisitorFormEditor config={normalizedVisitorFormConfig} />}
       </div>
       {showSimulatedPublicForm && <SimulatedPublicVisitorForm config={normalizedVisitorFormConfig} exhibition={exhibition} onClose={() => setShowSimulatedPublicForm(false)} onSubmit={handlePublicRegister} />}
     </div>
@@ -5692,7 +5658,7 @@ const ALL_TAB_DEFINITIONS = [
 // 公開フォーム: ダウンロード機能付き（スマホ対応修正版）
 // -----------------------------------------------------------
 function PublicVisitorView({ exhibition, onSubmit }) {
-  const visitorFormConfig = useMemo(() => normalizeVisitorFormConfig(exhibition?.visitorFormConfig), [exhibition?.visitorFormConfig]);
+  const visitorFormConfig = useMemo(() => getPublicVisitorFormConfig(exhibition?.visitorFormConfig), [exhibition?.visitorFormConfig]);
   const [formData, setFormData] = useState({});
   const [submitted, setSubmitted] = useState(false);
   const [qrData, setQrData] = useState(null);
@@ -6307,7 +6273,7 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
       {isMobileMenuOpen && <div className="fixed inset-0 bg-black/50 z-30 md:hidden" onClick={() => setIsMobileMenuOpen(false)}></div>}
 
       {/* Main Content */}
-      <div className="flex-1 md:w-full w-full h-[calc(100vh-60px)] md:h-screen overflow-y-auto">
+      <div className="flex-1 md:w-full w-full min-h-0 overflow-y-auto">
         {/* Header */}
         <header className="bg-white shadow-sm sticky top-0 z-30 px-4 md:px-8 py-4 flex justify-between items-center">
           <h2 className="text-lg md:text-xl font-bold text-slate-800 truncate max-w-[200px] md:max-w-none">
@@ -8510,10 +8476,11 @@ function App() {
     setMasterMakers,
     masterMakersLoaded,
     masterMakersRef
-  } = useMasterMakersSync({ db, appId, view });
+  } = useMasterMakersSync({ db, appId });
 
-  // ★最適化: useRefを使用してonSnapshotコールバック内で最新値を参照（再購読防止）
+  // ★最適化: useRefを使用してsyncコールバック内で最新値を参照（再購読防止）
   const selectedExhibitionRef = useRef(null);
+  const recentExhibitionWritesRef = useRef(new globalThis.Map());
 
   // ★最適化: selectedExhibition の変更を Ref に同期（コールバック内で最新値を参照するため）
   useEffect(() => {
@@ -8563,6 +8530,11 @@ function App() {
 
   const PASSCODE = 'kuwanatakashi';
 
+  useEffect(() => {
+    globalThis.__APP_BUILD_TAG__ = APP_BUILD_TAG;
+    console.info(`[Build] ${APP_BUILD_TAG}`);
+  }, []);
+
   const handleLogin = () => {
     if (loginPassword === PASSCODE) {
       localStorage.setItem('exhibition_auth', 'true');
@@ -8598,20 +8570,15 @@ function App() {
     }
   }, []);
 
-  // 1. Data Fetching Effect (Stable) - Uses uid to prevent re-subscription on auth state changes
+  // 1. Data Fetching Effect (Stable) - Realtime subscription, never writes inside listener.
   useEffect(() => {
     if (!user || !db || !appId) return;
 
-    console.log('[Firebase] Setting up onSnapshot subscription for uid:', user.uid);
-
     const exRef = collection(db, 'artifacts', appId, 'public', 'data', 'exhibitions');
 
-    const unsubscribe = onSnapshot(exRef, (snapshot) => {
+    const applySnapshotDocs = (docs) => {
       try {
-        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        console.log('[Firebase] Received', data.length, 'exhibitions');
-
-        // Ensure uniqueness safely
+        const data = docs.map((snapshotDoc) => ({ id: snapshotDoc.id, ...snapshotDoc.data() }));
         const seenIds = new Set();
         const uniqueData = [];
         for (const item of data) {
@@ -8621,78 +8588,55 @@ function App() {
           }
         }
 
-        const normalizationTargets = [];
         const normalizedData = uniqueData.map((item) => {
-          const updates = {};
-          let normalizedItem = item;
-
           const normalizedVisitorFormConfig = normalizeVisitorFormConfig(item.visitorFormConfig);
-          const rawConfig = JSON.stringify(item.visitorFormConfig || {});
-          const normalizedConfig = JSON.stringify(normalizedVisitorFormConfig || {});
-          if (rawConfig !== normalizedConfig) {
-            updates.visitorFormConfig = normalizedVisitorFormConfig;
-            normalizedItem = { ...normalizedItem, visitorFormConfig: normalizedVisitorFormConfig };
-          }
-
-          if (item.taskTemplateVersion !== TASK_TEMPLATE_VERSION || !Array.isArray(item.tasks)) {
-            const normalizedTasks = buildFixedTaskTemplate();
-            updates.tasks = normalizedTasks;
-            updates.taskTemplateVersion = TASK_TEMPLATE_VERSION;
-            normalizedItem = { ...normalizedItem, tasks: normalizedTasks, taskTemplateVersion: TASK_TEMPLATE_VERSION };
-          }
-
-          if (Object.keys(updates).length > 0) {
-            normalizationTargets.push({ id: item.id, updates });
-          }
-
-          return normalizedItem;
+          const normalizedTasks =
+            item.taskTemplateVersion === TASK_TEMPLATE_VERSION && Array.isArray(item.tasks)
+              ? item.tasks
+              : buildFixedTaskTemplate();
+          return {
+            ...item,
+            visitorFormConfig: normalizedVisitorFormConfig,
+            tasks: normalizedTasks,
+            taskTemplateVersion: TASK_TEMPLATE_VERSION
+          };
         });
 
         normalizedData.sort((a, b) => b.createdAt - a.createdAt);
         setExhibitions(normalizedData);
 
-        if (normalizationTargets.length > 0) {
-          Promise.allSettled(
-            normalizationTargets.map((target) => {
-              const targetRef = doc(db, 'artifacts', appId, 'public', 'data', 'exhibitions', target.id);
-              return updateDoc(targetRef, target.updates);
-            })
-          ).then((results) => {
-            const rejected = results.filter(r => r.status === 'rejected');
-            if (rejected.length > 0) {
-              console.warn('[Exhibition] normalization update partially failed', rejected);
-            }
-          });
-        }
-
-        // ★最適化: onSnapshot内でselectedExhibitionを直接同期（不要なEffect再実行を防止）
         const currentSelectedId = selectedExhibitionRef.current?.id;
-        if (currentSelectedId) {
-          const latest = normalizedData.find(e => e.id === currentSelectedId);
-          if (latest) {
-            selectedExhibitionRef.current = latest;
-            setSelectedExhibition(latest);
-          }
+        if (!currentSelectedId) return;
+        const latest = normalizedData.find((item) => item.id === currentSelectedId);
+        if (latest) {
+          selectedExhibitionRef.current = latest;
+          setSelectedExhibition(latest);
         }
-      } catch (err) {
-        console.error("Error in onSnapshot processing:", err);
-        setExhibitions([]); // Fallback to empty to unblock loading
+      } catch (error) {
+        console.error('Error in exhibitions sync processing:', error);
+        setExhibitions([]);
       }
-    }, (error) => {
-      console.error("Firestore sync error:", error);
-      setExhibitions([]); // Fallback
-    });
+    };
+
+    console.log('[Firebase] Setting up onSnapshot subscription for uid:', user.uid);
+    const unsubscribe = onSnapshot(
+      exRef,
+      (snapshot) => {
+        console.log('[Firebase] Realtime exhibitions update:', snapshot.size);
+        applySnapshotDocs(snapshot.docs);
+      },
+      (error) => {
+        console.error('Firestore realtime sync error:', error);
+        setExhibitions([]);
+      }
+    );
 
     return () => {
       console.log('[Firebase] Cleaning up onSnapshot subscription');
       unsubscribe();
     };
   }, [user?.uid, db, appId]); // Use uid instead of user object to prevent re-subscription
-
-  // 2. View Routing & Logic Effect (Reactive) - ★最適化: 初回ロード時とURLパラメータ変更時のみ実行
-  // selectedExhibitionの同期はonSnapshot内で直接行うため、ここでは不要
-  const exhibitionsLoadedRef = useRef(false);
-
+  // 2. View Routing & Logic Effect (Reactive)
   useEffect(() => {
     // Wait for exhibitions to be loaded (not null)
     if (exhibitions === null) {
@@ -8705,28 +8649,23 @@ function App() {
       return;
     }
 
-    // ★最適化: 初回ロード完了後は urlMode/targetExhibitionId 変更時のみ実行
-    if (exhibitionsLoadedRef.current) {
-      return;
-    }
-    exhibitionsLoadedRef.current = true;
-
     // Safety for empty array
     const data = exhibitions;
+    const findExhibitionById = (id) => data.find((exhibition) => exhibition.id === id);
 
     if (urlMode === 'visitor_register' && targetExhibitionId) {
-      const target = data.find(e => e.id === targetExhibitionId);
+      const target = findExhibitionById(targetExhibitionId);
       if (target) { setSelectedExhibition(target); setView('public_visitor_form'); }
       else { setView('not_found'); }
     } else if (urlMode === 'maker_register' && targetExhibitionId) {
-      const target = data.find(e => e.id === targetExhibitionId);
+      const target = findExhibitionById(targetExhibitionId);
       if (target) { setSelectedExhibition(target); setView('public_maker_form'); }
       else { setView('not_found'); }
     } else if (urlMode === 'dashboard') { // Maker Dashboard Logic
       const params = new URLSearchParams(window.location.search);
       const key = params.get('key');
       if (key && targetExhibitionId) {
-        const target = data.find(e => e.id === targetExhibitionId);
+        const target = findExhibitionById(targetExhibitionId);
         if (target) {
           const maker = (target.makers || []).find(m => m.accessToken === key);
           if (maker) {
@@ -8781,7 +8720,7 @@ function App() {
     } else if (urlMode === 'demo_maker_form') {
       const params = new URLSearchParams(window.location.search);
       const id = params.get('id');
-      const targetEx = data.find(e => e.id === id);
+      const targetEx = findExhibitionById(id);
 
       if (targetEx) {
         setSelectedExhibition(targetEx);
@@ -8821,7 +8760,7 @@ function App() {
       const id = params.get('id');
       let targetEx = null;
       if (id) {
-        targetEx = data.find(e => e.id === id);
+        targetEx = findExhibitionById(id);
       } else {
         const relevant = data.filter(e => (e.makers || []).some(m => m.code === code));
         if (relevant.length > 0) {
@@ -8852,7 +8791,7 @@ function App() {
     const finalImg = newExhibition.imageUrl || 'https://images.unsplash.com/photo-1540575467063-178a50c2df87?auto=format&fit=crop&w=800&q=80';
     const baseUrl = window.location.origin + window.location.pathname;
     const formUrlMaker = `${baseUrl}?mode=maker_register&id=${id}`;
-    const formUrlVisitor = `${baseUrl}?mode=visitor_register&id=${id}`;
+    const formUrlVisitor = buildVisitorRegisterUrl(id);
 
     // メーカー初期リストは空配列を使用（CSV取込前提）
     const newProject = {
@@ -8875,35 +8814,138 @@ function App() {
   };
 
   const deleteExhibition = async (id) => { if (window.confirm("削除しますか？")) { await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'exhibitions', id)); if (selectedExhibition?.id === id) setView('dashboard'); } };
+  const getExhibitionForWrite = (id) => {
+    if (!id) return null;
+    if (selectedExhibition?.id === id) return selectedExhibition;
+    if (!Array.isArray(exhibitions)) return null;
+    return exhibitions.find((item) => item.id === id) || null;
+  };
+
+  const isProtectedWriteBlocked = (key) => PROTECTED_EXHIBITION_WRITE_KEYS.has(key) && !isAuthenticated;
+
+  const shouldSkipDuplicateWrite = (id, payload) => {
+    const now = Date.now();
+    for (const [cacheKey, timestamp] of recentExhibitionWritesRef.current.entries()) {
+      if (now - timestamp > EXHIBITION_WRITE_DEDUP_WINDOW_MS) {
+        recentExhibitionWritesRef.current.delete(cacheKey);
+      }
+    }
+
+    const signature = `${id}:${safeJsonStringify(payload)}`;
+    const lastTimestamp = recentExhibitionWritesRef.current.get(signature);
+    if (lastTimestamp && now - lastTimestamp < EXHIBITION_WRITE_DEDUP_WINDOW_MS) {
+      return true;
+    }
+    recentExhibitionWritesRef.current.set(signature, now);
+    return false;
+  };
+
+  const applyLocalExhibitionPatch = (id, patch) => {
+    if (!patch || Object.keys(patch).length === 0) return;
+    setExhibitions((prev) =>
+      Array.isArray(prev)
+        ? prev.map((item) => (item.id === id ? { ...item, ...patch } : item))
+        : prev
+    );
+    if (selectedExhibition?.id === id) {
+      setSelectedExhibition((prev) => (prev ? { ...prev, ...patch } : prev));
+    }
+  };
+
   const updateExhibitionData = async (id, key, value) => {
+    if (!id || !db || !appId) return;
+    if (EMERGENCY_DISABLE_VISITOR_FORM_CONFIG_WRITES && isBlockedUpdateFieldPath(key)) {
+      console.warn('[WriteGuard] Emergency blocked write to visitorFormConfig', {
+        key,
+        exhibitionId: id,
+        mode: urlMode,
+        stack: new Error().stack
+      });
+      return;
+    }
+    if (isProtectedWriteBlocked(key)) {
+      console.warn(`[WriteGuard] Blocked unauthenticated write to protected key: ${key}`);
+      return;
+    }
+
+    const current = getExhibitionForWrite(id);
+    if (current && isDeepEqual(current[key], value)) {
+      return;
+    }
+
+    const payload = { [key]: value };
+    if (shouldSkipDuplicateWrite(id, payload)) {
+      console.log(`[WriteGuard] Suppressed duplicate write: ${key}`);
+      return;
+    }
+
     try {
       console.log(`[DEBUG] Updating single key: ${key}`, value);
       const exRef = doc(db, 'artifacts', appId, 'public', 'data', 'exhibitions', id);
-      if (selectedExhibition?.id === id) setSelectedExhibition(prev => ({ ...prev, [key]: value }));
-      await updateDoc(exRef, { [key]: value });
+      applyLocalExhibitionPatch(id, payload);
+      const updated = await guardedUpdateDoc(exRef, payload, `updateExhibitionData:${key}`);
+      if (!updated) return;
       console.log(`[DEBUG] Successfully updated ${key}`);
     } catch (e) {
       console.error(`[DEBUG] Error updating ${key}:`, e);
-      alert(`保存エラー (${key}): ` + e.message);
+      alert(`Update error (${key}): ` + e.message);
     }
   };
+
   const batchUpdateExhibitionData = async (id, updates) => {
+    if (!id || !db || !appId || !updates || typeof updates !== 'object') return;
+
+    const filteredEntries = Object.entries(updates).filter(([key]) => {
+      if (EMERGENCY_DISABLE_VISITOR_FORM_CONFIG_WRITES && isBlockedUpdateFieldPath(key)) {
+        console.warn('[WriteGuard] Emergency blocked batch write to visitorFormConfig', {
+          key,
+          exhibitionId: id,
+          mode: urlMode,
+          stack: new Error().stack
+        });
+        return false;
+      }
+      if (isProtectedWriteBlocked(key)) {
+        console.warn(`[WriteGuard] Blocked unauthenticated write to protected key: ${key}`);
+        return false;
+      }
+      return true;
+    });
+    if (filteredEntries.length === 0) return;
+
+    const current = getExhibitionForWrite(id);
+    const changedUpdates = {};
+    for (const [key, value] of filteredEntries) {
+      if (!current || !isDeepEqual(current[key], value)) {
+        changedUpdates[key] = value;
+      }
+    }
+    if (Object.keys(changedUpdates).length === 0) {
+      return;
+    }
+
+    if (shouldSkipDuplicateWrite(id, changedUpdates)) {
+      console.log('[WriteGuard] Suppressed duplicate batch write');
+      return;
+    }
+
     try {
-      console.log('[DEBUG] Batch updating exhibition:', updates);
-      // 特別に日付データをチェック
-      if (updates.dates) console.log('[DEBUG] Dates to save:', updates.dates);
-      if (updates.preDates) console.log('[DEBUG] PreDates to save:', updates.preDates);
+      console.log('[DEBUG] Batch updating exhibition:', changedUpdates);
+      if (changedUpdates.dates) console.log('[DEBUG] Dates to save:', changedUpdates.dates);
+      if (changedUpdates.preDates) console.log('[DEBUG] PreDates to save:', changedUpdates.preDates);
 
       const exRef = doc(db, 'artifacts', appId, 'public', 'data', 'exhibitions', id);
-      if (selectedExhibition?.id === id) setSelectedExhibition(prev => ({ ...prev, ...updates }));
-      await updateDoc(exRef, updates);
+      applyLocalExhibitionPatch(id, changedUpdates);
+      const updated = await guardedUpdateDoc(exRef, changedUpdates, 'batchUpdateExhibitionData');
+      if (!updated) return;
       console.log('[DEBUG] Batch update success');
       console.log('Batch update success');
     } catch (e) {
       console.error('[DEBUG] Batch update error:', e);
-      alert('一括保存エラー: ' + e.message);
+      alert('Batch update error: ' + e.message);
     }
   };
+
   const updateVisitorCount = async (id, n) => { updateExhibitionData(id, 'currentVisitors', n); };
   const handlePublicSubmit = async (type, data) => {
     if (!selectedExhibition) return;
@@ -9211,7 +9253,7 @@ function App() {
       }
 
       const exRef = doc(db, 'artifacts', appId, 'public', 'data', 'exhibitions', exhibitionId);
-      await updateDoc(exRef, { messages: updatedMessages });
+      await guardedUpdateDoc(exRef, { messages: updatedMessages }, 'markMessageAsRead');
     } catch (e) {
       console.error('Error marking message as read:', e);
     }
@@ -9430,7 +9472,7 @@ function App() {
 
       {!isSimpleMobileMode && isMobileMenuOpen && <div className="fixed inset-0 bg-black/50 z-30 md:hidden" onClick={() => setIsMobileMenuOpen(false)}></div>}
 
-      <main ref={mainRef} className="flex-1 h-[calc(100vh-60px)] md:h-screen overflow-y-auto bg-slate-50 relative">
+      <main ref={mainRef} className="flex-1 min-h-0 overflow-y-auto bg-slate-50 relative">
         <div className="p-4 md:p-10 max-w-7xl mx-auto">
           {showSimpleHome ? (
             <MobileEventSimpleView

@@ -93,7 +93,13 @@ const INITIAL_INTERNAL_SUPPLIES = [
 // ▼ メーカーリスト初期値（CSV取込前提のため空配列）
 const FIXED_MAKERS_LIST = [];
 
-const TASK_TEMPLATE_VERSION = 20260208;
+const TASK_TEMPLATE_VERSION = 20260213;
+const PLANNING_FLYER_CREATION_TASK_TITLE = '案内チラシ作成（メーカー確定・講演会確定後）';
+const PLANNING_FLYER_FIXED_SUBTASK_TITLES = [
+  '得意先チラシFAX送付（対象県）',
+  'チラシ印刷依頼',
+  '介援隊WEBアップロード'
+];
 const SALES_TASK_TITLES = [
   '展示会場選び',
   '展示会日時・エリアの決定',
@@ -126,7 +132,8 @@ const PLANNING_TASK_TITLES = [
   'メーカー招待実行（営業から指示あり次第）',
   'メーカー追加招待（営業から指示あり次第）',
   'メーカー回答催促',
-  '案内チラシ作成（メーカー確定・講演会確定後）',
+  PLANNING_FLYER_CREATION_TASK_TITLE,
+  ...PLANNING_FLYER_FIXED_SUBTASK_TITLES,
   'メーカー確定案内メール',
   'メーカーへチラシ配布を依頼',
   'チラシ配布以外の集客戦略を実行',
@@ -155,6 +162,46 @@ const buildFixedTaskTemplate = () => [
     desc: ''
   }))
 ];
+
+const normalizeTaskShape = (task, fallbackTask = null) => ({
+  id: task?.id || fallbackTask?.id || crypto.randomUUID(),
+  category:
+    task?.category === 'sales' || task?.category === 'planning'
+      ? task.category
+      : fallbackTask?.category || 'planning',
+  title: task?.title || fallbackTask?.title || '',
+  status: task?.status === 'done' ? 'done' : 'pending',
+  assignees: Array.isArray(task?.assignees) ? task.assignees : [],
+  dueDate: typeof task?.dueDate === 'string' ? task.dueDate : '',
+  desc: typeof task?.desc === 'string' ? task.desc : ''
+});
+
+const mergeTasksWithTemplate = (tasks) => {
+  const fixedTemplateTasks = buildFixedTaskTemplate();
+  const existingTasks = Array.isArray(tasks) ? [...tasks] : [];
+
+  const mergedFixedTasks = fixedTemplateTasks.map((templateTask) => {
+    const matchIndex = existingTasks.findIndex(
+      (task) => task?.category === templateTask.category && task?.title === templateTask.title
+    );
+
+    if (matchIndex === -1) {
+      return normalizeTaskShape(
+        { ...templateTask, id: `fixed:${templateTask.category}:${templateTask.title}` },
+        templateTask
+      );
+    }
+
+    const [matchedTask] = existingTasks.splice(matchIndex, 1);
+    return normalizeTaskShape(matchedTask, templateTask);
+  });
+
+  const customTasks = existingTasks
+    .filter((task) => task && typeof task.title === 'string' && task.title.trim())
+    .map((task) => normalizeTaskShape(task));
+
+  return [...mergedFixedTasks, ...customTasks];
+};
 
 const INITIAL_TASKS = buildFixedTaskTemplate();
 
@@ -3631,20 +3678,23 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
                   </td>
                   <td className="p-4 text-xs text-slate-600">
                     {(() => {
-                      const masterMaker = masterMakers.find(mm => mm.code === m.code);
-                      if (m.code && masterMaker) {
+                      const makerCode = String(m.code || '').trim();
+                      const masterMaker = makerCode
+                        ? masterMakers.find(mm => String(mm.code || '').trim() === makerCode)
+                        : null;
+                      if (makerCode && masterMaker) {
                         return (
                           <div className="flex items-center gap-2">
-                            <a href={`${window.location.origin}${window.location.pathname}?mode=maker&code=${m.code}`} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline flex items-center gap-1">
+                            <a href={`${window.location.origin}${window.location.pathname}?mode=maker&code=${makerCode}`} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline flex items-center gap-1">
                               <LinkIcon size={12} /> ポータル
                             </a>
-                            <button onClick={() => { navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?mode=maker&code=${m.code}`); alert('URLをコピーしました'); }} className="text-slate-400 hover:text-blue-500" title="URLをコピー">
+                            <button onClick={() => { navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?mode=maker&code=${makerCode}`); alert('URLをコピーしました'); }} className="text-slate-400 hover:text-blue-500" title="URLをコピー">
                               <Copy size={12} />
                             </button>
                           </div>
                         );
                       }
-                      return <span className="text-slate-400">未登録 (No Code)</span>;
+                      return <span className="text-slate-400">{makerCode ? '未登録' : '未登録 (No Code)'}</span>;
                     })()}
                   </td>
                   <td className="p-4 text-slate-500 text-xs truncate max-w-[150px]">{m.note}</td>
@@ -6045,10 +6095,11 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
 
   // Filter exhibitions where this maker is invited (idでのみ重複排除)
   // NOTE: タイトル/日付で重複排除すると、別展示会の履歴が見えなくなるため禁止
+  const makerCode = String(maker.code || '').trim();
   const myExhibitions = useMemo(() => {
     const raw = exhibitions.filter(ex => {
       const makers = ex.makers || [];
-      return makers.some(m => m.code === maker.code);
+      return makers.some(m => String(m.code || '').trim() === makerCode);
     });
     const seenIds = new Set();
     return raw.filter((ex) => {
@@ -6056,12 +6107,12 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
       seenIds.add(ex.id);
       return true;
     });
-  }, [exhibitions, maker.code]);
+  }, [exhibitions, makerCode]);
 
   // Categorize exhibitions
   const today = new Date();
   const getStatus = (ex) => {
-    const m = (ex.makers || []).find(m => m.code === maker.code);
+    const m = (ex.makers || []).find((item) => String(item.code || '').trim() === makerCode);
     if (!m) return 'none';
     return m.status || 'invited';
   };
@@ -6703,67 +6754,189 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
                 );
               })()}
 
-              {/* 2. Response Data - Fixed to also check root level data */}
+              {/* 2. Response Data */}
               {(() => {
-                const myInfo = (selectedExhibition.makers || []).find(m => m.code === maker.code);
-                if (!myInfo) return null;
+                const normalizeIdentity = (value) => String(value || '').trim();
 
-                // Check both myInfo.response and myInfo directly for data
-                const response = myInfo.response || {};
-                const hasResponseData = Object.keys(response).some(k => response[k] !== undefined && response[k] !== '');
+                const isNonEmptyValue = (value) => {
+                  if (value === undefined || value === null) return false;
+                  if (typeof value === 'string') return value.trim() !== '';
+                  if (Array.isArray(value)) return value.length > 0;
+                  return true;
+                };
 
-                // Also check root level properties and formData
-                // ★修正: FIELD_ORDERにあるすべてのキーと、formDataからのデータも考慮
-                const rootKeys = [...FIELD_ORDER];
-                const formData = myInfo.formData || {};
+                const toSafeObject = (value) => (
+                  value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+                );
 
-                // formData も mergedData に追加
-                Object.keys(formData).forEach(k => {
-                  if (!rootKeys.includes(k)) rootKeys.push(k);
+                const isAiProposalNote = (value) => (
+                  typeof value === 'string' && /^\s*\[AI/i.test(value)
+                );
+
+                const normalizeMakerStatus = (value) => {
+                  const raw = normalizeIdentity(value).toLowerCase();
+                  if (!raw) return '';
+                  if (raw === 'declined' || raw.includes('申し込まない') || raw.includes('辞退')) return 'declined';
+                  if (raw === 'confirmed' || raw.includes('申し込む') || raw.includes('参加確定')) return 'confirmed';
+                  return raw;
+                };
+                const isDeclineStatusValue = (value) => normalizeMakerStatus(value) === 'declined';
+
+                const myCode = normalizeIdentity(maker.code);
+                const myId = normalizeIdentity(maker.id);
+                const configuredFieldIds = [
+                  ...(selectedExhibition?.formConfig?.section1?.items || []),
+                  ...(selectedExhibition?.formConfig?.section2?.items || []),
+                  ...(selectedExhibition?.formConfig?.section3?.items || [])
+                ]
+                  .map((item) => item?.id)
+                  .filter((id) => typeof id === 'string' && id.trim());
+                const CONTACT_KEYS = new Set(['companyName', 'companyNameKana', 'repName', 'phone', 'email']);
+                const EXTRA_KEYS = ['declineReason'];
+                const DECLINED_DISPLAY_KEYS = ['companyName', 'companyNameKana', 'repName', 'phone', 'email', 'status', 'declineReason'];
+                const baseFieldKeys = Array.from(new Set([...FIELD_ORDER, ...EXTRA_KEYS, ...configuredFieldIds]));
+                const detailKeys = baseFieldKeys.filter((key) => !CONTACT_KEYS.has(key));
+
+                const scoreMakerRecord = (record) => {
+                  const response = toSafeObject(record.response);
+                  const formData = toSafeObject(record.formData);
+                  const payload = { ...formData, ...response };
+                  const payloadDetailCount = detailKeys.filter((key) => {
+                    const value = payload[key];
+                    if (key === 'note' && isAiProposalNote(value)) return false;
+                    return isNonEmptyValue(value);
+                  }).length;
+                  const rootDetailCount = detailKeys.filter((key) => {
+                    const value = record[key];
+                    if (key === 'note' && isAiProposalNote(value)) return false;
+                    return isNonEmptyValue(value);
+                  }).length;
+                  const payloadAnyCount = Object.keys(payload).filter((key) => isNonEmptyValue(payload[key])).length;
+                  const respondedAtMsRaw = new Date(record.respondedAt || record.applicationDate || 0).getTime();
+                  const respondedAtMs = Number.isFinite(respondedAtMsRaw) ? respondedAtMsRaw : 0;
+                  return { payloadDetailCount, rootDetailCount, payloadAnyCount, respondedAtMs };
+                };
+
+                const candidates = (selectedExhibition.makers || []).filter((m) => {
+                  const makerCode = normalizeIdentity(m.code);
+                  const makerId = normalizeIdentity(m.id);
+                  if (myCode && makerCode && makerCode === myCode) return true;
+                  if (myId && makerId && makerId === myId) return true;
+                  return false;
+                });
+                if (candidates.length === 0) return null;
+
+                const myInfo = [...candidates].sort((a, b) => {
+                  const scoreA = scoreMakerRecord(a);
+                  const scoreB = scoreMakerRecord(b);
+                  if (scoreB.payloadDetailCount !== scoreA.payloadDetailCount) return scoreB.payloadDetailCount - scoreA.payloadDetailCount;
+                  if (scoreB.rootDetailCount !== scoreA.rootDetailCount) return scoreB.rootDetailCount - scoreA.rootDetailCount;
+                  if (scoreB.payloadAnyCount !== scoreA.payloadAnyCount) return scoreB.payloadAnyCount - scoreA.payloadAnyCount;
+                  return scoreB.respondedAtMs - scoreA.respondedAtMs;
+                })[0];
+
+                const response = toSafeObject(myInfo.response);
+                const formData = toSafeObject(myInfo.formData);
+                const payload = { ...formData, ...response };
+                const makerStatus = normalizeMakerStatus(myInfo.status || payload.status);
+                const payloadDetailCount = detailKeys.filter((key) => {
+                  const value = payload[key];
+                  if (key === 'note' && isAiProposalNote(value)) return false;
+                  return isNonEmptyValue(value);
+                }).length;
+                const rootDetailCount = detailKeys.filter((key) => {
+                  const value = myInfo[key];
+                  if (key === 'note' && isAiProposalNote(value)) return false;
+                  return isNonEmptyValue(value);
+                }).length;
+                const isLegacyPublicSource = myInfo.source === 'web_response' || myInfo.source === 'public_form';
+                const hasDeclinePayload = isDeclineStatusValue(payload.status) || isNonEmptyValue(payload.declineReason);
+                const hasDeclineLegacyRoot = isLegacyPublicSource && (isDeclineStatusValue(myInfo.status) || isNonEmptyValue(myInfo.declineReason));
+                const shouldShowResponse =
+                  makerStatus === 'declined'
+                    ? (hasDeclinePayload || hasDeclineLegacyRoot)
+                    : (payloadDetailCount > 0 || rootDetailCount > 0);
+                if (!shouldShowResponse) return null;
+
+                const mergedData = {};
+                const payloadKeys = makerStatus === 'declined'
+                  ? DECLINED_DISPLAY_KEYS
+                  : baseFieldKeys;
+
+                // Prefer explicit payload fields first.
+                payloadKeys.forEach((key) => {
+                  const value = payload[key];
+                  if (!isNonEmptyValue(value)) return;
+                  if (key === 'note' && isAiProposalNote(value)) return;
+                  mergedData[key] = value;
                 });
 
-                const hasRootData = rootKeys.some(k => myInfo[k] !== undefined && myInfo[k] !== '' || formData[k] !== undefined && formData[k] !== '');
+                // Legacy alias mapping for older records.
+                if (makerStatus !== 'declined' && !isNonEmptyValue(mergedData.staffCount) && isNonEmptyValue(myInfo.attendees)) {
+                  mergedData.staffCount = myInfo.attendees;
+                }
 
-                if (!hasResponseData && !hasRootData) return null;
+                const fallbackKeys = makerStatus === 'declined'
+                  ? DECLINED_DISPLAY_KEYS
+                  : baseFieldKeys;
 
-                // Merge root data and formData into response for display
-                // ★修正: formDataからのデータも追加
-                const mergedData = { ...response };
-                rootKeys.forEach(k => {
-                  // 1. Root level data
-                  if (myInfo[k] !== undefined && myInfo[k] !== '' && !mergedData[k]) {
-                    mergedData[k] = myInfo[k];
-                  }
-                  // 2. formData (過去のフォーム方式からの回答)
-                  if (formData[k] !== undefined && formData[k] !== '' && !mergedData[k]) {
-                    mergedData[k] = formData[k];
-                  }
+                // Backfill missing keys from root-level legacy storage.
+                fallbackKeys.forEach((key) => {
+                  if (isNonEmptyValue(mergedData[key])) return;
+                  const value = myInfo[key];
+                  if (!isNonEmptyValue(value)) return;
+                  if (key === 'note' && isAiProposalNote(value)) return;
+                  mergedData[key] = value;
                 });
+
+                // Keep non-standard payload keys visible as supplemental info.
+                if (makerStatus !== 'declined') {
+                  Object.keys(payload).forEach((key) => {
+                    if (baseFieldKeys.includes(key)) return;
+                    const value = payload[key];
+                    if (!isNonEmptyValue(value)) return;
+                    if (key === 'note' && isAiProposalNote(value)) return;
+                    mergedData[key] = value;
+                  });
+                }
+
+                if (makerStatus === 'declined' && !isNonEmptyValue(mergedData.status)) {
+                  mergedData.status = isNonEmptyValue(myInfo.status) ? myInfo.status : 'declined';
+                }
+
+                // Hide internal AI recommendation memo from maker portal.
+                if (isAiProposalNote(mergedData.note)) {
+                  delete mergedData.note;
+                }
+
+                const orderedKeys = (
+                  makerStatus === 'declined'
+                    ? DECLINED_DISPLAY_KEYS
+                    : [...FIELD_ORDER, ...EXTRA_KEYS]
+                ).filter((key) => isNonEmptyValue(mergedData[key]));
+                const otherKeys = makerStatus === 'declined'
+                  ? []
+                  : Object.keys(mergedData).filter((key) => !orderedKeys.includes(key) && isNonEmptyValue(mergedData[key]));
+                const displayKeys = [...orderedKeys, ...otherKeys];
+
+                if (displayKeys.length === 0) return null;
 
                 return (
                   <div className="bg-white p-6 rounded-2xl shadow-lg border border-slate-100">
                     <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><CheckCircle size={18} className="text-emerald-500" /> 出展申込時の回答内容</h3>
-                    {(() => {
-                      const orderedKeys = FIELD_ORDER.filter(k => mergedData[k] !== undefined && mergedData[k] !== '');
-                      const otherKeys = Object.keys(mergedData).filter(k => !FIELD_ORDER.includes(k) && mergedData[k] !== undefined && mergedData[k] !== '');
-                      const displayKeys = [...orderedKeys, ...otherKeys];
-
-                      return (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-slate-50/50 p-4 rounded-xl">
-                          {displayKeys.map(key => {
-                            const val = mergedData[key];
-                            const label = FIELD_LABELS[key] || key;
-                            const isFullWidth = ['note', 'products', 'powerDetail'].includes(key);
-                            return (
-                              <div key={key} className={`bg-white p-3 rounded-lg border border-slate-100 shadow-sm hover:border-blue-200 transition-colors ${isFullWidth ? 'md:col-span-2' : ''}`}>
-                                <div className="text-[10px] font-bold text-slate-400 mb-1 tracking-wider uppercase">{label}</div>
-                                <div className="text-sm font-medium text-slate-700 whitespace-pre-wrap leading-relaxed">{String(val)}</div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      );
-                    })()}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-slate-50/50 p-4 rounded-xl">
+                      {displayKeys.map((key) => {
+                        const val = mergedData[key];
+                        const label = FIELD_LABELS[key] || key;
+                        const isFullWidth = ['note', 'products', 'powerDetail'].includes(key);
+                        return (
+                          <div key={key} className={`bg-white p-3 rounded-lg border border-slate-100 shadow-sm hover:border-blue-200 transition-colors ${isFullWidth ? 'md:col-span-2' : ''}`}>
+                            <div className="text-[10px] font-bold text-slate-400 mb-1 tracking-wider uppercase">{label}</div>
+                            <div className="text-sm font-medium text-slate-700 whitespace-pre-wrap leading-relaxed">{String(val)}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 );
               })()}
@@ -8476,7 +8649,7 @@ function App() {
     setMasterMakers,
     masterMakersLoaded,
     masterMakersRef
-  } = useMasterMakersSync({ db, appId });
+  } = useMasterMakersSync({ db, appId, view });
 
   // ★最適化: useRefを使用してsyncコールバック内で最新値を参照（再購読防止）
   const selectedExhibitionRef = useRef(null);
@@ -8590,10 +8763,7 @@ function App() {
 
         const normalizedData = uniqueData.map((item) => {
           const normalizedVisitorFormConfig = normalizeVisitorFormConfig(item.visitorFormConfig);
-          const normalizedTasks =
-            item.taskTemplateVersion === TASK_TEMPLATE_VERSION && Array.isArray(item.tasks)
-              ? item.tasks
-              : buildFixedTaskTemplate();
+          const normalizedTasks = mergeTasksWithTemplate(item.tasks);
           return {
             ...item,
             visitorFormConfig: normalizedVisitorFormConfig,
@@ -8974,10 +9144,19 @@ function App() {
 
       // 既存のメーカーリストから会社名またはメールで検索
       const existingMakers = current.makers || [];
-      const existingIndex = existingMakers.findIndex(m =>
-        (m.companyName && m.companyName === data.companyName) ||
-        (m.email && m.email === data.email)
-      );
+      const normalizeIdentity = (value) => String(value || '').trim();
+      const submittedCode = normalizeIdentity(data.code || data.supplierCode);
+      const submittedCompanyName = normalizeIdentity(data.companyName);
+      const submittedEmail = normalizeIdentity(data.email).toLowerCase();
+      const existingIndex = existingMakers.findIndex((m) => {
+        const makerCode = normalizeIdentity(m.code || m.supplierCode);
+        const makerCompanyName = normalizeIdentity(m.companyName);
+        const makerEmail = normalizeIdentity(m.email).toLowerCase();
+        if (submittedCode && makerCode && submittedCode === makerCode) return true;
+        if (submittedCompanyName && makerCompanyName && submittedCompanyName === makerCompanyName) return true;
+        if (submittedEmail && makerEmail && submittedEmail === makerEmail) return true;
+        return false;
+      });
 
       if (existingIndex >= 0) {
         // 既存メーカーを更新（招待リストにいる場合）
@@ -9008,7 +9187,19 @@ function App() {
       if (type === 'maker') {
         // Return objects for QR display
         const updatedMakers = updates.makers;
-        const ourMaker = updatedMakers[updatedMakers.length - 1]; // Assume last if new, or find
+        const normalizeIdentity = (value) => String(value || '').trim();
+        const submittedCode = normalizeIdentity(data.code || data.supplierCode);
+        const submittedCompanyName = normalizeIdentity(data.companyName);
+        const submittedEmail = normalizeIdentity(data.email).toLowerCase();
+        const ourMaker = updatedMakers.find((m) => {
+          const makerCode = normalizeIdentity(m.code || m.supplierCode);
+          const makerCompanyName = normalizeIdentity(m.companyName);
+          const makerEmail = normalizeIdentity(m.email).toLowerCase();
+          if (submittedCode && makerCode && submittedCode === makerCode) return true;
+          if (submittedCompanyName && makerCompanyName && submittedCompanyName === makerCompanyName) return true;
+          if (submittedEmail && makerEmail && submittedEmail === makerEmail) return true;
+          return false;
+        }) || updatedMakers[updatedMakers.length - 1];
         // Simplified: just return the data + computed status
         return ourMaker;
       }
@@ -9164,26 +9355,22 @@ function App() {
       return;
     }
 
-    // Find the maker in the exhibition
+    // Find the maker in the exhibition (strict match only to prevent cross-company updates)
     const currentMakers = exhibition.makers || [];
-    // Try matching by Code or ID first
-    let makerIndex = currentMakers.findIndex(m =>
-      (m.code && dashboardMaker.code && m.code === dashboardMaker.code) ||
-      (m.id && dashboardMaker.id && m.id === dashboardMaker.id)
-    );
-
-    // Fallback: match by Company Name or Email
-    if (makerIndex === -1) {
-      console.log('Match by code/id failed. Trying name/email fallback...');
-      makerIndex = currentMakers.findIndex(m =>
-        (m.companyName && m.companyName === dashboardMaker.companyName) ||
-        (m.email && m.email === dashboardMaker.email)
-      );
-    }
+    const normalizeIdentity = (value) => String(value || '').trim();
+    const dashboardCode = normalizeIdentity(dashboardMaker.code);
+    const dashboardId = normalizeIdentity(dashboardMaker.id);
+    const makerIndex = currentMakers.findIndex((m) => {
+      const makerCode = normalizeIdentity(m.code);
+      const makerId = normalizeIdentity(m.id);
+      if (dashboardCode && makerCode && makerCode === dashboardCode) return true;
+      if (dashboardId && makerId && makerId === dashboardId) return true;
+      return false;
+    });
 
     if (makerIndex === -1) {
       console.error('Maker not found in exhibition');
-      alert(`エラー: メーカー情報がリスト内で見つかりませんでした。\n会社名: ${dashboardMaker.companyName}`);
+      alert(`Error: maker data not found in exhibition.\ncompany: ${dashboardMaker.name || dashboardMaker.companyName || '-'}\ncode: ${dashboardCode || '-'}`);
       return;
     }
 
@@ -9200,7 +9387,8 @@ function App() {
     const updatedMakerData = {
       ...targetMaker,
       status: newStatus,
-      confirmedAt: Date.now(),
+      confirmedAt: newStatus === 'confirmed' ? Date.now() : (targetMaker.confirmedAt || null),
+      respondedAt: Date.now(),
       response: data, // ★修正: 管理画面との整合性のため 'response' に名前変更
       applicationDate: new Date().toISOString(),
     };
@@ -9500,5 +9688,3 @@ function App() {
 }
 
 export default App;
-
-

@@ -12,10 +12,12 @@ export function useMasterMakersSync({ db, appId, view }) {
     setMasterMakersLoaded(true);
   }, []);
 
-  // 通常利用時は1回取得のみ（常時リアルタイム購読を避けて読取コストを抑制）
+  // One-shot fetch with retry on transient failure.
   useEffect(() => {
     if (!db || !appId) return;
+
     let isActive = true;
+    let retryTimer = null;
 
     const fetchMasterMakers = async () => {
       try {
@@ -26,26 +28,34 @@ export function useMasterMakersSync({ db, appId, view }) {
         applyMasterMakersData(data);
       } catch (error) {
         console.error('[Firebase] Failed to load masterMakers:', error);
-        if (isActive) setMasterMakersLoaded(true);
+        if (!isActive) return;
+        retryTimer = setTimeout(fetchMasterMakers, 3000);
       }
     };
 
     fetchMasterMakers();
+
     return () => {
       isActive = false;
+      if (retryTimer) clearTimeout(retryTimer);
     };
   }, [db, appId, applyMasterMakersData]);
 
-  // 企業管理画面のみリアルタイム同期を有効化（編集時の即時反映を維持）
+  // Keep enterprise console in sync while editing master makers.
   useEffect(() => {
     if (!db || !appId || view !== 'enterprise') return;
+
     const makersRef = collection(db, 'artifacts', appId, 'public', 'data', 'masterMakers');
-    const unsubscribe = onSnapshot(makersRef, (snapshot) => {
-      const data = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
-      applyMasterMakersData(data);
-    }, (error) => {
-      console.error('[Firebase] masterMakers onSnapshot error:', error);
-    });
+    const unsubscribe = onSnapshot(
+      makersRef,
+      (snapshot) => {
+        const data = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+        applyMasterMakersData(data);
+      },
+      (error) => {
+        console.error('[Firebase] masterMakers onSnapshot error:', error);
+      }
+    );
 
     return () => unsubscribe();
   }, [db, appId, view, applyMasterMakersData]);

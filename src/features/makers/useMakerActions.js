@@ -42,9 +42,17 @@ export function useMakerActions({
     if (targets.length === 0) return;
     if (!window.confirm(`現在「招待中（未回答）」の${targets.length}件を「辞退（締切）」に変更しますか？\n※参加確定の企業は変更されません。`)) return;
 
+    const closedAt = Date.now();
     const updatedMakers = makers.map((maker) => {
       if (maker.status === 'listed' || maker.status === 'invited') {
-        return { ...maker, status: 'declined', note: (maker.note || '') + '\n[システム] 受付締切により自動辞退' };
+        return {
+          ...maker,
+          status: 'declined',
+          autoDeclinedByReceptionClose: true,
+          autoDeclinedAt: closedAt,
+          autoDeclineReason: 'reception_closed',
+          note: (maker.note || '') + '\n[システム] 受付締切により自動辞退'
+        };
       }
       return maker;
     });

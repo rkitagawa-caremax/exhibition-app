@@ -89,31 +89,20 @@ const getMakerCompanyKey = (maker) => {
   return null;
 };
 
-const AUTO_DECLINE_NOTE_HINTS = ['受付締切', '自動辞退', '締切'];
-
-const hasResponsePayload = (maker) => {
-  const sources = [maker?.response, maker?.formData];
-  return sources.some((source) => {
-    if (!source || typeof source !== 'object') return false;
-    return Object.values(source).some((value) => {
-      if (value === null || value === undefined) return false;
-      if (typeof value === 'string') return value.trim() !== '';
-      if (Array.isArray(value)) return value.length > 0;
-      return true;
-    });
-  });
-};
+const AUTO_DECLINE_NOTE_HINTS = ['[\u30b7\u30b9\u30c6\u30e0] \u53d7\u4ed8\u7de0\u5207\u306b\u3088\u308a\u81ea\u52d5\u8f9e\u9000', '\u53d7\u4ed8\u7de0\u5207\u306b\u3088\u308a\u81ea\u52d5\u8f9e\u9000'];
 
 const isAutoDeclinedByReceptionClose = (maker) => {
   if (!maker) return false;
   const status = normalizeMakerStatusForAnalysis(maker.status);
   if (status !== 'declined') return false;
 
+  if (maker.autoDeclinedByReceptionClose === true) return true;
+  if (String(maker.autoDeclineReason || '').trim().toLowerCase() === 'reception_closed') return true;
+
   const note = String(maker.note || '');
   if (AUTO_DECLINE_NOTE_HINTS.some((keyword) => note.includes(keyword))) return true;
 
-  // Legacy fallback: treated as auto-close decline when there is no response payload.
-  return !hasResponsePayload(maker);
+  return false;
 };
 
 const parseBoothCount = (value, fallback = 1) => {
@@ -139,10 +128,20 @@ const buildExhibitionSortTime = (ex, fallbackOrder) => {
 export const normalizeMakerStatusForAnalysis = (rawStatus) => {
   const s = String(rawStatus || '').trim().toLowerCase();
   if (!s) return '';
-  if (s === 'confirmed' || s.includes('参加確定') || s.includes('申し込む')) return 'confirmed';
-  if (s === 'declined' || s.includes('辞退') || s.includes('申し込まない')) return 'declined';
-  if (s === 'invited' || s.includes('招待中')) return 'invited';
-  if (s === 'listed' || s.includes('未送付') || s.includes('リスト')) return 'listed';
+
+  // Use Unicode escape literals to avoid source-encoding dependent parsing.
+  const jpConfirmed = '\u53c2\u52a0\u78ba\u5b9a';
+  const jpApply = '\u7533\u3057\u8fbc\u3080';
+  const jpDeclined = '\u8f9e\u9000';
+  const jpNotApply = '\u7533\u3057\u8fbc\u307e\u306a\u3044';
+  const jpInvited = '\u62db\u5f85\u4e2d';
+  const jpListed = '\u672a\u9001\u4ed8';
+  const jpList = '\u30ea\u30b9\u30c8';
+
+  if (s === 'confirmed' || s.includes(jpConfirmed) || s.includes(jpApply)) return 'confirmed';
+  if (s === 'declined' || s.includes(jpDeclined) || s.includes(jpNotApply)) return 'declined';
+  if (s === 'invited' || s.includes(jpInvited)) return 'invited';
+  if (s === 'listed' || s.includes(jpListed) || s.includes(jpList)) return 'listed';
   return s;
 };
 

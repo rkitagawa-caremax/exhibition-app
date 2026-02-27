@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { collection, getDocs, onSnapshot } from 'firebase/firestore';
 
-export function useMasterMakersSync({ db, appId, view }) {
+export function useMasterMakersSync({ db, appId, view, mode }) {
   const [masterMakers, setMasterMakers] = useState([]);
   const [masterMakersLoaded, setMasterMakersLoaded] = useState(false);
   const masterMakersRef = useRef([]);
+  const shouldSkipMasterMakersFetch =
+    mode === 'visitor_register' || mode === 'maker_register' || mode === 'demo_maker_form';
 
   const applyMasterMakersData = useCallback((data) => {
     setMasterMakers(data);
@@ -15,6 +17,10 @@ export function useMasterMakersSync({ db, appId, view }) {
   // One-shot fetch with retry on transient failure.
   useEffect(() => {
     if (!db || !appId) return;
+    if (shouldSkipMasterMakersFetch) {
+      setMasterMakersLoaded(true);
+      return;
+    }
 
     let isActive = true;
     let retryTimer = null;
@@ -39,7 +45,7 @@ export function useMasterMakersSync({ db, appId, view }) {
       isActive = false;
       if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [db, appId, applyMasterMakersData]);
+  }, [db, appId, applyMasterMakersData, shouldSkipMasterMakersFetch]);
 
   // Keep enterprise console in sync while editing master makers.
   useEffect(() => {

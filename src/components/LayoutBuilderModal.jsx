@@ -14,8 +14,95 @@ const extractNum = (val) => {
     return match ? parseInt(match[0], 10) : 0;
 };
 
+const hasValue = (value) => {
+    if (value === null || value === undefined) return false;
+    if (typeof value === 'string') return value.trim() !== '';
+    return true;
+};
+
+const extractOptionalNum = (value) => {
+    if (!hasValue(value)) return null;
+    return extractNum(value);
+};
+
+const getMakerValue = (maker, keys = []) => {
+    if (!maker || typeof maker !== 'object') return undefined;
+
+    const response = maker.response && typeof maker.response === 'object' ? maker.response : null;
+    const legacyFormData = maker.formData && typeof maker.formData === 'object' ? maker.formData : null;
+    const sources = [response, legacyFormData, maker];
+
+    for (const source of sources) {
+        if (!source) continue;
+        for (const key of keys) {
+            const value = source[key];
+            if (hasValue(value)) return value;
+        }
+    }
+    return undefined;
+};
+
+const parsePowerFlag = (maker) => {
+    if (!maker || typeof maker !== 'object') return null;
+    if (typeof maker.hasPower === 'boolean') return maker.hasPower;
+
+    const powerValue = getMakerValue(maker, ['itemsPower', 'power']);
+    if (!hasValue(powerValue)) {
+        const rawResponse = JSON.stringify(maker.response || {});
+        const rawMaker = JSON.stringify(maker || {});
+        if (rawResponse.includes('電源利用：あり') || rawMaker.includes('電源利用：あり')) return true;
+        return null;
+    }
+
+    if (typeof powerValue === 'number') return powerValue > 0;
+
+    const normalized = String(powerValue).trim().toLowerCase();
+    if (!normalized) return null;
+
+    if (
+        normalized.includes('不要')
+        || normalized.includes('なし')
+        || normalized.includes('無')
+        || normalized.includes('未使用')
+        || normalized === 'false'
+        || normalized === 'no'
+    ) {
+        return false;
+    }
+
+    if (
+        normalized.includes('必要')
+        || normalized.includes('要')
+        || normalized.includes('あり')
+        || normalized.includes('有')
+        || normalized === 'true'
+        || normalized === 'yes'
+    ) {
+        return true;
+    }
+
+    const numeric = extractNum(normalized);
+    if (numeric > 0) return true;
+    if (/\d/.test(normalized)) return false;
+    return null;
+};
+
+const sanitizeCompanyLabel = (rawLabel) => {
+    return String(rawLabel || '').replace(/(株式会社|有限会社|合同会社|（株）|（有）|（同）)/g, '');
+};
+
+const buildBoothInfoText = (item) => {
+    const deskCount = extractNum(item?.deskCount);
+    const chairCount = extractNum(item?.chairCount);
+    const powerText = item?.hasPower ? '電' : '';
+    return `${deskCount}-${chairCount}${powerText ? `-${powerText}` : ''}`;
+};
+
 export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exhibition, enterprises: propEnterprises }) {
-    const enterprises = propEnterprises || exhibition.enterprises || [];
+    const enterprises = useMemo(
+        () => propEnterprises || exhibition?.enterprises || [],
+        [propEnterprises, exhibition?.enterprises]
+    );
     // ============================================================================
     // 会場設定（メートル単位）
     // ============================================================================
@@ -133,19 +220,11 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     // ============================================================================
     // 参加確定企業の取得（改善版）
     // ============================================================================
-    const getConfirmedMakers = () => {
+    const confirmedMakers = useMemo(() => {
         // 0. Supplier Code Map for Categories
         // If enterprise list passed, map supplierCode -> category
         const categoryMap = {}; // supplierCode -> categoryInfo
         const colorMap = {}; // categoryName -> color string
-
-        // Generate colors for known categories
-        const generateColor = (str) => {
-            let hash = 0;
-            for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
-            const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
-            return "#" + "00000".substring(0, 6 - c.length) + c;
-        };
 
         // Pre-calculate colors for categories in enterprises
         if (enterprises) {
@@ -165,9 +244,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
         }
 
         const getCategoryData = (maker) => {
-            // Look for supplier code in maker data
-            // Check maker.supplierCode or maker.formData.supplierCode or maker.code
-            const code = maker.supplierCode || maker.formData?.supplierCode || maker.code;
+            const code = getMakerValue(maker, ['supplierCode', 'code']);
 
             if (code && categoryMap[code]) {
                 return { name: categoryMap[code], color: colorMap[categoryMap[code]] };
@@ -176,61 +253,130 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
             return null;
         };
 
-        // 1. invitedMakers から formData.status === '出展を申し込む' をチェック
-        const invitedMakers = exhibition?.invitedMakers || [];
-        const fromInvited = invitedMakers.filter(m => {
-            const formData = m.formData || {};
-            return formData.status === '出展を申し込む';
-        }).map(m => {
-            const formData = m.formData || {};
-            return {
-                id: m.id,
-                companyName: formData.companyName || m.companyName || '企業名不明',
-                deskCount: extractNum(formData.itemsDesk) || 0,
-                chairCount: extractNum(formData.itemsChair) || 0,
-                hasPower: formData.itemsPower === '必要',
-                boothCount: formData.boothCount, // Store raw value for parsing later
-                category: getCategoryData(m),
-            };
+        const normalizeMaker = (maker) => ({
+            id: maker.id || getMakerValue(maker, ['supplierCode', 'code']) || getMakerValue(maker, ['companyName']),
+            companyName: getMakerValue(maker, ['companyName']) || '企業名不明',
+            status: getMakerValue(maker, ['status']) || maker.status || '',
+            deskCount: extractOptionalNum(getMakerValue(maker, ['deskCount', 'itemsDesk', 'desk'])),
+            chairCount: extractOptionalNum(getMakerValue(maker, ['chairCount', 'itemsChair', 'chair'])),
+            hasPower: parsePowerFlag(maker),
+            boothCount: getMakerValue(maker, ['boothCount']),
+            category: getCategoryData(maker),
         });
+
+        const isApplyingStatus = (statusValue) => {
+            const statusText = String(statusValue || '').trim().toLowerCase();
+            return (
+                statusText === '出展を申し込む'
+                || statusText === 'confirmed'
+                || statusText.includes('参加確定')
+            );
+        };
+
+        const mergeMakerData = (prev, next) => ({
+            ...prev,
+            ...next,
+            id: prev.id || next.id,
+            companyName: next.companyName || prev.companyName || '企業名不明',
+            status: next.status || prev.status || '',
+            deskCount: next.deskCount !== null ? next.deskCount : prev.deskCount,
+            chairCount: next.chairCount !== null ? next.chairCount : prev.chairCount,
+            hasPower: next.hasPower !== null ? next.hasPower : prev.hasPower,
+            boothCount: hasValue(next.boothCount) ? next.boothCount : prev.boothCount,
+            category: next.category || prev.category || null,
+        });
+
+        // 1. invitedMakers から出展申込済みを取得
+        const invitedMakers = exhibition?.invitedMakers || [];
+        const fromInvited = invitedMakers
+            .map(normalizeMaker)
+            .filter(m => isApplyingStatus(m.status));
 
         // 2. confirmedMakers からも取得（直接登録されている場合）
         const confirmedList = exhibition?.confirmedMakers || [];
-        const fromConfirmed = confirmedList.map(m => ({
-            id: m.id,
-            companyName: m.companyName || '企業名不明',
-            deskCount: extractNum(m.deskCount) || extractNum(m.itemsDesk) || 0,
-            chairCount: extractNum(m.chairCount) || extractNum(m.itemsChair) || 0,
-            hasPower: m.hasPower || m.itemsPower === '必要',
-            boothCount: m.boothCount || '1コマ',
-            category: getCategoryData(m),
-        }));
+        const fromConfirmed = confirmedList.map(normalizeMaker);
 
-        // 3. makers配列でstatus === 'confirmed'のものも取得
+        // 3. makers配列から参加確定済みを取得
         const makers = exhibition?.makers || [];
-        const fromMakers = makers.filter(m => m.status === 'confirmed').map(m => ({
-            id: m.id,
-            companyName: m.companyName || '企業名不明',
-            deskCount: extractNum(m.deskCount) || extractNum(m.itemsDesk) || 0,
-            chairCount: extractNum(m.chairCount) || extractNum(m.itemsChair) || 0,
-            hasPower: m.hasPower || m.itemsPower === '必要',
-            boothCount: m.boothCount || '1コマ',
-            category: getCategoryData(m),
-        }));
+        const fromMakers = makers
+            .map(normalizeMaker)
+            .filter(m => isApplyingStatus(m.status));
 
-        // IDで重複排除して統合
-        const allMakers = [...fromInvited, ...fromConfirmed, ...fromMakers];
-        const uniqueIds = new Set();
-        return allMakers.filter(m => {
-            if (uniqueIds.has(m.id)) return false;
-            uniqueIds.add(m.id);
-            return true;
+        // ID/コード単位で重複をマージし、後段のデータを優先
+        const merged = new Map();
+        [...fromInvited, ...fromConfirmed, ...fromMakers].forEach((maker, index) => {
+            const mergeKey = String(maker.id || maker.companyName || `maker-${index}`);
+            if (!merged.has(mergeKey)) {
+                merged.set(mergeKey, maker);
+                return;
+            }
+            merged.set(mergeKey, mergeMakerData(merged.get(mergeKey), maker));
         });
-    };
 
-    const confirmedMakers = getConfirmedMakers();
+        return Array.from(merged.values()).map((maker) => ({
+            ...maker,
+            deskCount: maker.deskCount ?? 0,
+            chairCount: maker.chairCount ?? 0,
+            hasPower: maker.hasPower ?? false,
+            boothCount: maker.boothCount || '1コマ',
+        }));
+    }, [exhibition, enterprises]);
+
+    // 既存レイアウトのブース詳細を最新回答で同期
+    useEffect(() => {
+        if (confirmedMakers.length === 0) return;
+        const makerMap = new Map(confirmedMakers.map(maker => [String(maker.id), maker]));
+
+        setItems(prevItems => {
+            let changed = false;
+            const nextItems = prevItems.map(item => {
+                if (!(item?.type === 'booth' && item?.makerId)) return item;
+
+                const maker = makerMap.get(String(item.makerId));
+                if (!maker) return item;
+
+                const nextDesk = maker.deskCount ?? 0;
+                const nextChair = maker.chairCount ?? 0;
+                const nextPower = !!maker.hasPower;
+                const nextCompanyName = maker.companyName || item.companyName || item.label || '';
+                const nextCategory = maker.category || null;
+                const sameCategory = (
+                    (!item.category && !nextCategory)
+                    || (
+                        item.category?.name === nextCategory?.name
+                        && item.category?.color === nextCategory?.color
+                    )
+                );
+
+                if (
+                    (item.deskCount ?? 0) === nextDesk
+                    && (item.chairCount ?? 0) === nextChair
+                    && !!item.hasPower === nextPower
+                    && (item.companyName || '') === nextCompanyName
+                    && sameCategory
+                ) {
+                    return item;
+                }
+
+                changed = true;
+                return {
+                    ...item,
+                    deskCount: nextDesk,
+                    chairCount: nextChair,
+                    hasPower: nextPower,
+                    companyName: nextCompanyName,
+                    label: nextCompanyName || item.label || '',
+                    category: nextCategory || item.category || null,
+                };
+            });
+
+            return changed ? nextItems : prevItems;
+        });
+    }, [confirmedMakers]);
+
     const placedMakerIds = items.filter(i => i.makerId).map(i => i.makerId);
-    const unplacedMakers = confirmedMakers.filter(m => !placedMakerIds.includes(m.id));
+    const placedMakerIdSet = new Set(placedMakerIds.map(id => String(id)));
+    const unplacedMakers = confirmedMakers.filter(m => !placedMakerIdSet.has(String(m.id)));
 
     // ============================================================================
     // 距離計算（枠線から枠線への距離）
@@ -973,9 +1119,8 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     // ============================================================================
     const renderBoothContent = (item) => {
         if (item.type === 'booth' && item.makerId) {
-            const displayLabel = (item.companyName || item.label || '').replace(/(株式会社|有限会社|合同会社|（株）|（有）|（同）)/g, '');
-            const powerText = item.hasPower ? '電' : '';
-            const infoText = `${item.deskCount || 0}-${item.chairCount || 0}${powerText ? '-' + powerText : ''}`;
+            const displayLabel = sanitizeCompanyLabel(item.companyName || item.label || '');
+            const infoText = buildBoothInfoText(item);
             // Use category color if available, else white
             const bgColor = item.category ? item.category.color : 'white';
 
@@ -1242,7 +1387,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                     el.style.backgroundSize = `${pixelsPerMeter}px ${pixelsPerMeter}px`;
                 } else if (item.type === 'booth' || item.type === 'freeBooth') {
                     el.style.border = '2px solid #64748b'; // slate-500
-                    el.style.backgroundColor = '#ffffff';
+                    el.style.backgroundColor = item.type === 'booth' && item.category?.color ? item.category.color : '#ffffff';
                     el.style.display = 'flex';
                     el.style.flexDirection = 'column';
                     el.style.justifyContent = 'center';
@@ -1253,7 +1398,9 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
 
                     // ブース内テキスト
                     const label = frameDoc.createElement('div');
-                    label.textContent = item.label || 'ブース';
+                    label.textContent = item.type === 'booth'
+                        ? (sanitizeCompanyLabel(item.companyName || item.label || 'ブース') || 'ブース')
+                        : (item.label || 'ブース');
                     label.style.fontSize = '12px'; // 少し大きめに
                     label.style.fontWeight = 'bold';
                     label.style.color = '#000000';
@@ -1265,13 +1412,19 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                     el.appendChild(label);
 
                     // 詳細情報 (Clean Modeでない場合)
-                    if (!showCleanPdf && item.boothNo) {
-                        const info = frameDoc.createElement('div');
-                        info.textContent = item.boothNo;
-                        info.style.fontSize = '9px';
-                        info.style.marginTop = '2px';
-                        info.style.color = '#333333';
-                        el.appendChild(info);
+                    if (!showCleanPdf) {
+                        const infoText = (item.type === 'booth' && item.makerId)
+                            ? buildBoothInfoText(item)
+                            : (item.boothNo || '');
+                        if (infoText) {
+                            const info = frameDoc.createElement('div');
+                            info.textContent = infoText;
+                            info.style.fontSize = '9px';
+                            info.style.marginTop = '2px';
+                            info.style.color = '#333333';
+                            info.style.fontWeight = 'bold';
+                            el.appendChild(info);
+                        }
                     }
                 } else if (item.type === 'pillar') {
                     el.style.backgroundColor = '#64748b'; // slate-500

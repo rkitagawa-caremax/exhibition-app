@@ -11,11 +11,11 @@ import {
   UserPlus, Settings, Download, Eye, Folder, PackageCheck,
   Camera, Loader, BedDouble, CalendarDays, Menu,
   ChevronDown, ChevronUp, ChevronRight, Trash, GitBranch, Mic, Truck, Layout, User, Info, LogOut, Maximize,
-  Box, BookOpen, Star, LayoutGrid, Grid, Image, Radio, ArrowRight, XCircle, History as HistoryIcon, Minus, Inbox, Square, Trophy, BarChart3, Wand2
+  Box, BookOpen, Star, LayoutGrid, Grid, Image, Radio, ArrowRight, XCircle, History as HistoryIcon, Minus, Inbox, Square, Trophy, BarChart3, Wand2, Skull
 } from 'lucide-react';
 // import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
-import { collection, onSnapshot, updateDoc as updateDocRaw, doc, deleteDoc, setDoc } from "firebase/firestore";
+import { collection, getDocs, onSnapshot, updateDoc as updateDocRaw, doc, deleteDoc, setDoc } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 // QRコード用ライブラリ
 import { QRCodeCanvas } from 'qrcode.react';
@@ -316,6 +316,41 @@ const DEFAULT_FORM_CONFIG = {
   }
 };
 
+const normalizeMakerFormSection = (section, defaultSection) => {
+  const baseSection = (section && typeof section === 'object') ? section : {};
+  const defaultItems = Array.isArray(defaultSection?.items) ? defaultSection.items : [];
+  const sourceItems = Array.isArray(baseSection.items) ? baseSection.items : defaultItems;
+
+  const normalizedItems = sourceItems
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => (item.id === 'payment' ? { ...item, required: true } : item));
+
+  const paymentDefault = defaultItems.find((item) => item?.id === 'payment');
+  const hasPayment = normalizedItems.some((item) => item?.id === 'payment');
+  const finalItems = (!hasPayment && paymentDefault)
+    ? [...normalizedItems, { ...paymentDefault, required: true }]
+    : normalizedItems;
+
+  return {
+    ...(defaultSection || {}),
+    ...baseSection,
+    items: finalItems
+  };
+};
+
+const normalizeMakerFormConfig = (config) => {
+  const base = (config && typeof config === 'object') ? config : {};
+  return {
+    ...DEFAULT_FORM_CONFIG,
+    ...base,
+    section1: normalizeMakerFormSection(base.section1, DEFAULT_FORM_CONFIG.section1),
+    section2: normalizeMakerFormSection(base.section2, DEFAULT_FORM_CONFIG.section2),
+    section3: normalizeMakerFormSection(base.section3, DEFAULT_FORM_CONFIG.section3),
+    settings: { ...(DEFAULT_FORM_CONFIG.settings || {}), ...(base.settings || {}) },
+    mail: { ...(DEFAULT_FORM_CONFIG.mail || {}), ...(base.mail || {}) }
+  };
+};
+
 const VISITOR_TYPE_GENERAL_INDIVIDUAL = '一般・個人';
 
 const VISITOR_TYPE_OPTIONS = [
@@ -577,7 +612,7 @@ function DetailItem({ label, value }) {
 // 機能強化版フォームエディタ (ラベル、補足、選択肢の編集に対応)
 // 機能強化版フォームエディタ (ラベル、補足、選択肢の編集に対応)
 function FormEditorModal({ config, exhibition, onSave, onClose }) {
-  const [localConfig, setLocalConfig] = useState(config);
+  const [localConfig, setLocalConfig] = useState(() => normalizeMakerFormConfig(config));
   const [activeTab, setActiveTab] = useState('settings');
   const [expandedItems, setExpandedItems] = useState({});
 
@@ -1079,7 +1114,7 @@ ${place}
         </div>
         <div className="p-4 border-t flex justify-end gap-2 bg-white">
           <button onClick={onClose} className="px-6 py-2 bg-slate-100 text-slate-600 rounded-lg font-bold hover:bg-slate-200">キャンセル</button>
-          <button onClick={() => onSave(localConfig)} className="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-lg">設定を保存</button>
+          <button onClick={() => onSave(normalizeMakerFormConfig(localConfig))} className="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-lg">設定を保存</button>
         </div>
       </div>
     </div >
@@ -2361,12 +2396,19 @@ function TabEquipment({ exhibition, details, setDetails, masterMakers }) {
   // New supply form state
   const [newSupplyName, setNewSupplyName] = useState('');
   const [newSupplyCount, setNewSupplyCount] = useState(1);
+  const detailsSyncTimerRef = useRef(null);
+  const detailsPropRef = useRef(details);
+  const latestDetailsPayloadRef = useRef(null);
+  const hasPendingDetailsSyncRef = useRef(false);
+
+  useEffect(() => {
+    detailsPropRef.current = details;
+  }, [details]);
 
   // Sync to parent
   useEffect(() => {
-    const rentalTotal = rentals.reduce((sum, r) => sum + (r.count * r.price), 0);
-    setDetails({
-      ...details,
+    latestDetailsPayloadRef.current = {
+      ...detailsPropRef.current,
       cost: venueFee,
       notes,
       layoutImage,
@@ -2374,8 +2416,38 @@ function TabEquipment({ exhibition, details, setDetails, masterMakers }) {
       rentals,
       supplies,
       equipment: rentals.filter(r => r.count > 0) // For budget tab compatibility
-    });
-  }, [venueFee, notes, layoutImage, rentals, supplies, layoutData]);
+    };
+
+    if (detailsSyncTimerRef.current) {
+      clearTimeout(detailsSyncTimerRef.current);
+    }
+    hasPendingDetailsSyncRef.current = true;
+    detailsSyncTimerRef.current = setTimeout(() => {
+      detailsSyncTimerRef.current = null;
+      hasPendingDetailsSyncRef.current = false;
+      setDetails(latestDetailsPayloadRef.current);
+    }, 700);
+
+    return () => {
+      if (detailsSyncTimerRef.current) {
+        clearTimeout(detailsSyncTimerRef.current);
+        detailsSyncTimerRef.current = null;
+      }
+    };
+  }, [venueFee, notes, layoutImage, rentals, supplies, layoutData, setDetails]);
+
+  useEffect(() => {
+    return () => {
+      if (detailsSyncTimerRef.current) {
+        clearTimeout(detailsSyncTimerRef.current);
+        detailsSyncTimerRef.current = null;
+      }
+      if (hasPendingDetailsSyncRef.current && latestDetailsPayloadRef.current) {
+        hasPendingDetailsSyncRef.current = false;
+        setDetails(latestDetailsPayloadRef.current);
+      }
+    };
+  }, [setDetails]);
 
   // Rental functions
   const addRental = () => {
@@ -2868,9 +2940,13 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
   const [aiRecommendations, setAiRecommendations] = useState([]);
   const [selectedAiRecommendationCodes, setSelectedAiRecommendationCodes] = useState(new Set());
   const [aiRecommendationGeneratedAt, setAiRecommendationGeneratedAt] = useState(0);
+  const [layoutPdfUrlDraft, setLayoutPdfUrlDraft] = useState(exhibition.documents?.layoutPdf?.url || '');
+  const [flyerPdfUrlDraft, setFlyerPdfUrlDraft] = useState(exhibition.documents?.flyerPdf?.url || '');
+  const layoutPdfSaveTimerRef = useRef(null);
+  const flyerPdfSaveTimerRef = useRef(null);
 
   const makers = exhibition.makers || [];
-  const formConfig = exhibition.formConfig || DEFAULT_FORM_CONFIG;
+  const formConfig = normalizeMakerFormConfig(exhibition.formConfig);
   const [isSendingDocs, setIsSendingDocs] = useState(false);
   const normalizeCode = (rawCode) => String(rawCode || '').trim();
   const {
@@ -2884,6 +2960,56 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
     formConfig,
     extractNum
   });
+
+  const clearDocumentSaveTimer = (docKey) => {
+    const targetRef = docKey === 'layoutPdf' ? layoutPdfSaveTimerRef : flyerPdfSaveTimerRef;
+    if (targetRef.current) {
+      clearTimeout(targetRef.current);
+      targetRef.current = null;
+    }
+  };
+
+  const saveDocumentUrl = (docKey, nextUrl) => {
+    const docs = exhibition.documents || {};
+    const currentDoc = docs[docKey] || {};
+    const normalizedNextUrl = String(nextUrl || '');
+    const normalizedCurrentUrl = String(currentDoc.url || '');
+    if (normalizedNextUrl === normalizedCurrentUrl) return;
+    const newDocs = {
+      ...docs,
+      [docKey]: { ...currentDoc, url: normalizedNextUrl, uploadedAt: new Date().toISOString() }
+    };
+    updateMainData('documents', JSON.parse(JSON.stringify(newDocs)));
+  };
+
+  const scheduleDocumentUrlSave = (docKey, nextUrl) => {
+    clearDocumentSaveTimer(docKey);
+    const targetRef = docKey === 'layoutPdf' ? layoutPdfSaveTimerRef : flyerPdfSaveTimerRef;
+    targetRef.current = setTimeout(() => {
+      targetRef.current = null;
+      saveDocumentUrl(docKey, nextUrl);
+    }, 700);
+  };
+
+  const flushDocumentUrlSave = (docKey, nextUrl) => {
+    clearDocumentSaveTimer(docKey);
+    saveDocumentUrl(docKey, nextUrl);
+  };
+
+  useEffect(() => {
+    setLayoutPdfUrlDraft(exhibition.documents?.layoutPdf?.url || '');
+  }, [exhibition.id, exhibition.documents?.layoutPdf?.url]);
+
+  useEffect(() => {
+    setFlyerPdfUrlDraft(exhibition.documents?.flyerPdf?.url || '');
+  }, [exhibition.id, exhibition.documents?.flyerPdf?.url]);
+
+  useEffect(() => {
+    return () => {
+      if (layoutPdfSaveTimerRef.current) clearTimeout(layoutPdfSaveTimerRef.current);
+      if (flyerPdfSaveTimerRef.current) clearTimeout(flyerPdfSaveTimerRef.current);
+    };
+  }, []);
 
   // Send Documents Notification Handler
   const handleSendDocuments = async () => {
@@ -3005,7 +3131,12 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
 
   const handleExportConfirmedExcel = async () => {
     try {
-      await exportConfirmedMakersExcel({ makers, formConfig });
+      await exportConfirmedMakersExcel({
+        makers,
+        formConfig,
+        exhibitionId: exhibition?.id,
+        origin: window.location.origin
+      });
     } catch (e) {
       console.error(e);
       alert('Excel出力エラー: ' + e.message);
@@ -3307,6 +3438,8 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
                     onClick={async () => {
                       if (!confirm('レイアウト表のリンクを解除しますか？')) return;
                       try {
+                        clearDocumentSaveTimer('layoutPdf');
+                        setLayoutPdfUrlDraft('');
                         const docs = exhibition.documents || {};
                         const newDocs = { ...docs, layoutPdf: null };
                         await updateMainData('documents', JSON.parse(JSON.stringify(newDocs)));
@@ -3330,15 +3463,17 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
                 <input
                   type="url"
                   placeholder="https://example.com/layout.pdf"
-                  value={exhibition.documents?.layoutPdf?.url || ''}
+                  value={layoutPdfUrlDraft}
                   onChange={(e) => {
-                    const docs = exhibition.documents || {};
-                    const currentLayoutPdf = docs.layoutPdf || {};
-                    const newDocs = {
-                      ...docs,
-                      layoutPdf: { ...currentLayoutPdf, url: e.target.value, uploadedAt: new Date().toISOString() }
-                    };
-                    updateMainData('documents', JSON.parse(JSON.stringify(newDocs)));
+                    const nextUrl = e.target.value;
+                    setLayoutPdfUrlDraft(nextUrl);
+                    scheduleDocumentUrlSave('layoutPdf', nextUrl);
+                  }}
+                  onBlur={() => flushDocumentUrlSave('layoutPdf', layoutPdfUrlDraft)}
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Enter') return;
+                    e.preventDefault();
+                    flushDocumentUrlSave('layoutPdf', layoutPdfUrlDraft);
                   }}
                   className="flex-1 text-sm border border-slate-300 rounded px-2 py-2 outline-none focus:ring-2 focus:ring-amber-400 bg-amber-50"
                 />
@@ -3360,6 +3495,8 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
                     onClick={async () => {
                       if (!confirm('案内チラシのリンクを解除しますか？')) return;
                       try {
+                        clearDocumentSaveTimer('flyerPdf');
+                        setFlyerPdfUrlDraft('');
                         const docs = exhibition.documents || {};
                         const newDocs = { ...docs, flyerPdf: null };
                         await updateMainData('documents', JSON.parse(JSON.stringify(newDocs)));
@@ -3382,15 +3519,17 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
                 <input
                   type="url"
                   placeholder="https://example.com/flyer.pdf"
-                  value={exhibition.documents?.flyerPdf?.url || ''}
+                  value={flyerPdfUrlDraft}
                   onChange={(e) => {
-                    const docs = exhibition.documents || {};
-                    const currentFlyerPdf = docs.flyerPdf || {};
-                    const newDocs = {
-                      ...docs,
-                      flyerPdf: { ...currentFlyerPdf, url: e.target.value, uploadedAt: new Date().toISOString() }
-                    };
-                    updateMainData('documents', JSON.parse(JSON.stringify(newDocs)));
+                    const nextUrl = e.target.value;
+                    setFlyerPdfUrlDraft(nextUrl);
+                    scheduleDocumentUrlSave('flyerPdf', nextUrl);
+                  }}
+                  onBlur={() => flushDocumentUrlSave('flyerPdf', flyerPdfUrlDraft)}
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Enter') return;
+                    e.preventDefault();
+                    flushDocumentUrlSave('flyerPdf', flyerPdfUrlDraft);
                   }}
                   className="flex-1 text-sm border border-slate-300 rounded px-2 py-2 outline-none focus:ring-2 focus:ring-orange-400 bg-orange-50"
                 />
@@ -3766,7 +3905,7 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
         />
       )}
 
-      {showFormSettings && <FormEditorModal config={formConfig} exhibition={exhibition} onSave={(newConfig) => { updateMainData('formConfig', newConfig); setShowFormSettings(false); }} onClose={() => setShowFormSettings(false)} />}
+      {showFormSettings && <FormEditorModal config={formConfig} exhibition={exhibition} onSave={(newConfig) => { updateMainData('formConfig', normalizeMakerFormConfig(newConfig)); setShowFormSettings(false); }} onClose={() => setShowFormSettings(false)} />}
     </div >
   );
 }
@@ -5907,7 +6046,7 @@ function PublicMakerView({ exhibition, onSubmit }) {
     );
   }
 
-  return <MakerResponseForm exhibition={exhibition} config={exhibition.formConfig} onClose={() => { }} onSubmit={async (data) => { await onSubmit(data); }} />;
+  return <MakerResponseForm exhibition={exhibition} config={normalizeMakerFormConfig(exhibition.formConfig)} onClose={() => { }} onSubmit={async (data) => { await onSubmit(data); }} />;
 }
 
 
@@ -7129,7 +7268,7 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
             <div className="min-h-full py-4 px-2">
               <MakerResponseForm
                 exhibition={showResponseForm}
-                config={showResponseForm.formConfig || DEFAULT_FORM_CONFIG}
+                config={normalizeMakerFormConfig(showResponseForm.formConfig)}
                 onClose={() => setShowResponseForm(null)}
                 onSubmit={(data) => {
                   // 回答を送信
@@ -8643,13 +8782,23 @@ function App() {
     return stored || 'full';
   });
   const [isMobileViewport, setIsMobileViewport] = useState(() => window.innerWidth < 768);
+  const hasDashboardAccessKey = useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    return !!params.get('key');
+  }, []);
+  const shouldUseOneShotExhibitionsFetch = useMemo(() => {
+    const publicModes = new Set(['visitor_register', 'maker_register', 'maker', 'demo_portal', 'demo_maker_form']);
+    if (publicModes.has(urlMode)) return true;
+    if (urlMode === 'dashboard' && hasDashboardAccessKey) return true;
+    return false;
+  }, [urlMode, hasDashboardAccessKey]);
 
   const {
     masterMakers,
     setMasterMakers,
     masterMakersLoaded,
     masterMakersRef
-  } = useMasterMakersSync({ db, appId, view });
+  } = useMasterMakersSync({ db, appId, view, mode: urlMode });
 
   // ★最適化: useRefを使用してsyncコールバック内で最新値を参照（再購読防止）
   const selectedExhibitionRef = useRef(null);
@@ -8748,6 +8897,7 @@ function App() {
     if (!user || !db || !appId) return;
 
     const exRef = collection(db, 'artifacts', appId, 'public', 'data', 'exhibitions');
+    let isSingleFetchActive = true;
 
     const applySnapshotDocs = (docs) => {
       try {
@@ -8762,10 +8912,12 @@ function App() {
         }
 
         const normalizedData = uniqueData.map((item) => {
+          const normalizedFormConfig = normalizeMakerFormConfig(item.formConfig);
           const normalizedVisitorFormConfig = normalizeVisitorFormConfig(item.visitorFormConfig);
           const normalizedTasks = mergeTasksWithTemplate(item.tasks);
           return {
             ...item,
+            formConfig: normalizedFormConfig,
             visitorFormConfig: normalizedVisitorFormConfig,
             tasks: normalizedTasks,
             taskTemplateVersion: TASK_TEMPLATE_VERSION
@@ -8788,6 +8940,25 @@ function App() {
       }
     };
 
+    if (shouldUseOneShotExhibitionsFetch) {
+      console.log('[Firebase] Using one-shot exhibitions fetch mode:', urlMode);
+      getDocs(exRef)
+        .then((snapshot) => {
+          if (!isSingleFetchActive) return;
+          console.log('[Firebase] One-shot exhibitions fetched:', snapshot.size);
+          applySnapshotDocs(snapshot.docs);
+        })
+        .catch((error) => {
+          console.error('Firestore one-shot exhibitions fetch error:', error);
+          if (!isSingleFetchActive) return;
+          setExhibitions([]);
+        });
+
+      return () => {
+        isSingleFetchActive = false;
+      };
+    }
+
     console.log('[Firebase] Setting up onSnapshot subscription for uid:', user.uid);
     const unsubscribe = onSnapshot(
       exRef,
@@ -8802,10 +8973,11 @@ function App() {
     );
 
     return () => {
+      isSingleFetchActive = false;
       console.log('[Firebase] Cleaning up onSnapshot subscription');
       unsubscribe();
     };
-  }, [user?.uid, db, appId]); // Use uid instead of user object to prevent re-subscription
+  }, [user?.uid, db, appId, shouldUseOneShotExhibitionsFetch, urlMode]); // Use uid instead of user object to prevent re-subscription
   // 2. View Routing & Logic Effect (Reactive)
   useEffect(() => {
     // Wait for exhibitions to be loaded (not null)
@@ -9118,7 +9290,10 @@ function App() {
 
   const updateVisitorCount = async (id, n) => { updateExhibitionData(id, 'currentVisitors', n); };
   const handlePublicSubmit = async (type, data) => {
-    if (!selectedExhibition) return;
+    if (!selectedExhibition) {
+      alert('展示会データの読み込みが完了していません。数秒後にもう一度お試しください。');
+      return false;
+    }
     const current = selectedExhibition;
 
     // ... (rest of handlePublicSubmit)
@@ -9636,6 +9811,16 @@ function App() {
           <button onClick={() => { navigateTo('enterprise'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'enterprise' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-slate-300'}`}><Building2 size={20} /> 企業管理コンソール</button>
           <button onClick={() => { navigateToManual('preparation'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'manual' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-slate-300'}`}><BookOpen size={20} /> 運用マニュアル</button>
           <button onClick={() => { navigateTo('analysis'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'analysis' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-slate-300'}`}><BarChart3 size={20} /> 実績分析</button>
+
+          <a
+            href="https://scrape-kaientai-s.netlify.app/"
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={() => setIsMobileMenuOpen(false)}
+            className="w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all hover:bg-slate-800 text-slate-300"
+          >
+            <Skull size={20} /> Kaientai-S
+          </a>
 
           {/* Resume Project Button */}
           {selectedExhibition && view !== 'detail' && (

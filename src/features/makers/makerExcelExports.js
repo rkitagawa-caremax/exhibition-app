@@ -255,7 +255,12 @@ const createWorkbook = async () => {
   return new (ExcelJSImport.default || ExcelJSImport).Workbook();
 };
 
-export const exportConfirmedMakersExcel = async ({ makers, formConfig }) => {
+const buildMakerPortalUrl = ({ origin, exhibitionId, makerCode }) => {
+  if (!origin || !exhibitionId || !makerCode) return '';
+  return `${origin}/?mode=maker&id=${exhibitionId}&code=${makerCode}`;
+};
+
+export const exportConfirmedMakersExcel = async ({ makers, formConfig, exhibitionId, origin }) => {
   const confirmed = (makers || []).filter((maker) => maker.status === 'confirmed');
   const workbook = await createWorkbook();
   const worksheet = workbook.addWorksheet('ConfirmedMakers');
@@ -264,6 +269,7 @@ export const exportConfirmedMakersExcel = async ({ makers, formConfig }) => {
   const fixedColumns = [
     { key: '__code', label: '企業コード' },
     { key: '__company', label: '企業名(リスト)' },
+    { key: '__portalUrl', label: 'メーカーポータルURL' },
     { key: '__status', label: '状態' },
     { key: '__answeredAt', label: '回答日時' }
   ];
@@ -275,9 +281,16 @@ export const exportConfirmedMakersExcel = async ({ makers, formConfig }) => {
   worksheet.addRow(allColumns.map((col) => col.label));
 
   confirmed.forEach((maker) => {
+    const makerCode = maker?.code || getAnswerValue(maker, 'supplierCode');
+    const portalUrl = buildMakerPortalUrl({
+      origin,
+      exhibitionId,
+      makerCode
+    });
     const row = [
-      toCellText(maker?.code || getAnswerValue(maker, 'supplierCode')),
+      toCellText(makerCode),
       toCellText(maker?.companyName || getAnswerValue(maker, 'companyName')),
+      toCellText(portalUrl),
       toCellText(STATUS_LABELS[maker?.status] || maker?.status || ''),
       toCellText(formatAnswerTimestamp(maker))
     ];
@@ -297,6 +310,11 @@ export const exportConfirmedMakersExcel = async ({ makers, formConfig }) => {
   worksheet.views = [{ state: 'frozen', ySplit: 1, xSplit: fixedColumns.length }];
 
   worksheet.columns.forEach((column, index) => {
+    const key = allColumns[index]?.key;
+    if (key === '__portalUrl') {
+      column.width = 48;
+      return;
+    }
     column.width = index < fixedColumns.length ? 20 : 24;
   });
 
@@ -337,7 +355,11 @@ export const exportInvitedMakersExcel = async ({
   worksheet.addRow(['仕入先コード', '会社名', 'メーカーポータルURL', '状態']);
 
   allInvited.forEach((maker) => {
-    const portalUrl = `${origin}/?mode=maker&id=${exhibitionId}&code=${maker.code}`;
+    const portalUrl = buildMakerPortalUrl({
+      origin,
+      exhibitionId,
+      makerCode: maker?.code
+    });
     worksheet.addRow([
       toCellText(maker.code || ''),
       toCellText(maker.companyName || ''),

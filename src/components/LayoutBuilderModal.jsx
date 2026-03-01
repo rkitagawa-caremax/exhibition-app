@@ -98,6 +98,30 @@ const buildBoothInfoText = (item) => {
     return `${deskCount}-${chairCount}${powerText ? `-${powerText}` : ''}`;
 };
 
+const rangesOverlap = (aStart, aEnd, bStart, bEnd) => {
+    return Math.max(aStart, bStart) < Math.min(aEnd, bEnd);
+};
+
+const DEFAULT_FREE_BOOTH_COLOR = '#ffffff';
+const AUTO_LAYOUT_PATTERNS = [
+    { value: 'grid', label: '標準グリッド', description: '現在の整列パターン' },
+    { value: 'snake', label: 'ジグザグ', description: '左右に折り返しながら配置' },
+    { value: 'perimeter', label: '外周リング', description: '壁沿いからぐるっと配置' },
+    { value: 'ellipse', label: '楕円リング', description: '外側を円状に優先配置' }
+];
+const rectsIntersect = (a, b) => (
+    a.x < b.x + b.w &&
+    a.x + a.w > b.x &&
+    a.y < b.y + b.h &&
+    a.y + a.h > b.y
+);
+const isEditableBooth = (item) => (
+    !!item && (
+        (item.type === 'booth' && !item.makerId)
+        || item.type === 'freeBooth'
+    )
+);
+
 export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exhibition, enterprises: propEnterprises }) {
     const enterprises = useMemo(
         () => propEnterprises || exhibition?.enterprises || [],
@@ -115,8 +139,11 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     const [zoomScale, setZoomScale] = useState(1);
 
     // 自動配置設定
-    const [aisleWidth, setAisleWidth] = useState(savedSettings.aisleWidth || 2);
+    const [aisleWidth, setAisleWidth] = useState(savedSettings.aisleWidth ?? 2);
     const [allowBackToBack, setAllowBackToBack] = useState(savedSettings.allowBackToBack !== false);
+    const [allowHorizontalAisles, setAllowHorizontalAisles] = useState(savedSettings.allowHorizontalAisles !== false);
+    const [allowVerticalAisles, setAllowVerticalAisles] = useState(savedSettings.allowVerticalAisles !== false);
+    const [autoLayoutPattern, setAutoLayoutPattern] = useState(savedSettings.autoLayoutPattern || 'grid');
 
     // キャンバスサイズを動的計算 (ワークスペースはメインエリアの4倍)
     const mainAreaWidth = venueWidth * pixelsPerMeter;
@@ -134,13 +161,31 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     const [isDirty, setIsDirty] = useState(false); // 未保存状態
     const [dragInfo, setDragInfo] = useState(null);
     const [resizeInfo, setResizeInfo] = useState(null);
+    const [selectionBox, setSelectionBox] = useState(null);
     const [isPanning, setIsPanning] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
     const [showAutoLayout, setShowAutoLayout] = useState(false);
 
     // ツール選択
-    const [activeTool, setActiveTool] = useState(null);
+    const [activeTool, setActiveTool] = useState('select');
     const [arrowStart, setArrowStart] = useState(null);
+    const isSelectionMode = activeTool === 'select';
+    const isMarqueeMode = activeTool === 'marquee';
+    const activateSelectionMode = () => {
+        setActiveTool('select');
+        setArrowStart(null);
+        setSelectionBox(null);
+    };
+    const activateMarqueeMode = () => {
+        setActiveTool((currentTool) => (currentTool === 'marquee' ? 'select' : 'marquee'));
+        setArrowStart(null);
+        setSelectionBox(null);
+    };
+    const togglePlacementTool = (tool) => {
+        setArrowStart(null);
+        setSelectionBox(null);
+        setActiveTool((currentTool) => (currentTool === tool ? 'select' : tool));
+    };
 
     // Clean PDF Mode
     const [showCleanPdf, setShowCleanPdf] = useState(false);
@@ -509,6 +554,117 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
         });
     };
 
+    // PDF詳細モード用: 設営時に使う最小限の距離ガイドを生成
+    // 各ブースについて「左基準」と「上基準」のみを出力して、表示過多を避ける
+    const buildPdfMeasurementGuides = (layoutItems) => {
+        const booths = (layoutItems || []).filter((item) => item?.type === 'booth' && item?.w > 0 && item?.h > 0);
+        if (booths.length === 0) return [];
+
+        const minDistancePx = Math.max(4, metersToPixels(0.05)); // 0m同等の表示は省略
+        const maxBoothGapPx = metersToPixels(4); // ブース間は4m以内のみ表示
+        const guideKeySet = new Set();
+        const guides = [];
+
+        const addGuide = (guide) => {
+            if (!guide || !Number.isFinite(guide.distancePx)) return;
+            if (guide.distancePx < minDistancePx) return;
+            if (guide.refType === 'booth' && guide.distancePx > maxBoothGapPx) return;
+
+            const x1 = Math.round(guide.x1 * 10) / 10;
+            const y1 = Math.round(guide.y1 * 10) / 10;
+            const x2 = Math.round(guide.x2 * 10) / 10;
+            const y2 = Math.round(guide.y2 * 10) / 10;
+            const key = `${guide.direction}:${x1},${y1}-${x2},${y2}`;
+            if (guideKeySet.has(key)) return;
+            guideKeySet.add(key);
+
+            guides.push({
+                ...guide,
+                x1,
+                y1,
+                x2,
+                y2,
+                distanceMeters: pixelsToMeters(guide.distancePx),
+            });
+        };
+
+        booths.forEach((booth) => {
+            const boothLeft = booth.x;
+            const boothTop = booth.y;
+            const boothRight = booth.x + booth.w;
+            const boothBottom = booth.y + booth.h;
+            const centerX = booth.x + booth.w / 2;
+            const centerY = booth.y + booth.h / 2;
+
+            let bestLeftGuide = {
+                refType: 'wall',
+                direction: 'horizontal',
+                distancePx: Math.max(0, boothLeft - mainAreaOffsetX),
+                x1: boothLeft,
+                y1: centerY,
+                x2: mainAreaOffsetX,
+                y2: centerY,
+            };
+
+            booths.forEach((other) => {
+                if (other.id === booth.id) return;
+                if (!rangesOverlap(boothTop, boothBottom, other.y, other.y + other.h)) return;
+
+                const otherRight = other.x + other.w;
+                if (otherRight > boothLeft) return;
+
+                const distancePx = boothLeft - otherRight;
+                if (distancePx < bestLeftGuide.distancePx) {
+                    bestLeftGuide = {
+                        refType: 'booth',
+                        direction: 'horizontal',
+                        distancePx,
+                        x1: boothLeft,
+                        y1: centerY,
+                        x2: otherRight,
+                        y2: centerY,
+                    };
+                }
+            });
+
+            let bestTopGuide = {
+                refType: 'wall',
+                direction: 'vertical',
+                distancePx: Math.max(0, boothTop - mainAreaOffsetY),
+                x1: centerX,
+                y1: boothTop,
+                x2: centerX,
+                y2: mainAreaOffsetY,
+            };
+
+            booths.forEach((other) => {
+                if (other.id === booth.id) return;
+                if (!rangesOverlap(boothLeft, boothRight, other.x, other.x + other.w)) return;
+
+                const otherBottom = other.y + other.h;
+                if (otherBottom > boothTop) return;
+
+                const distancePx = boothTop - otherBottom;
+                if (distancePx < bestTopGuide.distancePx) {
+                    bestTopGuide = {
+                        refType: 'booth',
+                        direction: 'vertical',
+                        distancePx,
+                        x1: centerX,
+                        y1: boothTop,
+                        x2: centerX,
+                        y2: otherBottom,
+                    };
+                }
+            });
+
+            addGuide(bestLeftGuide);
+            addGuide(bestTopGuide);
+        });
+
+        return guides;
+    };
+
     const distances = useMemo(() => {
         if (selectedIds.size !== 1) return [];
         const selectedItem = items.find(i => selectedIds.has(i.id));
@@ -521,6 +677,78 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
         if (!target || target.type === 'arrow') return null;
         return target;
     }, [resizeInfo, items]);
+
+    const selectedItem = useMemo(() => {
+        if (selectedIds.size !== 1) return null;
+        const [selectedId] = Array.from(selectedIds);
+        return items.find((item) => item.id === selectedId) || null;
+    }, [selectedIds, items]);
+
+    const selectedEditableBooth = useMemo(() => (
+        isEditableBooth(selectedItem) ? selectedItem : null
+    ), [selectedItem]);
+
+    const layoutZones = useMemo(() => {
+        const activeAreas = [
+            {
+                x: mainAreaOffsetX,
+                y: mainAreaOffsetY,
+                w: mainAreaWidth,
+                h: mainAreaHeight
+            },
+            ...items
+                .filter((item) => item.type === 'venueArea')
+                .map((item) => ({ x: item.x, y: item.y, w: item.w, h: item.h }))
+        ];
+        const removedAreas = items
+            .filter((item) => item.type === 'venueCutout')
+            .map((item) => ({ x: item.x, y: item.y, w: item.w, h: item.h }));
+
+        const bounds = activeAreas.reduce((acc, area) => ({
+            minX: Math.min(acc.minX, area.x),
+            minY: Math.min(acc.minY, area.y),
+            maxX: Math.max(acc.maxX, area.x + area.w),
+            maxY: Math.max(acc.maxY, area.y + area.h),
+        }), {
+            minX: mainAreaOffsetX,
+            minY: mainAreaOffsetY,
+            maxX: mainAreaOffsetX + mainAreaWidth,
+            maxY: mainAreaOffsetY + mainAreaHeight,
+        });
+
+        return { activeAreas, removedAreas, bounds };
+    }, [items, mainAreaOffsetX, mainAreaOffsetY, mainAreaWidth, mainAreaHeight]);
+
+    const getItemBounds = (item) => {
+        if (!item) return null;
+        if (item.type === 'arrow') {
+            const minX = Math.min(item.x ?? 0, item.endX ?? item.x ?? 0);
+            const minY = Math.min(item.y ?? 0, item.endY ?? item.y ?? 0);
+            const maxX = Math.max(item.x ?? 0, item.endX ?? item.x ?? 0);
+            const maxY = Math.max(item.y ?? 0, item.endY ?? item.y ?? 0);
+            return {
+                x: minX - 8,
+                y: minY - 8,
+                w: Math.max(16, maxX - minX + 16),
+                h: Math.max(16, maxY - minY + 16),
+            };
+        }
+
+        return {
+            x: item.x ?? 0,
+            y: item.y ?? 0,
+            w: Math.max(0, item.w ?? 0),
+            h: Math.max(0, item.h ?? 0),
+        };
+    };
+
+    const normalizeSelectionRect = (box) => {
+        const x = Math.min(box.startX, box.currentX);
+        const y = Math.min(box.startY, box.currentY);
+        const w = Math.abs(box.currentX - box.startX);
+        const h = Math.abs(box.currentY - box.startY);
+        return { x, y, w, h };
+    };
 
     // ============================================================================
     // 要素追加
@@ -556,15 +784,17 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                     newItem.isEditable = false;
                 } else {
                     newItem.isEditable = true;
-                    newItem.label = 'ブース';
+                    newItem.label = '';
+                    newItem.fillColor = DEFAULT_FREE_BOOTH_COLOR;
                 }
                 break;
             case 'freeBooth':
                 newItem.type = 'booth';
-                newItem.label = 'ブース';
+                newItem.label = '';
                 newItem.isEditable = true;
                 newItem.w = boothW;
                 newItem.h = boothH;
+                newItem.fillColor = DEFAULT_FREE_BOOTH_COLOR;
                 break;
             case 'pillar':
                 newItem.w = metersToPixels(0.5);
@@ -595,43 +825,675 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 newItem.h = metersToPixels(10);
                 newItem.label = ''; // ラベルなし
                 break;
+            case 'venueCutout':
+                newItem.x = centerX - metersToPixels(2.5);
+                newItem.y = centerY - metersToPixels(2.5);
+                newItem.w = metersToPixels(5);
+                newItem.h = metersToPixels(5);
+                newItem.label = '';
+                break;
             default:
                 break;
         }
 
         setItems([...items, newItem]);
+        setActiveTool('select');
+        setArrowStart(null);
         setSelectedIds(new Set([newItem.id]));
         setIsDirty(true);
         requestAnimationFrame(() => centerItemInViewport(newItem));
     };
 
     const handleViewportMouseDown = (e) => {
-        if (e.button !== 0 || activeTool) return;
+        if (!isSelectionMode && !isMarqueeMode) return;
+        if (e.button === 1) {
+            const container = scrollContainerRef.current;
+            if (!container) return;
+
+            panInfoRef.current = {
+                startX: e.clientX,
+                startY: e.clientY,
+                scrollLeft: container.scrollLeft,
+                scrollTop: container.scrollTop,
+                moved: false
+            };
+            suppressCanvasClickRef.current = false;
+            setIsPanning(true);
+            e.preventDefault();
+            return;
+        }
+
         const target = e.target;
         if (!target || typeof target.closest !== 'function') return;
         if (target.closest('[data-layout-item=\"true\"]')) return;
         if (target.closest('input, textarea, button, select, label')) return;
-        const container = scrollContainerRef.current;
-        if (!container) return;
+        if (e.button !== 0) return;
 
-        panInfoRef.current = {
-            startX: e.clientX,
-            startY: e.clientY,
-            scrollLeft: container.scrollLeft,
-            scrollTop: container.scrollTop,
-            moved: false
-        };
+        if (isSelectionMode) {
+            const container = scrollContainerRef.current;
+            if (!container) return;
+
+            panInfoRef.current = {
+                startX: e.clientX,
+                startY: e.clientY,
+                scrollLeft: container.scrollLeft,
+                scrollTop: container.scrollTop,
+                moved: false
+            };
+            suppressCanvasClickRef.current = false;
+            setIsPanning(true);
+            e.preventDefault();
+            return;
+        }
+
+        const rect = canvasRef.current?.getBoundingClientRect();
+        if (!rect) return;
+
+        const startX = Math.max(0, Math.min(canvasWidth, (e.clientX - rect.left) / zoomScale));
+        const startY = Math.max(0, Math.min(canvasHeight, (e.clientY - rect.top) / zoomScale));
+        setSelectionBox({
+            startX,
+            startY,
+            currentX: startX,
+            currentY: startY,
+            additive: e.shiftKey || e.ctrlKey || e.metaKey,
+            moved: false,
+        });
         suppressCanvasClickRef.current = false;
-        setIsPanning(true);
         e.preventDefault();
+    };
+
+    const autoLayoutPreview = useMemo(() => {
+        if (!showAutoLayout) {
+            return {
+                error: null,
+                placements: [],
+                retainedItems: [],
+                placedCount: 0,
+                remainingCount: 0,
+                totalCount: 0,
+                bounds: layoutZones.bounds,
+                activeAreas: layoutZones.activeAreas,
+                removedAreas: layoutZones.removedAreas,
+            };
+        }
+
+        const makers = [...confirmedMakers].sort((a, b) => {
+            const catA = a.category ? a.category.name : 'ZZZZ';
+            const catB = b.category ? b.category.name : 'ZZZZ';
+            if (catA < catB) return -1;
+            if (catA > catB) return 1;
+            if (a.companyName < b.companyName) return -1;
+            if (a.companyName > b.companyName) return 1;
+            return 0;
+        });
+
+        const retainedItems = items.filter((item) => !(item.type === 'booth' && item.makerId));
+        const collisionItems = retainedItems.filter((item) => !['venueArea', 'venueCutout'].includes(item.type));
+
+        if (makers.length === 0) {
+            return {
+                error: 'no-makers',
+                placements: [],
+                retainedItems,
+                placedCount: 0,
+                remainingCount: 0,
+                totalCount: 0,
+                bounds: layoutZones.bounds,
+                activeAreas: layoutZones.activeAreas,
+                removedAreas: layoutZones.removedAreas,
+            };
+        }
+
+        const boothW = metersToPixels(defaultBoothWidth);
+        const boothH = metersToPixels(defaultBoothHeight);
+        const aisleW = metersToPixels(aisleWidth);
+        const horizontalGap = allowHorizontalAisles ? aisleW : 0;
+        const verticalGap = allowVerticalAisles ? aisleW : 0;
+        const backGap = allowBackToBack ? 0 : metersToPixels(0.5);
+
+        const minX = layoutZones.bounds.minX;
+        const minY = layoutZones.bounds.minY;
+        const maxX = layoutZones.bounds.maxX;
+        const maxY = layoutZones.bounds.maxY;
+
+        const checkCollision = (rect1, rect2) => (
+            rect1.x < rect2.x + rect2.w &&
+            rect1.x + rect1.w > rect2.x &&
+            rect1.y < rect2.y + rect2.h &&
+            rect1.y + rect1.h > rect2.y
+        );
+
+        const getMakerBoothWidth = (maker) => {
+            const countStr = String(maker.boothCount || '1').replace(/[^\d]/g, '');
+            const count = parseInt(countStr, 10) || 1;
+            return boothW * count;
+        };
+
+        const createPlacement = (maker, x, y, width, index) => ({
+            previewKey: `preview-${index}-${maker.id || maker.companyName || 'maker'}`,
+            type: 'booth',
+            x,
+            y,
+            w: width,
+            h: boothH,
+            makerId: maker.id,
+            companyName: maker.companyName,
+            deskCount: maker.deskCount,
+            chairCount: maker.chairCount,
+            hasPower: maker.hasPower,
+            label: maker.companyName,
+            category: maker.category,
+            rotation: 0,
+        });
+
+        const canPlaceBooth = (x, y, width, occupiedItems) => {
+            if (x < minX || y < minY || x + width > maxX || y + boothH > maxY) return false;
+
+            const candidateRect = { x, y, w: width, h: boothH };
+            const samplePoints = [
+                { x: candidateRect.x + 2, y: candidateRect.y + 2 },
+                { x: candidateRect.x + candidateRect.w - 2, y: candidateRect.y + 2 },
+                { x: candidateRect.x + 2, y: candidateRect.y + candidateRect.h - 2 },
+                { x: candidateRect.x + candidateRect.w - 2, y: candidateRect.y + candidateRect.h - 2 },
+                { x: candidateRect.x + candidateRect.w / 2, y: candidateRect.y + 2 },
+                { x: candidateRect.x + candidateRect.w / 2, y: candidateRect.y + candidateRect.h - 2 },
+                { x: candidateRect.x + 2, y: candidateRect.y + candidateRect.h / 2 },
+                { x: candidateRect.x + candidateRect.w - 2, y: candidateRect.y + candidateRect.h / 2 },
+                { x: candidateRect.x + candidateRect.w / 2, y: candidateRect.y + candidateRect.h / 2 },
+            ];
+
+            const isPointInRect = (point, rect) => (
+                point.x >= rect.x &&
+                point.x <= rect.x + rect.w &&
+                point.y >= rect.y &&
+                point.y <= rect.y + rect.h
+            );
+
+            const insideAllowedZone = samplePoints.every((point) => (
+                layoutZones.activeAreas.some((area) => isPointInRect(point, area))
+                && !layoutZones.removedAreas.some((area) => isPointInRect(point, area))
+            ));
+            if (!insideAllowedZone) return false;
+            if (layoutZones.removedAreas.some((area) => rectsIntersect(candidateRect, area))) return false;
+
+            const collisionRect = {
+                x: candidateRect.x + 5,
+                y: candidateRect.y + 5,
+                w: Math.max(0, candidateRect.w - 10),
+                h: Math.max(0, candidateRect.h - 10),
+            };
+
+            return !occupiedItems.some((item) => {
+                if (!item || !Number.isFinite(item.w) || !Number.isFinite(item.h)) return false;
+                if (item.w <= 0 || item.h <= 0) return false;
+                return checkCollision(collisionRect, item);
+            });
+        };
+
+        const rowPositions = [];
+        let nextRowY = minY;
+        while (nextRowY + boothH <= maxY) {
+            rowPositions.push(nextRowY);
+
+            if (allowBackToBack) {
+                const backRowY = nextRowY + boothH + backGap;
+                if (backRowY + boothH <= maxY) {
+                    rowPositions.push(backRowY);
+                }
+                nextRowY = backRowY + boothH + verticalGap;
+            } else {
+                nextRowY += boothH + verticalGap;
+            }
+
+            if (rowPositions.length > 500) break;
+        }
+
+        const colPositions = [];
+        let nextColX = minX;
+        while (nextColX + boothW <= maxX) {
+            colPositions.push(nextColX);
+            nextColX += boothW + horizontalGap;
+            if (colPositions.length > 500) break;
+        }
+
+        if (rowPositions.length === 0 || colPositions.length === 0) {
+            return {
+                error: 'no-space',
+                placements: [],
+                retainedItems,
+                placedCount: 0,
+                remainingCount: makers.length,
+                totalCount: makers.length,
+                bounds: layoutZones.bounds,
+                activeAreas: layoutZones.activeAreas,
+                removedAreas: layoutZones.removedAreas,
+            };
+        }
+
+        const slotMatrix = rowPositions.map((y, rowIndex) => (
+            colPositions.map((x, colIndex) => ({ x, y, rowIndex, colIndex }))
+        ));
+
+        const buildGridSlots = () => slotMatrix.flat();
+        const buildSnakeSlots = () => slotMatrix.flatMap((rowSlots, rowIndex) => (
+            rowIndex % 2 === 0 ? rowSlots : [...rowSlots].reverse()
+        ));
+        const buildPerimeterSlots = () => {
+            const perimeterSlots = [];
+            const rowCount = slotMatrix.length;
+            const colCount = slotMatrix[0]?.length || 0;
+            const maxRing = Math.ceil(Math.min(rowCount, colCount) / 2);
+
+            for (let ring = 0; ring < maxRing; ring++) {
+                const top = ring;
+                const bottom = rowCount - 1 - ring;
+                const left = ring;
+                const right = colCount - 1 - ring;
+
+                if (top > bottom || left > right) break;
+
+                for (let col = left; col <= right; col++) perimeterSlots.push(slotMatrix[top][col]);
+                for (let row = top + 1; row <= bottom; row++) perimeterSlots.push(slotMatrix[row][right]);
+                if (bottom > top) {
+                    for (let col = right - 1; col >= left; col--) perimeterSlots.push(slotMatrix[bottom][col]);
+                }
+                if (left < right) {
+                    for (let row = bottom - 1; row > top; row--) perimeterSlots.push(slotMatrix[row][left]);
+                }
+            }
+
+            return perimeterSlots;
+        };
+        const buildEllipseSlots = () => {
+            const rowCenter = (rowPositions.length - 1) / 2;
+            const colCenter = (colPositions.length - 1) / 2;
+            const rowRadius = Math.max(rowCenter, 1);
+            const colRadius = Math.max(colCenter, 1);
+
+            return slotMatrix
+                .flat()
+                .map((slot) => {
+                    const nx = (slot.colIndex - colCenter) / colRadius;
+                    const ny = (slot.rowIndex - rowCenter) / rowRadius;
+                    const radialDistance = Math.sqrt((nx * nx) + (ny * ny));
+                    let angle = Math.atan2(ny, nx);
+                    if (angle < 0) angle += Math.PI * 2;
+
+                    return {
+                        slot,
+                        ringScore: Math.abs(1 - radialDistance),
+                        angle,
+                        radialDistance,
+                    };
+                })
+                .sort((a, b) => {
+                    if (Math.abs(a.ringScore - b.ringScore) > 0.0001) return a.ringScore - b.ringScore;
+                    if (Math.abs(a.angle - b.angle) > 0.0001) return a.angle - b.angle;
+                    return b.radialDistance - a.radialDistance;
+                })
+                .map((entry) => entry.slot);
+        };
+
+        const slotOrder = (() => {
+            switch (autoLayoutPattern) {
+                case 'snake':
+                    return buildSnakeSlots();
+                case 'perimeter':
+                    return buildPerimeterSlots();
+                case 'ellipse':
+                    return buildEllipseSlots();
+                default:
+                    return buildGridSlots();
+            }
+        })();
+
+        const occupiedItems = [...collisionItems];
+        const placements = [];
+        let currentMakerIdx = 0;
+
+        for (const slot of slotOrder) {
+            if (currentMakerIdx >= makers.length) break;
+
+            const maker = makers[currentMakerIdx];
+            const width = getMakerBoothWidth(maker);
+            if (!canPlaceBooth(slot.x, slot.y, width, occupiedItems)) continue;
+
+            const placement = createPlacement(maker, slot.x, slot.y, width, placements.length);
+            occupiedItems.push(placement);
+            placements.push(placement);
+            currentMakerIdx++;
+        }
+
+        return {
+            error: null,
+            placements,
+            retainedItems,
+            placedCount: placements.length,
+            remainingCount: makers.length - currentMakerIdx,
+            totalCount: makers.length,
+            bounds: layoutZones.bounds,
+            activeAreas: layoutZones.activeAreas,
+            removedAreas: layoutZones.removedAreas,
+        };
+    }, [
+        showAutoLayout,
+        confirmedMakers,
+        items,
+        defaultBoothWidth,
+        defaultBoothHeight,
+        aisleWidth,
+        allowHorizontalAisles,
+        allowVerticalAisles,
+        allowBackToBack,
+        autoLayoutPattern,
+        layoutZones,
+        metersToPixels,
+    ]);
+
+    const runAutoLayoutPreviewLegacy = () => {
+        if (!window.confirm('ブース・ドア・障害物などの配置済み要素は維持し、招致済みメーカーのブースのみを再配置します。\n自動配置を実行しますか？')) return;
+
+        const makers = [...confirmedMakers].sort((a, b) => {
+            const catA = a.category ? a.category.name : 'ZZZZ';
+            const catB = b.category ? b.category.name : 'ZZZZ';
+            if (catA < catB) return -1;
+            if (catA > catB) return 1;
+            if (a.companyName < b.companyName) return -1;
+            if (a.companyName > b.companyName) return 1;
+            return 0;
+        });
+
+        if (makers.length === 0) {
+            alert('配置対象のメーカーがありません');
+            return;
+        }
+
+        const boothW = metersToPixels(defaultBoothWidth);
+        const boothH = metersToPixels(defaultBoothHeight);
+        const aisleW = metersToPixels(aisleWidth);
+        const horizontalGap = allowHorizontalAisles ? aisleW : 0;
+        const verticalGap = allowVerticalAisles ? aisleW : 0;
+        const backGap = allowBackToBack ? 0 : metersToPixels(0.5);
+
+        const minX = layoutZones.bounds.minX;
+        const minY = layoutZones.bounds.minY;
+        const maxX = layoutZones.bounds.maxX;
+        const maxY = layoutZones.bounds.maxY;
+
+        const retainedItems = items.filter((item) => !(item.type === 'booth' && item.makerId));
+        const collisionItems = retainedItems.filter((item) => !['venueArea', 'venueCutout'].includes(item.type));
+
+        const checkCollision = (rect1, rect2) => (
+            rect1.x < rect2.x + rect2.w &&
+            rect1.x + rect1.w > rect2.x &&
+            rect1.y < rect2.y + rect2.h &&
+            rect1.y + rect1.h > rect2.y
+        );
+
+        const getMakerBoothWidth = (maker) => {
+            const countStr = String(maker.boothCount || '1').replace(/[^\d]/g, '');
+            const count = parseInt(countStr, 10) || 1;
+            return boothW * count;
+        };
+
+        const createMakerBooth = (maker, x, y, width) => ({
+            id: crypto.randomUUID(),
+            type: 'booth',
+            x,
+            y,
+            w: width,
+            h: boothH,
+            makerId: maker.id,
+            companyName: maker.companyName,
+            deskCount: maker.deskCount,
+            chairCount: maker.chairCount,
+            hasPower: maker.hasPower,
+            label: maker.companyName,
+            category: maker.category,
+            rotation: 0
+        });
+
+        const canPlaceBooth = (x, y, width, occupiedItems) => {
+            if (x < minX || y < minY || x + width > maxX || y + boothH > maxY) return false;
+
+            const candidateRect = {
+                x,
+                y,
+                w: width,
+                h: boothH
+            };
+
+            const samplePoints = [
+                { x: candidateRect.x + 2, y: candidateRect.y + 2 },
+                { x: candidateRect.x + candidateRect.w - 2, y: candidateRect.y + 2 },
+                { x: candidateRect.x + 2, y: candidateRect.y + candidateRect.h - 2 },
+                { x: candidateRect.x + candidateRect.w - 2, y: candidateRect.y + candidateRect.h - 2 },
+                { x: candidateRect.x + candidateRect.w / 2, y: candidateRect.y + 2 },
+                { x: candidateRect.x + candidateRect.w / 2, y: candidateRect.y + candidateRect.h - 2 },
+                { x: candidateRect.x + 2, y: candidateRect.y + candidateRect.h / 2 },
+                { x: candidateRect.x + candidateRect.w - 2, y: candidateRect.y + candidateRect.h / 2 },
+                { x: candidateRect.x + candidateRect.w / 2, y: candidateRect.y + candidateRect.h / 2 },
+            ];
+
+            const isPointInRect = (point, rect) => (
+                point.x >= rect.x &&
+                point.x <= rect.x + rect.w &&
+                point.y >= rect.y &&
+                point.y <= rect.y + rect.h
+            );
+
+            const insideAllowedZone = samplePoints.every((point) => (
+                layoutZones.activeAreas.some((area) => isPointInRect(point, area))
+                && !layoutZones.removedAreas.some((area) => isPointInRect(point, area))
+            ));
+            if (!insideAllowedZone) return false;
+            if (layoutZones.removedAreas.some((area) => rectsIntersect(candidateRect, area))) return false;
+
+            const collisionRect = {
+                x: candidateRect.x + 5,
+                y: candidateRect.y + 5,
+                w: Math.max(0, candidateRect.w - 10),
+                h: Math.max(0, candidateRect.h - 10)
+            };
+
+            return !occupiedItems.some((item) => {
+                if (!item || !Number.isFinite(item.w) || !Number.isFinite(item.h)) return false;
+                if (item.w <= 0 || item.h <= 0) return false;
+                return checkCollision(collisionRect, item);
+            });
+        };
+
+        const rowPositions = [];
+        let nextRowY = minY;
+        while (nextRowY + boothH <= maxY) {
+            rowPositions.push(nextRowY);
+
+            if (allowBackToBack) {
+                const backRowY = nextRowY + boothH + backGap;
+                if (backRowY + boothH <= maxY) {
+                    rowPositions.push(backRowY);
+                }
+                nextRowY = backRowY + boothH + verticalGap;
+            } else {
+                nextRowY += boothH + verticalGap;
+            }
+
+            if (rowPositions.length > 500) break;
+        }
+
+        const colPositions = [];
+        let nextColX = minX;
+        while (nextColX + boothW <= maxX) {
+            colPositions.push(nextColX);
+            nextColX += boothW + horizontalGap;
+            if (colPositions.length > 500) break;
+        }
+
+        if (rowPositions.length === 0 || colPositions.length === 0) {
+            alert('会場サイズに対してブースまたは通路設定が大きすぎるため、自動配置できません。');
+            return;
+        }
+
+        const slotMatrix = rowPositions.map((y, rowIndex) => (
+            colPositions.map((x, colIndex) => ({ x, y, rowIndex, colIndex }))
+        ));
+
+        const buildGridSlots = () => slotMatrix.flat();
+
+        const buildSnakeSlots = () => slotMatrix.flatMap((rowSlots, rowIndex) => (
+            rowIndex % 2 === 0 ? rowSlots : [...rowSlots].reverse()
+        ));
+
+        const buildPerimeterSlots = () => {
+            const perimeterSlots = [];
+            const rowCount = slotMatrix.length;
+            const colCount = slotMatrix[0]?.length || 0;
+            const maxRing = Math.ceil(Math.min(rowCount, colCount) / 2);
+
+            for (let ring = 0; ring < maxRing; ring++) {
+                const top = ring;
+                const bottom = rowCount - 1 - ring;
+                const left = ring;
+                const right = colCount - 1 - ring;
+
+                if (top > bottom || left > right) break;
+
+                for (let col = left; col <= right; col++) {
+                    perimeterSlots.push(slotMatrix[top][col]);
+                }
+                for (let row = top + 1; row <= bottom; row++) {
+                    perimeterSlots.push(slotMatrix[row][right]);
+                }
+                if (bottom > top) {
+                    for (let col = right - 1; col >= left; col--) {
+                        perimeterSlots.push(slotMatrix[bottom][col]);
+                    }
+                }
+                if (left < right) {
+                    for (let row = bottom - 1; row > top; row--) {
+                        perimeterSlots.push(slotMatrix[row][left]);
+                    }
+                }
+            }
+
+            return perimeterSlots;
+        };
+
+        const buildEllipseSlots = () => {
+            const rowCenter = (rowPositions.length - 1) / 2;
+            const colCenter = (colPositions.length - 1) / 2;
+            const rowRadius = Math.max(rowCenter, 1);
+            const colRadius = Math.max(colCenter, 1);
+
+            return slotMatrix
+                .flat()
+                .map((slot) => {
+                    const nx = (slot.colIndex - colCenter) / colRadius;
+                    const ny = (slot.rowIndex - rowCenter) / rowRadius;
+                    const radialDistance = Math.sqrt((nx * nx) + (ny * ny));
+                    let angle = Math.atan2(ny, nx);
+                    if (angle < 0) angle += Math.PI * 2;
+
+                    return {
+                        slot,
+                        ringScore: Math.abs(1 - radialDistance),
+                        angle,
+                        radialDistance
+                    };
+                })
+                .sort((a, b) => {
+                    if (Math.abs(a.ringScore - b.ringScore) > 0.0001) {
+                        return a.ringScore - b.ringScore;
+                    }
+                    if (Math.abs(a.angle - b.angle) > 0.0001) {
+                        return a.angle - b.angle;
+                    }
+                    return b.radialDistance - a.radialDistance;
+                })
+                .map((entry) => entry.slot);
+        };
+
+        const slotOrder = (() => {
+            switch (autoLayoutPattern) {
+                case 'snake':
+                    return buildSnakeSlots();
+                case 'perimeter':
+                    return buildPerimeterSlots();
+                case 'ellipse':
+                    return buildEllipseSlots();
+                default:
+                    return buildGridSlots();
+            }
+        })();
+
+        const occupiedItems = [...collisionItems];
+        const nextItems = [...retainedItems];
+        let currentMakerIdx = 0;
+
+        for (const slot of slotOrder) {
+            if (currentMakerIdx >= makers.length) break;
+
+            const maker = makers[currentMakerIdx];
+            const width = getMakerBoothWidth(maker);
+            if (!canPlaceBooth(slot.x, slot.y, width, occupiedItems)) continue;
+
+            const placedBooth = createMakerBooth(maker, slot.x, slot.y, width);
+            occupiedItems.push(placedBooth);
+            nextItems.push(placedBooth);
+            currentMakerIdx++;
+        }
+
+        if (currentMakerIdx < makers.length) {
+            alert(`配置スペースが足りず ${makers.length - currentMakerIdx} 社を配置できませんでした。通路やパターンを調整して再実行してください。`);
+        }
+
+        setItems(nextItems);
+        setShowAutoLayout(false);
+        setSelectedIds(new Set());
+        setIsDirty(true);
+    };
+
+    const runAutoLayout = () => {
+        if (!window.confirm('ブース・ドア・障害物などの配置済み要素は維持し、招致済みメーカーのブースのみを再配置します。\n自動配置を実行しますか？')) return;
+
+        if (autoLayoutPreview.error === 'no-makers') {
+            alert('配置対象のメーカーがありません');
+            return;
+        }
+
+        if (autoLayoutPreview.error === 'no-space') {
+            alert('会場サイズに対してブースまたは通路設定が大きすぎるため、自動配置できません。');
+            return;
+        }
+
+        const nextItems = [
+            ...autoLayoutPreview.retainedItems,
+            ...autoLayoutPreview.placements.map((placement) => {
+                const { previewKey, ...placementItem } = placement;
+                return {
+                    ...placementItem,
+                    id: crypto.randomUUID(),
+                };
+            }),
+        ];
+
+        if (autoLayoutPreview.remainingCount > 0) {
+            alert(`配置スペースが足りず ${autoLayoutPreview.remainingCount} 社を配置できませんでした。通路やパターンを調整して再実行してください。`);
+        }
+
+        setItems(nextItems);
+        setShowAutoLayout(false);
+        setSelectedIds(new Set());
+        setIsDirty(true);
     };
 
     // ============================================================================
     // ドラッグ＆ドロップ処理
     // ============================================================================
     const handleMouseDown = (e, id) => {
+        if (e.button !== 0 || !isSelectionMode) return;
         e.stopPropagation();
-        if (activeTool) return;
 
         if (e.shiftKey || e.ctrlKey || e.metaKey) {
             setSelectedIds(prev => {
@@ -666,6 +1528,30 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     };
 
     const handleMouseMove = (e) => {
+        if (selectionBox && !dragInfo && !resizeInfo && !panInfoRef.current) {
+            const rect = canvasRef.current?.getBoundingClientRect();
+            if (rect) {
+                const nextX = Math.max(0, Math.min(canvasWidth, (e.clientX - rect.left) / zoomScale));
+                const nextY = Math.max(0, Math.min(canvasHeight, (e.clientY - rect.top) / zoomScale));
+                const moved = (
+                    Math.abs(nextX - selectionBox.startX) > (3 / zoomScale)
+                    || Math.abs(nextY - selectionBox.startY) > (3 / zoomScale)
+                );
+
+                if (moved) {
+                    suppressCanvasClickRef.current = true;
+                }
+
+                setSelectionBox((prev) => prev ? {
+                    ...prev,
+                    currentX: nextX,
+                    currentY: nextY,
+                    moved: prev.moved || moved,
+                } : prev);
+                e.preventDefault();
+            }
+        }
+
         if (panInfoRef.current && !dragInfo && !resizeInfo) {
             const container = scrollContainerRef.current;
             if (container) {
@@ -761,6 +1647,24 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     };
 
     const handleMouseUp = () => {
+        if (selectionBox) {
+            if (selectionBox.moved) {
+                const selectionRect = normalizeSelectionRect(selectionBox);
+                const hitIds = items
+                    .filter((item) => {
+                        const bounds = getItemBounds(item);
+                        return bounds ? rectsIntersect(selectionRect, bounds) : false;
+                    })
+                    .map((item) => item.id);
+
+                setSelectedIds((prev) => {
+                    const next = selectionBox.additive ? new Set(prev) : new Set();
+                    hitIds.forEach((id) => next.add(id));
+                    return next;
+                });
+            }
+            setSelectionBox(null);
+        }
         setDragInfo(null);
         setResizeInfo(null);
         panInfoRef.current = null;
@@ -817,7 +1721,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 };
                 setItems([...items, newArrow]);
                 setArrowStart(null);
-                setActiveTool(null);
+                setActiveTool('select');
                 setIsDirty(true);
                 requestAnimationFrame(() => centerItemInViewport(newArrow));
             }
@@ -838,7 +1742,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 fontSize: 16 // Default font size
             };
             setItems([...items, newItem]);
-            setActiveTool(null);
+            setActiveTool('select');
             setSelectedIds(new Set([newItem.id]));
             setIsDirty(true);
             requestAnimationFrame(() => centerItemInViewport(newItem));
@@ -867,7 +1771,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     // ============================================================================
     // 自動配置
     // ============================================================================
-    const runAutoLayout = () => {
+    const runAutoLayoutLegacy = () => {
         if (!window.confirm('ブース以外の設置物（柱・ドア・障害物など）を除き、既存の配置はリセットされます。\n自動配置を実行しますか？')) return;
 
         // カテゴリ順にソート (Group by Category)
@@ -1106,7 +2010,10 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 boothHeight: defaultBoothHeight,
                 scale: pixelsPerMeter,
                 aisleWidth,
-                allowBackToBack
+                allowBackToBack,
+                allowHorizontalAisles,
+                allowVerticalAisles,
+                autoLayoutPattern
             },
             items
         };
@@ -1138,11 +2045,22 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
         }
         if ((item.type === 'booth' && !item.makerId) || item.type === 'freeBooth') {
             return (
-                <div className="w-full h-full flex items-center justify-center p-1">
+                <div
+                    className="w-full h-full flex items-center justify-center p-1"
+                    style={{ backgroundColor: item.fillColor || DEFAULT_FREE_BOOTH_COLOR }}
+                >
                     <textarea
-                        className="bg-transparent text-[10px] text-center leading-tight whitespace-pre-wrap w-full h-full outline-none font-bold resize-none overflow-hidden"
-                        value={item.label || ''}
+                        className="bg-transparent text-[10px] text-center leading-tight whitespace-pre-wrap w-full h-full outline-none font-bold resize-none overflow-auto"
+                        value={item.label ?? ''}
                         onChange={(e) => updateItemProp(item.id, 'label', e.target.value)}
+                        onScroll={(e) => updateItemProp(item.id, 'labelScrollTop', e.currentTarget.scrollTop)}
+                        ref={(el) => {
+                            if (!el) return;
+                            const savedScrollTop = typeof item.labelScrollTop === 'number' ? item.labelScrollTop : 0;
+                            if (savedScrollTop > 0 && Math.abs(el.scrollTop - savedScrollTop) > 1) {
+                                el.scrollTop = savedScrollTop;
+                            }
+                        }}
                         onMouseDown={e => e.stopPropagation()}
                         placeholder="ブース名"
                     />
@@ -1179,6 +2097,17 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 />
             );
         }
+        if (item.type === 'venueCutout') {
+            return (
+                <div
+                    className="w-full h-full"
+                    style={{
+                        backgroundColor: 'rgba(148, 163, 184, 0.35)',
+                        backgroundImage: 'repeating-linear-gradient(135deg, rgba(239, 68, 68, 0.45) 0 8px, transparent 8px 16px)'
+                    }}
+                />
+            );
+        }
         return <span className="text-[10px] text-center p-1 pointer-events-none overflow-hidden select-none">{item.label}</span>;
     };
 
@@ -1197,6 +2126,8 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 return 'bg-transparent border-4 border-slate-300 opacity-50';
             case 'venueArea':
                 return 'bg-white'; // 境界線なし（メインエリアと完全同化）
+            case 'venueCutout':
+                return 'bg-slate-200/60 border-2 border-dashed border-red-400';
             case 'door':
                 return 'bg-green-100 border-2 border-green-600';
             case 'obstacle':
@@ -1385,9 +2316,13 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
             linear-gradient(to bottom, #f1f5f9 1px, transparent 1px)
           `;
                     el.style.backgroundSize = `${pixelsPerMeter}px ${pixelsPerMeter}px`;
-                } else if (item.type === 'booth' || item.type === 'freeBooth') {
+                } else if (item.type === 'venueCutout') {
+                    el.style.backgroundColor = 'rgba(148, 163, 184, 0.35)';
+                    el.style.border = '2px dashed #f87171';
+                    el.style.backgroundImage = 'repeating-linear-gradient(135deg, rgba(239, 68, 68, 0.45) 0 8px, transparent 8px 16px)';
+                } else if (item.type === 'booth' && item.makerId) {
                     el.style.border = '2px solid #64748b'; // slate-500
-                    el.style.backgroundColor = item.type === 'booth' && item.category?.color ? item.category.color : '#ffffff';
+                    el.style.backgroundColor = item.category?.color || '#ffffff';
                     el.style.display = 'flex';
                     el.style.flexDirection = 'column';
                     el.style.justifyContent = 'center';
@@ -1398,9 +2333,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
 
                     // ブース内テキスト
                     const label = frameDoc.createElement('div');
-                    label.textContent = item.type === 'booth'
-                        ? (sanitizeCompanyLabel(item.companyName || item.label || 'ブース') || 'ブース')
-                        : (item.label || 'ブース');
+                    label.textContent = sanitizeCompanyLabel(item.companyName || item.label || '');
                     label.style.fontSize = '12px'; // 少し大きめに
                     label.style.fontWeight = 'bold';
                     label.style.color = '#000000';
@@ -1413,9 +2346,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
 
                     // 詳細情報 (Clean Modeでない場合)
                     if (!showCleanPdf) {
-                        const infoText = (item.type === 'booth' && item.makerId)
-                            ? buildBoothInfoText(item)
-                            : (item.boothNo || '');
+                        const infoText = buildBoothInfoText(item);
                         if (infoText) {
                             const info = frameDoc.createElement('div');
                             info.textContent = infoText;
@@ -1426,6 +2357,38 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                             el.appendChild(info);
                         }
                     }
+                } else if (item.type === 'booth' || item.type === 'freeBooth') {
+                    // 編集可能ブースは、画面上のテキスト表示（スクロール位置含む）を優先して再現
+                    el.style.border = '2px solid #64748b';
+                    el.style.backgroundColor = item.fillColor || DEFAULT_FREE_BOOTH_COLOR;
+                    el.style.overflow = 'hidden';
+                    el.style.padding = '0';
+
+                    const textViewport = frameDoc.createElement('div');
+                    textViewport.style.width = '100%';
+                    textViewport.style.height = '100%';
+                    textViewport.style.overflow = 'hidden';
+                    textViewport.style.padding = '2px';
+                    textViewport.style.boxSizing = 'border-box';
+
+                    const label = frameDoc.createElement('div');
+                    label.textContent = item.label ?? '';
+                    label.style.fontSize = '10px';
+                    label.style.fontWeight = 'bold';
+                    label.style.color = '#000000';
+                    label.style.lineHeight = '1.2';
+                    label.style.whiteSpace = 'pre-wrap';
+                    label.style.wordBreak = 'break-word';
+                    label.style.textAlign = 'center';
+                    label.style.fontFamily = '"Noto Sans JP", sans-serif';
+
+                    const savedScrollTop = typeof item.labelScrollTop === 'number' ? item.labelScrollTop : 0;
+                    if (savedScrollTop > 0) {
+                        label.style.transform = `translateY(-${savedScrollTop}px)`;
+                    }
+
+                    textViewport.appendChild(label);
+                    el.appendChild(textViewport);
                 } else if (item.type === 'pillar') {
                     el.style.backgroundColor = '#64748b'; // slate-500
                     el.style.border = '1px solid #475569';
@@ -1434,6 +2397,10 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                     el.style.fontSize = '14px';
                     el.style.color = '#000000';
                     el.style.whiteSpace = 'pre-wrap';
+                    el.style.display = 'flex';
+                    el.style.alignItems = 'center';
+                    el.style.justifyContent = 'center';
+                    el.style.textAlign = 'center';
                 } else if (item.type === 'door') {
                     el.style.backgroundColor = 'transparent';
                     el.style.border = 'none';
@@ -1462,6 +2429,52 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
 
                 container.appendChild(el);
             });
+
+            if (!showCleanPdf) {
+                const measurementGuides = buildPdfMeasurementGuides(items);
+
+                measurementGuides.forEach((guide) => {
+                    const x1 = guide.x1 - minX;
+                    const y1 = guide.y1 - minY;
+                    const x2 = guide.x2 - minX;
+                    const y2 = guide.y2 - minY;
+                    const dx = x2 - x1;
+                    const dy = y2 - y1;
+                    const length = Math.hypot(dx, dy);
+                    if (!Number.isFinite(length) || length <= 1) return;
+
+                    const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+
+                    const line = frameDoc.createElement('div');
+                    line.style.position = 'absolute';
+                    line.style.left = `${x1}px`;
+                    line.style.top = `${y1}px`;
+                    line.style.width = `${length}px`;
+                    line.style.borderTop = '1px dashed #ef4444';
+                    line.style.transformOrigin = '0 0';
+                    line.style.transform = `rotate(${angle}deg)`;
+                    line.style.pointerEvents = 'none';
+                    container.appendChild(line);
+
+                    const label = frameDoc.createElement('div');
+                    label.textContent = `${guide.distanceMeters.toFixed(1)}m`;
+                    label.style.position = 'absolute';
+                    label.style.left = `${(x1 + x2) / 2}px`;
+                    label.style.top = `${(y1 + y2) / 2}px`;
+                    label.style.fontSize = '9px';
+                    label.style.fontWeight = 'bold';
+                    label.style.color = '#dc2626';
+                    label.style.backgroundColor = '#ffffff';
+                    label.style.border = '1px solid #fecaca';
+                    label.style.padding = '0 3px';
+                    label.style.borderRadius = '3px';
+                    label.style.pointerEvents = 'none';
+                    label.style.transform = guide.direction === 'vertical'
+                        ? 'translate(4px, -50%)'
+                        : 'translate(-50%, -110%)';
+                    container.appendChild(label);
+                });
+            }
 
             // 4. iframe上の隔離DOMをキャプチャ
             const canvas = await html2canvas(container, {
@@ -1577,45 +2590,78 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 {/* Toolbar */}
                 <div className="p-2 border-b bg-white flex justify-between items-center shrink-0 flex-wrap gap-2">
                     <div className="flex gap-1 flex-wrap">
+                        <button
+                            onClick={activateSelectionMode}
+                            className={`px-3 py-1.5 rounded text-xs font-bold flex gap-1 items-center ${isSelectionMode ? 'bg-blue-600 text-white' : 'bg-white hover:bg-slate-50 border border-slate-300 text-slate-600'}`}
+                        >
+                            <span className="text-sm leading-none">↖</span> 選択
+                        </button>
+                        <button
+                            onClick={activateMarqueeMode}
+                            className={`px-3 py-1.5 rounded text-xs font-bold flex gap-1 items-center ${isMarqueeMode ? 'bg-blue-500 text-white' : 'bg-white hover:bg-slate-50 border border-slate-300 text-slate-600'}`}
+                        >
+                            <span className="text-sm leading-none">▭</span> 範囲
+                        </button>
+                        <div className="w-px bg-slate-200 mx-1"></div>
                         <button onClick={() => addElement('booth')} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded text-xs font-bold flex gap-1 items-center"><Plus size={12} /> ブース</button>
                         <div className="w-px bg-slate-200 mx-1"></div>
                         <button onClick={() => addElement('pillar')} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded text-xs font-bold flex gap-1 items-center"><Box size={12} /> 柱</button>
                         <button onClick={() => addElement('venueArea')} className="px-3 py-1.5 bg-white hover:bg-slate-50 border border-slate-300 rounded text-xs font-bold flex gap-1 items-center text-slate-700"><Square size={12} /> 会場追加</button>
+                        <button onClick={() => addElement('venueCutout')} className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded text-xs font-bold flex gap-1 items-center text-rose-700"><XCircle size={12} /> エリア削除</button>
                         <button onClick={() => addElement('door')} className="px-3 py-1.5 bg-green-50 hover:bg-green-100 text-green-600 rounded text-xs font-bold flex gap-1 items-center"><Plus size={12} /> ドア</button>
                         <button onClick={() => addElement('obstacle')} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded text-xs font-bold flex gap-1 items-center"><XCircle size={12} /> 障害物</button>
                         <button
-                            onClick={() => setActiveTool(activeTool === 'arrow' ? null : 'arrow')}
+                            onClick={() => togglePlacementTool('arrow')}
                             className={`px-3 py-1.5 rounded text-xs font-bold flex gap-1 items-center ${activeTool === 'arrow' ? 'bg-amber-500 text-white' : 'bg-amber-50 hover:bg-amber-100 text-amber-600'}`}
                         >
                             <ArrowRight size={12} /> 矢印
                         </button>
                         <button
-                            onClick={() => setActiveTool(activeTool === 'double-arrow' ? null : 'double-arrow')}
+                            onClick={() => togglePlacementTool('double-arrow')}
                             className={`px-3 py-1.5 rounded text-xs font-bold flex gap-1 items-center ${activeTool === 'double-arrow' ? 'bg-amber-500 text-white' : 'bg-amber-50 hover:bg-amber-100 text-amber-600'}`}
                         >
                             <ArrowRight size={12} className="rotate-180" /> 双方向
                         </button>
                         <button
-                            onClick={() => setActiveTool(activeTool === 'text' ? null : 'text')}
+                            onClick={() => togglePlacementTool('text')}
                             className={`px-3 py-1.5 rounded text-xs font-bold flex gap-1 items-center ${activeTool === 'text' ? 'bg-blue-500 text-white' : 'bg-slate-100 hover:bg-slate-200 text-slate-600'}`}
                         >
                             <Edit3 size={12} /> 文字
                         </button>
                         <div className="w-px bg-slate-200 mx-1"></div>
 
-                        {selectedIds.size === 1 && items.find(i => selectedIds.has(i.id))?.type === 'text' && (
+                        {selectedItem?.type === 'text' && (
                             <div className="flex items-center gap-1 bg-slate-100 rounded px-1">
                                 <span className="text-[10px] font-bold text-slate-500">サイズ</span>
                                 <input
                                     type="number"
                                     min="8" max="100"
-                                    value={items.find(i => selectedIds.has(i.id))?.fontSize || 10}
-                                    onChange={(e) => updateItemProp(items.find(i => selectedIds.has(i.id)).id, 'fontSize', Number(e.target.value))}
+                                    value={selectedItem?.fontSize || 10}
+                                    onChange={(e) => updateItemProp(selectedItem.id, 'fontSize', Number(e.target.value))}
                                     className="w-12 text-xs border rounded px-1 py-0.5"
                                 />
                             </div>
                         )}
 
+                        {selectedEditableBooth && (
+                            <div className="flex items-center gap-1 bg-slate-100 rounded px-1 py-0.5">
+                                <span className="text-[10px] font-bold text-slate-500">色</span>
+                                <input
+                                    type="color"
+                                    value={selectedEditableBooth.fillColor || DEFAULT_FREE_BOOTH_COLOR}
+                                    onChange={(e) => updateItemProp(selectedEditableBooth.id, 'fillColor', e.target.value)}
+                                    className="h-7 w-8 cursor-pointer rounded border border-slate-300 bg-white p-0.5"
+                                    title="フリーブースの色"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => updateItemProp(selectedEditableBooth.id, 'fillColor', DEFAULT_FREE_BOOTH_COLOR)}
+                                    className="px-2 py-1 rounded border border-slate-300 bg-white text-[10px] font-bold text-slate-600 hover:bg-slate-50"
+                                >
+                                    既定
+                                </button>
+                            </div>
+                        )}
                         <button onClick={deleteSelected} disabled={selectedIds.size === 0} className="px-3 py-1.5 bg-red-50 text-red-500 hover:bg-red-100 rounded text-xs font-bold disabled:opacity-50 flex gap-1 items-center"><Trash2 size={12} /> 削除</button>
                         <button onClick={handleResetBoothsOnly} className="px-3 py-1.5 bg-amber-50 text-amber-700 hover:bg-amber-100 rounded text-xs font-bold flex gap-1 items-center border border-amber-200"><Trash2 size={12} /> ブースのみ全クリア</button>
                         <button onClick={handleResetLayout} className="px-3 py-1.5 bg-red-50 text-red-500 hover:bg-red-100 rounded text-xs font-bold flex gap-1 items-center border border-red-200"><Trash2 size={12} /> 全クリア</button>
@@ -1645,7 +2691,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                     {/* Canvas Area */}
                     <div
                         ref={scrollContainerRef}
-                        className={`flex-1 overflow-auto bg-slate-200 p-4 ${isPanning ? 'cursor-grabbing' : activeTool ? '' : 'cursor-grab'}`}
+                        className={`flex-1 overflow-auto bg-slate-200 p-4 ${isPanning ? 'cursor-grabbing' : isMarqueeMode ? 'cursor-crosshair' : isSelectionMode ? 'cursor-grab' : ''}`}
                         onWheel={handleViewportWheel}
                         onMouseDown={handleViewportMouseDown}
                         onMouseMove={handleMouseMove}
@@ -1654,7 +2700,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                     >
                         <div
                             ref={canvasRef}
-                            className={`bg-slate-300 shadow-xl relative select-none mx-auto ${isPanning ? 'cursor-grabbing' : (activeTool === 'arrow' || activeTool === 'double-arrow' || activeTool === 'text') ? 'cursor-crosshair' : ''}`}
+                            className={`bg-slate-300 shadow-xl relative select-none mx-auto ${isPanning ? 'cursor-grabbing' : (activeTool === 'arrow' || activeTool === 'double-arrow' || activeTool === 'text' || isMarqueeMode) ? 'cursor-crosshair' : isSelectionMode ? 'cursor-grab' : 'cursor-default'}`}
                             style={{
                                 width: canvasWidth,
                                 height: canvasHeight,
@@ -1696,6 +2742,10 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                                     const dy = item.endY - item.y;
                                     const len = Math.sqrt(dx * dx + dy * dy);
                                     const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+                                    const arrowHitHeight = 18;
+                                    const arrowHitHalf = arrowHitHeight / 2;
+                                    const arrowHitWidth = Math.max(len, 28);
+                                    const arrowHitOffsetX = (len - arrowHitWidth) / 2;
 
                                     return (
                                         <div key={item.id} className="absolute top-0 left-0 w-0 h-0">
@@ -1741,21 +2791,23 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                                             {/* Clickable Area (Thick Line) */}
                                             <div
                                                 data-layout-item="true"
-                                                className="absolute cursor-move"
+                                                className={`absolute ${isSelectionMode ? 'cursor-move' : ''}`}
                                                 onMouseDown={(e) => handleMouseDown(e, item.id)}
-                                                onClick={(e) => e.stopPropagation()}
+                                                onClick={(e) => {
+                                                    if (isSelectionMode) e.stopPropagation();
+                                                }}
                                                 style={{
-                                                    left: item.x,
+                                                    left: item.x + arrowHitOffsetX,
                                                     top: item.y,
-                                                    width: len,
-                                                    height: '10px',
-                                                    transformOrigin: '0 5px',
-                                                    transform: `translate(0, -5px) rotate(${angle}deg)`,
+                                                    width: arrowHitWidth,
+                                                    height: `${arrowHitHeight}px`,
+                                                    transformOrigin: `0 ${arrowHitHalf}px`,
+                                                    transform: `translate(0, -${arrowHitHalf}px) rotate(${angle}deg)`,
                                                     zIndex: 10
                                                 }}
                                             />
                                             {/* Handles */}
-                                            {isSelected && (
+                                            {isSelected && isSelectionMode && (
                                                 <>
                                                     <div
                                                         className="absolute w-3 h-3 bg-white border-2 border-amber-600 rounded-full cursor-move z-20"
@@ -1777,21 +2829,24 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                                     <div
                                         key={item.id}
                                         data-layout-item="true"
-                                        className={`absolute group touch-none select-none ${activeTool ? '' : 'cursor-move'} ${getItemStyle(item)} ${selectedIds.has(item.id) ? 'ring-2 ring-blue-500 z-10' : ''}`}
+                                        className={`absolute group touch-none select-none ${isSelectionMode ? 'cursor-move' : ''} ${getItemStyle(item)} ${selectedIds.has(item.id) ? 'ring-2 ring-blue-500 z-10' : ''}`}
                                         style={{
                                             left: item.x,
                                             top: item.y,
                                             width: item.w,
                                             height: item.h,
+                                            backgroundColor: isEditableBooth(item) ? (item.fillColor || DEFAULT_FREE_BOOTH_COLOR) : undefined,
                                             transform: `rotate(${item.rotation || 0}deg)`, // Simple rotation for now
                                         }}
                                         onMouseDown={(e) => handleMouseDown(e, item.id)}
-                                        onClick={(e) => e.stopPropagation()}
+                                        onClick={(e) => {
+                                            if (isSelectionMode) e.stopPropagation();
+                                        }}
                                     >
                                         {renderBoothContent(item)}
 
                                         {/* Resize Handle (Bottom-Right) */}
-                                        {selectedIds.has(item.id) && item.isEditable !== false && (
+                                        {selectedIds.has(item.id) && isSelectionMode && item.isEditable !== false && (
                                             <div
                                                 className="absolute bottom-0 right-0 w-4 h-4 bg-white border-2 border-blue-500 cursor-nwse-resize z-20"
                                                 onMouseDown={(e) => handleResizeStart(e, item.id)}
@@ -1802,6 +2857,17 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                                 )
                             })}
 
+                            {selectionBox?.moved && (
+                                <div
+                                    className="absolute pointer-events-none z-40 border border-blue-500 bg-blue-200/20"
+                                    style={{
+                                        left: normalizeSelectionRect(selectionBox).x,
+                                        top: normalizeSelectionRect(selectionBox).y,
+                                        width: normalizeSelectionRect(selectionBox).w,
+                                        height: normalizeSelectionRect(selectionBox).h,
+                                    }}
+                                />
+                            )}
 
                             {/* Distances (Outside Map loop) */}
                             {/* 距離表示（SVGオーバーレイ） - 1つだけ選択時のみ */}
@@ -1982,6 +3048,79 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                                         <input type="range" min="20" max="80" value={pixelsPerMeter} onChange={e => setPixelsPerMeter(Number(e.target.value))} className="flex-1" />
                                     </div>
                                     <div className="text-xs text-slate-400 text-center mt-1">{Math.round(pixelsPerMeter / 40 * 100)}% ({pixelsPerMeter}px/m) / ズームはキャンバス上でホイール操作</div>
+                                    {false && (<div className="rounded-xl border border-slate-200 bg-white p-4">
+                                        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                                            <div>
+                                                <div className="text-xs font-bold text-slate-600">簡易プレビュー</div>
+                                                <div className="text-[11px] text-slate-400">現在の設定での概算表示です</div>
+                                            </div>
+                                            <div className="text-xs font-bold text-slate-600">
+                                                配置予定 {autoLayoutPreview.placedCount} / {autoLayoutPreview.totalCount}
+                                            </div>
+                                        </div>
+
+                                        {autoLayoutPreview.error === 'no-makers' && (
+                                            <div className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                                                配置対象のメーカーがありません。
+                                            </div>
+                                        )}
+
+                                        {autoLayoutPreview.error === 'no-space' && (
+                                            <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                                                会場サイズに対して、現在のブースサイズまたは通路設定が大きすぎます。
+                                            </div>
+                                        )}
+
+                                        {!autoLayoutPreview.error && (
+                                            <div className="mt-3">
+                                                {(() => {
+                                                    const previewWidth = Math.max(1, autoLayoutPreview.bounds.maxX - autoLayoutPreview.bounds.minX);
+                                                    const previewHeight = Math.max(1, autoLayoutPreview.bounds.maxY - autoLayoutPreview.bounds.minY);
+                                                    const minX = autoLayoutPreview.bounds.minX;
+                                                    const minY = autoLayoutPreview.bounds.minY;
+
+                                                    const toRectStyle = (rect) => ({
+                                                        left: `${((rect.x - minX) / previewWidth) * 100}%`,
+                                                        top: `${((rect.y - minY) / previewHeight) * 100}%`,
+                                                        width: `${Math.max((rect.w / previewWidth) * 100, 0.6)}%`,
+                                                        height: `${Math.max((rect.h / previewHeight) * 100, 0.6)}%`,
+                                                    });
+
+                                                    return (
+                                                        <>
+                                                            <div className="relative h-48 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+                                                                {autoLayoutPreview.activeAreas.map((area, index) => (
+                                                                    <div
+                                                                        key={`preview-area-${index}`}
+                                                                        className="absolute rounded-sm border border-sky-200 bg-sky-100/70"
+                                                                        style={toRectStyle(area)}
+                                                                    />
+                                                                ))}
+                                                                {autoLayoutPreview.removedAreas.map((area, index) => (
+                                                                    <div
+                                                                        key={`preview-cutout-${index}`}
+                                                                        className="absolute rounded-sm border border-rose-300 bg-rose-200/60"
+                                                                        style={toRectStyle(area)}
+                                                                    />
+                                                                ))}
+                                                                {autoLayoutPreview.placements.map((placement) => (
+                                                                    <div
+                                                                        key={placement.previewKey}
+                                                                        className="absolute rounded-sm border border-emerald-500 bg-emerald-200/90"
+                                                                        style={toRectStyle(placement)}
+                                                                    />
+                                                                ))}
+                                                            </div>
+                                                            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+                                                                <span>未配置: {autoLayoutPreview.remainingCount}社</span>
+                                                                <span>青: 会場 / 赤: 除外 / 緑: 配置予定</span>
+                                                            </div>
+                                                        </>
+                                                    );
+                                                })()}
+                                            </div>
+                                        )}
+                                    </div>)}
                                 </div>
                             </div>
                             <div className="p-4 border-t flex justify-end"><button onClick={() => setShowSettings(false)} className="bg-blue-600 text-white px-4 py-2 rounded-lg font-bold">閉じる</button></div>
@@ -2000,9 +3139,116 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                                 <div className="bg-blue-50 p-3 rounded-lg text-xs text-blue-700"><p className="font-bold mb-1">参加確定企業: {confirmedMakers.length}社</p><p>全ての参加確定企業を自動的に配置します</p></div>
                                 <div>
                                     <label className="block text-xs font-bold text-slate-500 mb-1">通路幅 (メートル)</label>
-                                    <input type="number" step="0.5" min="1" max="5" value={aisleWidth} onChange={e => setAisleWidth(e.target.value ? Number(e.target.value) : 0)} className="w-full border p-2 rounded text-right" />
+                                    <input type="number" step="0.5" min="0" max="5" value={aisleWidth} onChange={e => setAisleWidth(e.target.value ? Number(e.target.value) : 0)} className="w-full border p-2 rounded text-right" />
                                 </div>
-                                <div><label className="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked={allowBackToBack} onChange={e => setAllowBackToBack(e.target.checked)} className="w-4 h-4" /><span className="text-sm font-bold text-slate-700">ブースの背中合わせを許可</span></label><p className="text-xs text-slate-400 mt-1 ml-6">通路スペースを節約できます</p></div>
+                                <div className="rounded-xl border border-slate-200 bg-white p-4">
+                                    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                                        <div>
+                                            <div className="text-xs font-bold text-slate-600">簡易プレビュー</div>
+                                            <div className="text-[11px] text-slate-400">現在の設定での概算表示です</div>
+                                        </div>
+                                        <div className="text-xs font-bold text-slate-600">
+                                            配置予定 {autoLayoutPreview.placedCount} / {autoLayoutPreview.totalCount}
+                                        </div>
+                                    </div>
+
+                                    {autoLayoutPreview.error === 'no-makers' && (
+                                        <div className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                                            配置対象のメーカーがありません。
+                                        </div>
+                                    )}
+
+                                    {autoLayoutPreview.error === 'no-space' && (
+                                        <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                                            会場サイズに対して、現在のブースサイズまたは通路設定が大きすぎます。
+                                        </div>
+                                    )}
+
+                                    {!autoLayoutPreview.error && (
+                                        <div className="mt-3">
+                                            {(() => {
+                                                const previewWidth = Math.max(1, autoLayoutPreview.bounds.maxX - autoLayoutPreview.bounds.minX);
+                                                const previewHeight = Math.max(1, autoLayoutPreview.bounds.maxY - autoLayoutPreview.bounds.minY);
+                                                const minX = autoLayoutPreview.bounds.minX;
+                                                const minY = autoLayoutPreview.bounds.minY;
+
+                                                const toRectStyle = (rect) => ({
+                                                    left: `${((rect.x - minX) / previewWidth) * 100}%`,
+                                                    top: `${((rect.y - minY) / previewHeight) * 100}%`,
+                                                    width: `${Math.max((rect.w / previewWidth) * 100, 0.6)}%`,
+                                                    height: `${Math.max((rect.h / previewHeight) * 100, 0.6)}%`,
+                                                });
+
+                                                return (
+                                                    <>
+                                                        <div className="relative h-48 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+                                                            {autoLayoutPreview.activeAreas.map((area, index) => (
+                                                                <div
+                                                                    key={`preview-area-${index}`}
+                                                                    className="absolute rounded-sm border border-sky-200 bg-sky-100/70"
+                                                                    style={toRectStyle(area)}
+                                                                />
+                                                            ))}
+                                                            {autoLayoutPreview.removedAreas.map((area, index) => (
+                                                                <div
+                                                                    key={`preview-cutout-${index}`}
+                                                                    className="absolute rounded-sm border border-rose-300 bg-rose-200/60"
+                                                                    style={toRectStyle(area)}
+                                                                />
+                                                            ))}
+                                                            {autoLayoutPreview.placements.map((placement) => (
+                                                                <div
+                                                                    key={placement.previewKey}
+                                                                    className="absolute rounded-sm border border-emerald-500 bg-emerald-200/90"
+                                                                    style={toRectStyle(placement)}
+                                                                />
+                                                            ))}
+                                                        </div>
+                                                        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+                                                            <span>未配置: {autoLayoutPreview.remainingCount}社</span>
+                                                            <span>青: 会場 / 赤: 除外 / 緑: 配置予定</span>
+                                                        </div>
+                                                    </>
+                                                );
+                                            })()}
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 mb-2">レイアウトパターン</label>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                            {AUTO_LAYOUT_PATTERNS.map((pattern) => (
+                                                <button
+                                                    key={pattern.value}
+                                                    type="button"
+                                                    onClick={() => setAutoLayoutPattern(pattern.value)}
+                                                    className={`rounded-lg border px-3 py-2 text-left transition-colors ${autoLayoutPattern === pattern.value ? 'border-purple-400 bg-purple-50 text-purple-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'}`}
+                                                >
+                                                    <div className="text-xs font-bold">{pattern.label}</div>
+                                                    <div className="mt-1 text-[10px] leading-snug opacity-80">{pattern.description}</div>
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                            <label className="flex items-center gap-2 cursor-pointer">
+                                                <input type="checkbox" checked={allowHorizontalAisles} onChange={e => setAllowHorizontalAisles(e.target.checked)} className="w-4 h-4" />
+                                                <span className="text-sm font-bold text-slate-700">左右の通路を入れる</span>
+                                            </label>
+                                            <p className="mt-1 text-[10px] text-slate-400">オフにすると、横方向はブースを詰めて配置します。</p>
+                                        </div>
+                                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                            <label className="flex items-center gap-2 cursor-pointer">
+                                                <input type="checkbox" checked={allowVerticalAisles} onChange={e => setAllowVerticalAisles(e.target.checked)} className="w-4 h-4" />
+                                                <span className="text-sm font-bold text-slate-700">上下の通路を入れる</span>
+                                            </label>
+                                            <p className="mt-1 text-[10px] text-slate-400">オフにすると、縦方向はブースを詰めて配置します。</p>
+                                        </div>
+                                    </div>
+                                    <div><label className="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked={allowBackToBack} onChange={e => setAllowBackToBack(e.target.checked)} className="w-4 h-4" /><span className="text-sm font-bold text-slate-700">ブースの背中合わせを許可</span></label><p className="text-xs text-slate-400 mt-1 ml-6">オンのときは中央の隙間を最小化し、2列をまとめて配置します。</p></div>
+                                </div>
                             </div>
                             <div className="p-4 border-t flex justify-end gap-2"><button onClick={() => setShowAutoLayout(false)} className="px-4 py-2 text-slate-500 font-bold">キャンセル</button><button onClick={runAutoLayout} className="bg-purple-600 text-white px-4 py-2 rounded-lg font-bold hover:bg-purple-700">自動配置を実行</button></div>
                         </div>

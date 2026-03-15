@@ -7,6 +7,7 @@ export function useMasterMakersSync({ db, appId, view, mode }) {
   const masterMakersRef = useRef([]);
   const shouldSkipMasterMakersFetch =
     mode === 'visitor_register' || mode === 'maker_register' || mode === 'demo_maker_form';
+  const shouldSkipInitialMasterMakersFetch = shouldSkipMasterMakersFetch || view === 'enterprise';
 
   const applyMasterMakersData = useCallback((data) => {
     setMasterMakers(data);
@@ -17,7 +18,7 @@ export function useMasterMakersSync({ db, appId, view, mode }) {
   // One-shot fetch with retry on transient failure.
   useEffect(() => {
     if (!db || !appId) return;
-    if (shouldSkipMasterMakersFetch) {
+    if (shouldSkipInitialMasterMakersFetch) {
       setMasterMakersLoaded(true);
       return;
     }
@@ -45,7 +46,7 @@ export function useMasterMakersSync({ db, appId, view, mode }) {
       isActive = false;
       if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [db, appId, applyMasterMakersData, shouldSkipMasterMakersFetch]);
+  }, [db, appId, applyMasterMakersData, shouldSkipInitialMasterMakersFetch]);
 
   // Keep enterprise console in sync while editing master makers.
   useEffect(() => {

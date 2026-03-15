@@ -68,7 +68,7 @@ const PREFECTURES = [
 
 const EQUIPMENT_OPTIONS = ["長机", "椅子", "プロジェクター", "マイク", "マイクスタンド", "スクリーン", "演台", "パーテーション"];
 const MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1hnZdkquaybY-bBSAevnW2BOLn83OdITzNvt-hmZkmVI/edit?gid=0#gid=0";
-const BRAND_NAME = "Kaientai-X 2.0";
+const BRAND_NAME = "Kaientai-X 2.1";
 const BRAND_ICON_PATH = "/icon.png";
 
 const BrandIcon = ({ size = 24, className = "", alt = BRAND_NAME }) => (
@@ -1442,6 +1442,7 @@ function MakerDataEditModal({ maker, onSave, onClose }) {
     boothCount: getInitVal('boothCount'),
     staffCount: getInitVal('staffCount'),
     lunchCount: getInitVal('lunchCount'),
+    payment: getInitVal('payment') || getInitVal('paymentMethod'),
     moveInDate: getInitVal('moveInDate'),
     itemsDesk: getInitVal('itemsDesk') || getInitVal('desk'),
     itemsChair: getInitVal('itemsChair') || getInitVal('chair'),
@@ -1452,6 +1453,7 @@ function MakerDataEditModal({ maker, onSave, onClose }) {
   });
 
   const handleChange = (k, v) => setFormData(prev => ({ ...prev, [k]: v }));
+  const paymentOptions = ['仕入れより相殺', '振り込み'];
   const moveInDateOptions = ['前日搬入', '当日搬入'];
 
   return (
@@ -1486,6 +1488,18 @@ function MakerDataEditModal({ maker, onSave, onClose }) {
             <div>
               <label className="block text-xs font-bold text-slate-500 mb-1">昼食数</label>
               <input className="w-full border p-2 rounded" value={formData.lunchCount} onChange={e => handleChange('lunchCount', e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-500 mb-1">支払い方法</label>
+              <select className="w-full border p-2 rounded bg-white" value={formData.payment || ''} onChange={e => handleChange('payment', e.target.value)} aria-label="支払い方法" title="支払い方法">
+                <option value="">支払い方法を選択</option>
+                {formData.payment && !paymentOptions.includes(formData.payment) && (
+                  <option value={formData.payment}>{formData.payment}</option>
+                )}
+                {paymentOptions.map(option => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
             </div>
             <div>
               <label className="block text-xs font-bold text-slate-500 mb-1">搬入日時</label>
@@ -2398,6 +2412,7 @@ function TabEquipment({ exhibition, details, setDetails, masterMakers }) {
   const [newSupplyCount, setNewSupplyCount] = useState(1);
   const detailsSyncTimerRef = useRef(null);
   const detailsPropRef = useRef(details);
+  const setDetailsRef = useRef(setDetails);
   const latestDetailsPayloadRef = useRef(null);
   const hasPendingDetailsSyncRef = useRef(false);
 
@@ -2405,9 +2420,13 @@ function TabEquipment({ exhibition, details, setDetails, masterMakers }) {
     detailsPropRef.current = details;
   }, [details]);
 
+  useEffect(() => {
+    setDetailsRef.current = setDetails;
+  }, [setDetails]);
+
   // Sync to parent
   useEffect(() => {
-    latestDetailsPayloadRef.current = {
+    const nextDetailsPayload = {
       ...detailsPropRef.current,
       cost: venueFee,
       notes,
@@ -2418,6 +2437,17 @@ function TabEquipment({ exhibition, details, setDetails, masterMakers }) {
       equipment: rentals.filter(r => r.count > 0) // For budget tab compatibility
     };
 
+    latestDetailsPayloadRef.current = nextDetailsPayload;
+
+    if (isDeepEqual(detailsPropRef.current, nextDetailsPayload)) {
+      hasPendingDetailsSyncRef.current = false;
+      if (detailsSyncTimerRef.current) {
+        clearTimeout(detailsSyncTimerRef.current);
+        detailsSyncTimerRef.current = null;
+      }
+      return;
+    }
+
     if (detailsSyncTimerRef.current) {
       clearTimeout(detailsSyncTimerRef.current);
     }
@@ -2425,7 +2455,7 @@ function TabEquipment({ exhibition, details, setDetails, masterMakers }) {
     detailsSyncTimerRef.current = setTimeout(() => {
       detailsSyncTimerRef.current = null;
       hasPendingDetailsSyncRef.current = false;
-      setDetails(latestDetailsPayloadRef.current);
+      setDetailsRef.current(latestDetailsPayloadRef.current);
     }, 700);
 
     return () => {
@@ -2434,7 +2464,7 @@ function TabEquipment({ exhibition, details, setDetails, masterMakers }) {
         detailsSyncTimerRef.current = null;
       }
     };
-  }, [venueFee, notes, layoutImage, rentals, supplies, layoutData, setDetails]);
+  }, [venueFee, notes, layoutImage, rentals, supplies, layoutData]);
 
   useEffect(() => {
     return () => {
@@ -2444,10 +2474,10 @@ function TabEquipment({ exhibition, details, setDetails, masterMakers }) {
       }
       if (hasPendingDetailsSyncRef.current && latestDetailsPayloadRef.current) {
         hasPendingDetailsSyncRef.current = false;
-        setDetails(latestDetailsPayloadRef.current);
+        setDetailsRef.current(latestDetailsPayloadRef.current);
       }
     };
-  }, [setDetails]);
+  }, []);
 
   // Rental functions
   const addRental = () => {
@@ -3260,6 +3290,7 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
   const handleSaveMakerData = (newData) => {
     // ★修正: コードが変更された場合、既存の招待データとの重複チェックとマージを行う
     const updatedCode = newData.supplierCode || newData.code;
+    if (Object.prototype.hasOwnProperty.call(newData, 'payment')) newData.paymentMethod = newData.payment;
 
     if (updatedCode && updatedCode !== editingMaker.code) {
       // 自分以外で同じコードを持つメーカーを探す
@@ -6826,11 +6857,12 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
                 const materials = selectedExhibition.materials || {};
                 const docs = selectedExhibition.documents || {};
 
-                // Use new materials (TabFiles) with fallback to legacy documents (TabMakers)
+                // Use new materials (TabFiles) with fallback to legacy documents (TabMakers).
+                // Keep "other" private because it may contain internal reference or accounting files.
                 const layoutUrl = materials.venue || docs.layoutPdf?.url;
                 const flyerUrl = materials.flyer || docs.flyerPdf?.url;
 
-                if (!layoutUrl && !flyerUrl && !materials.other) return null;
+                if (!layoutUrl && !flyerUrl) return null;
 
                 return (
                   <div className="bg-gradient-to-r from-amber-50 to-orange-50 p-6 rounded-2xl shadow-lg border border-amber-100">
@@ -6866,23 +6898,6 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
                           </div>
                           <div>
                             <div className="font-bold text-slate-700">案内チラシ・ポスター</div>
-                            <div className="text-xs text-slate-400">Google Drive / 外部リンク</div>
-                          </div>
-                          <ChevronRight size={20} className="text-slate-400 ml-auto group-hover:translate-x-1 transition-transform" />
-                        </a>
-                      )}
-                      {materials.other && (
-                        <a
-                          href={materials.other}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center gap-3 bg-white p-4 rounded-xl border border-slate-200 hover:border-slate-400 hover:shadow-md transition-all group"
-                        >
-                          <div className="p-3 bg-slate-100 rounded-lg group-hover:bg-slate-200 transition-colors">
-                            <Folder size={24} className="text-slate-600" />
-                          </div>
-                          <div>
-                            <div className="font-bold text-slate-700">その他参考資料</div>
                             <div className="text-xs text-slate-400">Google Drive / 外部リンク</div>
                           </div>
                           <ChevronRight size={20} className="text-slate-400 ml-auto group-hover:translate-x-1 transition-transform" />
@@ -8911,17 +8926,31 @@ function App() {
           }
         }
 
+        const shouldRedactPrivateMaterials = (
+          ['visitor_register', 'maker_register', 'maker', 'demo_portal', 'demo_maker_form'].includes(urlMode)
+          || (urlMode === 'dashboard' && hasDashboardAccessKey)
+        );
+        const redactPrivateMaterials = (item) => {
+          const materials = item?.materials;
+          if (!materials || typeof materials !== 'object' || Array.isArray(materials) || !('other' in materials)) {
+            return item;
+          }
+          const { other, ...publicMaterials } = materials;
+          return { ...item, materials: publicMaterials };
+        };
+
         const normalizedData = uniqueData.map((item) => {
           const normalizedFormConfig = normalizeMakerFormConfig(item.formConfig);
           const normalizedVisitorFormConfig = normalizeVisitorFormConfig(item.visitorFormConfig);
           const normalizedTasks = mergeTasksWithTemplate(item.tasks);
-          return {
+          const normalizedItem = {
             ...item,
             formConfig: normalizedFormConfig,
             visitorFormConfig: normalizedVisitorFormConfig,
             tasks: normalizedTasks,
             taskTemplateVersion: TASK_TEMPLATE_VERSION
           };
+          return shouldRedactPrivateMaterials ? redactPrivateMaterials(normalizedItem) : normalizedItem;
         });
 
         normalizedData.sort((a, b) => b.createdAt - a.createdAt);
@@ -8931,8 +8960,10 @@ function App() {
         if (!currentSelectedId) return;
         const latest = normalizedData.find((item) => item.id === currentSelectedId);
         if (latest) {
-          selectedExhibitionRef.current = latest;
-          setSelectedExhibition(latest);
+          if (!isDeepEqual(selectedExhibitionRef.current, latest)) {
+            selectedExhibitionRef.current = latest;
+            setSelectedExhibition(latest);
+          }
         }
       } catch (error) {
         console.error('Error in exhibitions sync processing:', error);

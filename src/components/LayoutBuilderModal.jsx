@@ -103,11 +103,18 @@ const rangesOverlap = (aStart, aEnd, bStart, bEnd) => {
 };
 
 const DEFAULT_FREE_BOOTH_COLOR = '#ffffff';
+const DEFAULT_LECTURE_HALL_COLOR = '#dbeafe';
 const AUTO_LAYOUT_PATTERNS = [
     { value: 'grid', label: '標準グリッド', description: '現在の整列パターン' },
     { value: 'snake', label: 'ジグザグ', description: '左右に折り返しながら配置' },
     { value: 'perimeter', label: '外周リング', description: '壁沿いからぐるっと配置' },
     { value: 'ellipse', label: '楕円リング', description: '外側を円状に優先配置' }
+];
+const AUTO_LAYOUT_BALANCE_OPTIONS = [
+    { value: 'spread', label: '均等分散' },
+    { value: 'center', label: '中央寄せ' },
+    { value: 'perimeter', label: '外周寄せ' },
+    { value: 'entrance', label: '入口側優先' },
 ];
 const rectsIntersect = (a, b) => (
     a.x < b.x + b.w &&
@@ -119,7 +126,11 @@ const isEditableBooth = (item) => (
     !!item && (
         (item.type === 'booth' && !item.makerId)
         || item.type === 'freeBooth'
+        || item.type === 'lectureHall'
     )
+);
+const getDefaultEditableItemColor = (item) => (
+    item?.type === 'lectureHall' ? DEFAULT_LECTURE_HALL_COLOR : DEFAULT_FREE_BOOTH_COLOR
 );
 
 export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exhibition, enterprises: propEnterprises }) {
@@ -143,6 +154,8 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
     const [allowBackToBack, setAllowBackToBack] = useState(savedSettings.allowBackToBack !== false);
     const [allowHorizontalAisles, setAllowHorizontalAisles] = useState(savedSettings.allowHorizontalAisles !== false);
     const [allowVerticalAisles, setAllowVerticalAisles] = useState(savedSettings.allowVerticalAisles !== false);
+    const [balanceAutoLayout, setBalanceAutoLayout] = useState(savedSettings.balanceAutoLayout !== false);
+    const [balancePreference, setBalancePreference] = useState(savedSettings.balancePreference || 'spread');
     const [autoLayoutPattern, setAutoLayoutPattern] = useState(savedSettings.autoLayoutPattern || 'grid');
 
     // キャンバスサイズを動的計算 (ワークスペースはメインエリアの4倍)
@@ -796,6 +809,13 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 newItem.h = boothH;
                 newItem.fillColor = DEFAULT_FREE_BOOTH_COLOR;
                 break;
+            case 'lectureHall':
+                newItem.label = '講演会場';
+                newItem.isEditable = true;
+                newItem.w = boothW;
+                newItem.h = boothH;
+                newItem.fillColor = DEFAULT_LECTURE_HALL_COLOR;
+                break;
             case 'pillar':
                 newItem.w = metersToPixels(0.5);
                 newItem.h = metersToPixels(0.5);
@@ -956,6 +976,30 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
         const minY = layoutZones.bounds.minY;
         const maxX = layoutZones.bounds.maxX;
         const maxY = layoutZones.bounds.maxY;
+        const wallSafetyGap = allowBackToBack ? Math.max(aisleW, metersToPixels(1)) : 0;
+        const usableMinY = minY + wallSafetyGap;
+        const usableMaxY = maxY - wallSafetyGap;
+        const entranceSide = (() => {
+            const doorItems = retainedItems.filter((item) => item?.type === 'door');
+            if (!doorItems.length) return 'top';
+
+            const centerPoint = doorItems.reduce((accumulator, item) => ({
+                x: accumulator.x + (item.x || 0) + ((item.w || 0) / 2),
+                y: accumulator.y + (item.y || 0) + ((item.h || 0) / 2),
+            }), { x: 0, y: 0 });
+
+            const avgX = centerPoint.x / doorItems.length;
+            const avgY = centerPoint.y / doorItems.length;
+            const edgeDistances = [
+                { side: 'top', distance: Math.abs(avgY - minY) },
+                { side: 'bottom', distance: Math.abs(maxY - avgY) },
+                { side: 'left', distance: Math.abs(avgX - minX) },
+                { side: 'right', distance: Math.abs(maxX - avgX) },
+            ];
+
+            edgeDistances.sort((a, b) => a.distance - b.distance);
+            return edgeDistances[0]?.side || 'top';
+        })();
 
         const checkCollision = (rect1, rect2) => (
             rect1.x < rect2.x + rect2.w &&
@@ -1032,13 +1076,13 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
         };
 
         const rowPositions = [];
-        let nextRowY = minY;
-        while (nextRowY + boothH <= maxY) {
+        let nextRowY = usableMinY;
+        while (nextRowY + boothH <= usableMaxY) {
             rowPositions.push(nextRowY);
 
             if (allowBackToBack) {
                 const backRowY = nextRowY + boothH + backGap;
-                if (backRowY + boothH <= maxY) {
+                if (backRowY + boothH <= usableMaxY) {
                     rowPositions.push(backRowY);
                 }
                 nextRowY = backRowY + boothH + verticalGap;
@@ -1135,7 +1179,306 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 .map((entry) => entry.slot);
         };
 
-        const slotOrder = (() => {
+        const buildDistributedAxis = (totalCount, targetCount, phase = 0) => {
+            if (targetCount <= 0 || totalCount <= 0) return [];
+
+            const safeTargetCount = Math.min(targetCount, totalCount);
+            if (safeTargetCount >= totalCount) {
+                return Array.from({ length: totalCount }, (_, index) => index);
+            }
+            if (safeTargetCount === 1) {
+                return [Math.floor((totalCount - 1) / 2)];
+            }
+
+            const selected = [];
+            const used = new Set();
+
+            for (let index = 0; index < safeTargetCount; index++) {
+                const rawIndex = phase === 0
+                    ? (index * (totalCount - 1)) / (safeTargetCount - 1)
+                    : (((index + phase) * totalCount) / safeTargetCount) - 0.5;
+                const axisIndex = Math.max(0, Math.min(totalCount - 1, Math.round(rawIndex)));
+
+                if (used.has(axisIndex)) continue;
+                used.add(axisIndex);
+                selected.push(axisIndex);
+            }
+
+            for (let index = 0; selected.length < safeTargetCount && index < totalCount; index++) {
+                if (used.has(index)) continue;
+                used.add(index);
+                selected.push(index);
+            }
+
+            return selected.sort((a, b) => a - b);
+        };
+
+        const buildPriorityAxis = (totalCount, targetCount, mode) => {
+            if (targetCount <= 0 || totalCount <= 0) return [];
+
+            const safeTargetCount = Math.min(targetCount, totalCount);
+            const allIndices = Array.from({ length: totalCount }, (_, index) => index);
+            let priority = allIndices;
+
+            if (mode === 'center') {
+                const middle = (totalCount - 1) / 2;
+                priority = [...allIndices].sort((a, b) => (
+                    Math.abs(a - middle) - Math.abs(b - middle)
+                ) || (a - b));
+            } else if (mode === 'perimeter') {
+                const edgeFirst = [];
+                let start = 0;
+                let end = totalCount - 1;
+                while (start <= end) {
+                    edgeFirst.push(start);
+                    if (end !== start) edgeFirst.push(end);
+                    start++;
+                    end--;
+                }
+                priority = edgeFirst;
+            } else if (mode === 'end') {
+                priority = [...allIndices].reverse();
+            }
+
+            return priority
+                .slice(0, safeTargetCount)
+                .sort((a, b) => a - b);
+        };
+
+        const pickAxisIndices = (totalCount, targetCount, mode, phase = 0) => {
+            if (mode === 'spread') return buildDistributedAxis(totalCount, targetCount, phase);
+            return buildPriorityAxis(totalCount, targetCount, mode);
+        };
+
+        const buildShiftedAxis = (indices, totalCount, direction = 1) => {
+            if (!indices.length) return [];
+
+            const shifted = [];
+            const used = new Set();
+
+            for (const index of indices) {
+                const candidates = [
+                    index + direction,
+                    index - direction,
+                    index + (direction * 2),
+                    index - (direction * 2),
+                    index,
+                ];
+                const nextIndex = candidates.find((candidate) => (
+                    candidate >= 0
+                    && candidate < totalCount
+                    && !used.has(candidate)
+                ));
+
+                if (nextIndex === undefined) continue;
+                used.add(nextIndex);
+                shifted.push(nextIndex);
+            }
+
+            for (let index = 0; shifted.length < indices.length && index < totalCount; index++) {
+                if (used.has(index)) continue;
+                used.add(index);
+                shifted.push(index);
+            }
+
+            return shifted.sort((a, b) => a - b);
+        };
+
+        const appendRemainingSlots = (preferredSlots, fallbackSlots) => {
+            if (!preferredSlots.length) return fallbackSlots;
+
+            const used = new Set(preferredSlots.map((slot) => `${slot.rowIndex}:${slot.colIndex}`));
+            const remainingSlots = fallbackSlots.filter((slot) => !used.has(`${slot.rowIndex}:${slot.colIndex}`));
+            return [...preferredSlots, ...remainingSlots];
+        };
+
+        const areAxisSelectionsEqual = (leftAxis, rightAxis) => (
+            leftAxis.length === rightAxis.length
+            && leftAxis.every((value, index) => value === rightAxis[index])
+        );
+
+        const getAxisBalanceMode = (axis) => {
+            if (balancePreference === 'center') return 'center';
+            if (balancePreference === 'perimeter') return 'perimeter';
+            if (balancePreference === 'entrance') {
+                if (axis === 'row') {
+                    if (entranceSide === 'top') return 'start';
+                    if (entranceSide === 'bottom') return 'end';
+                    return 'spread';
+                }
+                if (entranceSide === 'left') return 'start';
+                if (entranceSide === 'right') return 'end';
+                return 'spread';
+            }
+            return 'spread';
+        };
+
+        const sortSlotsByPreference = (slots) => {
+            if (balancePreference === 'spread') return slots;
+
+            const centerX = (minX + maxX) / 2;
+            const centerY = (minY + maxY) / 2;
+
+            const getPrimaryScore = (slot) => {
+                const slotCenterX = slot.x + (boothW / 2);
+                const slotCenterY = slot.y + (boothH / 2);
+
+                if (balancePreference === 'center') {
+                    const dx = slotCenterX - centerX;
+                    const dy = slotCenterY - centerY;
+                    return (dx * dx) + (dy * dy);
+                }
+
+                if (balancePreference === 'perimeter') {
+                    return Math.min(
+                        slotCenterX - minX,
+                        maxX - slotCenterX,
+                        slotCenterY - minY,
+                        maxY - slotCenterY,
+                    );
+                }
+
+                if (entranceSide === 'top') return slotCenterY - minY;
+                if (entranceSide === 'bottom') return maxY - slotCenterY;
+                if (entranceSide === 'left') return slotCenterX - minX;
+                return maxX - slotCenterX;
+            };
+
+            const getSecondaryScore = (slot) => {
+                const slotCenterX = slot.x + (boothW / 2);
+                const slotCenterY = slot.y + (boothH / 2);
+                return Math.abs(slotCenterX - centerX) + Math.abs(slotCenterY - centerY);
+            };
+
+            return [...slots].sort((a, b) => {
+                const primaryDiff = getPrimaryScore(a) - getPrimaryScore(b);
+                if (Math.abs(primaryDiff) > 0.0001) return primaryDiff;
+
+                const secondaryDiff = getSecondaryScore(a) - getSecondaryScore(b);
+                if (Math.abs(secondaryDiff) > 0.0001) return secondaryDiff;
+
+                if (a.rowIndex !== b.rowIndex) return a.rowIndex - b.rowIndex;
+                return a.colIndex - b.colIndex;
+            });
+        };
+
+        const selectPreferredSlots = (slots, preferredCount) => {
+            if (preferredCount <= 0) return [];
+            if (balancePreference === 'spread') {
+                const distributedIndices = buildDistributedAxis(slots.length, preferredCount);
+                return distributedIndices.map((slotIndex) => slots[slotIndex]);
+            }
+            return sortSlotsByPreference(slots).slice(0, preferredCount);
+        };
+
+        const buildBalancedGridLikeSlots = (snakeMode = false) => {
+            const rowCount = slotMatrix.length;
+            const colCount = slotMatrix[0]?.length || 0;
+            if (!rowCount || !colCount) return [];
+
+            const targetCount = Math.min(makers.length, rowCount * colCount);
+            if (targetCount <= 0) return [];
+
+            const venueAspect = rowCount / Math.max(colCount, 1);
+            let bestFit = null;
+
+            for (let rowsToUse = 1; rowsToUse <= rowCount; rowsToUse++) {
+                const colsToUse = Math.ceil(targetCount / rowsToUse);
+                if (colsToUse < 1 || colsToUse > colCount) continue;
+
+                const aspectScore = Math.abs((rowsToUse / colsToUse) - venueAspect);
+                const unusedScore = (rowsToUse * colsToUse) - targetCount;
+                const spreadScore = balancePreference === 'spread'
+                    ? -(rowsToUse + colsToUse)
+                    : (rowsToUse * colsToUse);
+
+                if (
+                    !bestFit
+                    || aspectScore < bestFit.aspectScore - 0.0001
+                    || (
+                        Math.abs(aspectScore - bestFit.aspectScore) <= 0.0001
+                        && unusedScore < bestFit.unusedScore
+                    )
+                    || (
+                        Math.abs(aspectScore - bestFit.aspectScore) <= 0.0001
+                        && unusedScore === bestFit.unusedScore
+                        && spreadScore < bestFit.spreadScore
+                    )
+                ) {
+                    bestFit = {
+                        rowsToUse,
+                        colsToUse,
+                        aspectScore,
+                        unusedScore,
+                        spreadScore,
+                    };
+                }
+            }
+
+            if (!bestFit) return [];
+
+            if (snakeMode && bestFit.colsToUse >= colCount && bestFit.rowsToUse < rowCount) {
+                for (let rowsToUse = bestFit.rowsToUse + 1; rowsToUse <= rowCount; rowsToUse++) {
+                    const colsToUse = Math.ceil(targetCount / rowsToUse);
+                    if (colsToUse >= colCount) continue;
+
+                    bestFit = {
+                        ...bestFit,
+                        rowsToUse,
+                        colsToUse,
+                        unusedScore: (rowsToUse * colsToUse) - targetCount,
+                    };
+                    break;
+                }
+            }
+
+            const rowMode = getAxisBalanceMode('row');
+            const colMode = getAxisBalanceMode('col');
+            const selectedRows = pickAxisIndices(rowCount, bestFit.rowsToUse, rowMode);
+            const selectedCols = pickAxisIndices(colCount, bestFit.colsToUse, colMode);
+            let alternateCols = selectedCols;
+
+            if (snakeMode) {
+                const spreadShiftedCols = colMode === 'spread'
+                    ? buildDistributedAxis(colCount, bestFit.colsToUse, 0.5)
+                    : [];
+                const preferredDirection = colMode === 'end' ? -1 : 1;
+
+                if (spreadShiftedCols.length && !areAxisSelectionsEqual(spreadShiftedCols, selectedCols)) {
+                    alternateCols = spreadShiftedCols;
+                } else {
+                    const shiftedCols = buildShiftedAxis(selectedCols, colCount, preferredDirection);
+                    alternateCols = areAxisSelectionsEqual(shiftedCols, selectedCols)
+                        ? buildShiftedAxis(selectedCols, colCount, -preferredDirection)
+                        : shiftedCols;
+                }
+            }
+
+            return selectedRows.flatMap((rowIndex, rowOrderIndex) => {
+                const rowCols = snakeMode && rowOrderIndex % 2 === 1 ? alternateCols : selectedCols;
+                const displayCols = snakeMode && rowOrderIndex % 2 === 1 ? [...rowCols].reverse() : rowCols;
+                return displayCols.map((colIndex) => slotMatrix[rowIndex][colIndex]);
+            });
+        };
+
+        const buildBalancedSlots = (baseSlots) => {
+            if (!balanceAutoLayout || baseSlots.length <= 2) return baseSlots;
+
+            if (autoLayoutPattern === 'grid') {
+                return appendRemainingSlots(buildBalancedGridLikeSlots(false), baseSlots);
+            }
+
+            if (autoLayoutPattern === 'snake') {
+                return appendRemainingSlots(buildBalancedGridLikeSlots(true), baseSlots);
+            }
+
+            const preferredCount = Math.min(makers.length, baseSlots.length);
+            if (preferredCount <= 1) return baseSlots;
+
+            return appendRemainingSlots(selectPreferredSlots(baseSlots, preferredCount), baseSlots);
+        };
+
+        const slotOrder = buildBalancedSlots((() => {
             switch (autoLayoutPattern) {
                 case 'snake':
                     return buildSnakeSlots();
@@ -1146,7 +1489,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 default:
                     return buildGridSlots();
             }
-        })();
+        })());
 
         const occupiedItems = [...collisionItems];
         const placements = [];
@@ -1186,6 +1529,8 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
         allowHorizontalAisles,
         allowVerticalAisles,
         allowBackToBack,
+        balanceAutoLayout,
+        balancePreference,
         autoLayoutPattern,
         layoutZones,
         metersToPixels,
@@ -2013,6 +2358,8 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 allowBackToBack,
                 allowHorizontalAisles,
                 allowVerticalAisles,
+                balanceAutoLayout,
+                balancePreference,
                 autoLayoutPattern
             },
             items
@@ -2043,11 +2390,11 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 </div>
             );
         }
-        if ((item.type === 'booth' && !item.makerId) || item.type === 'freeBooth') {
+        if ((item.type === 'booth' && !item.makerId) || item.type === 'freeBooth' || item.type === 'lectureHall') {
             return (
                 <div
                     className="w-full h-full flex items-center justify-center p-1"
-                    style={{ backgroundColor: item.fillColor || DEFAULT_FREE_BOOTH_COLOR }}
+                    style={{ backgroundColor: item.fillColor || getDefaultEditableItemColor(item) }}
                 >
                     <textarea
                         className="bg-transparent text-[10px] text-center leading-tight whitespace-pre-wrap w-full h-full outline-none font-bold resize-none overflow-auto"
@@ -2120,6 +2467,8 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                 return 'bg-white border-2 border-slate-600';
             case 'freeBooth':
                 return 'bg-white border-2 border-slate-600';
+            case 'lectureHall':
+                return 'bg-sky-50 border-2 border-sky-500';
             case 'pillar':
                 return 'bg-slate-500 border border-slate-700';
             case 'venue':
@@ -2357,10 +2706,10 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                             el.appendChild(info);
                         }
                     }
-                } else if (item.type === 'booth' || item.type === 'freeBooth') {
+                } else if (item.type === 'booth' || item.type === 'freeBooth' || item.type === 'lectureHall') {
                     // 編集可能ブースは、画面上のテキスト表示（スクロール位置含む）を優先して再現
-                    el.style.border = '2px solid #64748b';
-                    el.style.backgroundColor = item.fillColor || DEFAULT_FREE_BOOTH_COLOR;
+                    el.style.border = item.type === 'lectureHall' ? '2px solid #0ea5e9' : '2px solid #64748b';
+                    el.style.backgroundColor = item.fillColor || getDefaultEditableItemColor(item);
                     el.style.overflow = 'hidden';
                     el.style.padding = '0';
 
@@ -2602,6 +2951,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                         >
                             <span className="text-sm leading-none">▭</span> 範囲
                         </button>
+                        <button onClick={() => addElement('lectureHall')} className="px-3 py-1.5 bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded text-xs font-bold flex gap-1 items-center text-sky-700"><Plus size={12} /> 講演会場</button>
                         <div className="w-px bg-slate-200 mx-1"></div>
                         <button onClick={() => addElement('booth')} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded text-xs font-bold flex gap-1 items-center"><Plus size={12} /> ブース</button>
                         <div className="w-px bg-slate-200 mx-1"></div>
@@ -2648,14 +2998,14 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                                 <span className="text-[10px] font-bold text-slate-500">色</span>
                                 <input
                                     type="color"
-                                    value={selectedEditableBooth.fillColor || DEFAULT_FREE_BOOTH_COLOR}
+                                    value={selectedEditableBooth.fillColor || getDefaultEditableItemColor(selectedEditableBooth)}
                                     onChange={(e) => updateItemProp(selectedEditableBooth.id, 'fillColor', e.target.value)}
                                     className="h-7 w-8 cursor-pointer rounded border border-slate-300 bg-white p-0.5"
                                     title="フリーブースの色"
                                 />
                                 <button
                                     type="button"
-                                    onClick={() => updateItemProp(selectedEditableBooth.id, 'fillColor', DEFAULT_FREE_BOOTH_COLOR)}
+                                    onClick={() => updateItemProp(selectedEditableBooth.id, 'fillColor', getDefaultEditableItemColor(selectedEditableBooth))}
                                     className="px-2 py-1 rounded border border-slate-300 bg-white text-[10px] font-bold text-slate-600 hover:bg-slate-50"
                                 >
                                     既定
@@ -2835,7 +3185,7 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                                             top: item.y,
                                             width: item.w,
                                             height: item.h,
-                                            backgroundColor: isEditableBooth(item) ? (item.fillColor || DEFAULT_FREE_BOOTH_COLOR) : undefined,
+                                            backgroundColor: isEditableBooth(item) ? (item.fillColor || getDefaultEditableItemColor(item)) : undefined,
                                             transform: `rotate(${item.rotation || 0}deg)`, // Simple rotation for now
                                         }}
                                         onMouseDown={(e) => handleMouseDown(e, item.id)}
@@ -3133,9 +3483,13 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
             {
                 showAutoLayout && (
                     <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
-                        <div className="bg-white rounded-xl shadow-2xl w-full max-w-md animate-slide-up">
+                        <div
+                            className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[calc(100vh-2rem)] flex flex-col overflow-hidden animate-slide-up"
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onWheel={(e) => e.stopPropagation()}
+                        >
                             <div className="p-4 border-b flex justify-between items-center"><h4 className="font-bold flex items-center gap-2"><LayoutGrid size={18} /> 自動配置設定</h4><button onClick={() => setShowAutoLayout(false)}><X /></button></div>
-                            <div className="p-6 space-y-4">
+                            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-6 space-y-4">
                                 <div className="bg-blue-50 p-3 rounded-lg text-xs text-blue-700"><p className="font-bold mb-1">参加確定企業: {confirmedMakers.length}社</p><p>全ての参加確定企業を自動的に配置します</p></div>
                                 <div>
                                     <label className="block text-xs font-bold text-slate-500 mb-1">通路幅 (メートル)</label>
@@ -3214,6 +3568,30 @@ export default function LayoutBuilderModal({ onClose, currentLayout, onSave, exh
                                         </div>
                                     )}
                                 </div>
+                                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input type="checkbox" checked={balanceAutoLayout} onChange={e => setBalanceAutoLayout(e.target.checked)} className="w-4 h-4" />
+                                        <span className="text-sm font-bold text-slate-700">全体バランスを優先</span>
+                                    </label>
+                                    <p className="mt-1 text-[10px] text-slate-400">オンのときは使用する列と行を分散させ、会場全体に偏りなくブースを配置します。</p>
+                                </div>
+                                {balanceAutoLayout && (
+                                    <div className="rounded-lg border border-slate-200 bg-white p-3">
+                                        <div className="text-[10px] font-bold text-slate-500 mb-2">バランス配置の傾向</div>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            {AUTO_LAYOUT_BALANCE_OPTIONS.map((option) => (
+                                                <button
+                                                    key={option.value}
+                                                    type="button"
+                                                    onClick={() => setBalancePreference(option.value)}
+                                                    className={`rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${balancePreference === option.value ? 'border-purple-400 bg-purple-50 text-purple-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'}`}
+                                                >
+                                                    {option.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
                                 <div className="space-y-3">
                                     <div>
                                         <label className="block text-xs font-bold text-slate-500 mb-2">レイアウトパターン</label>

@@ -22,6 +22,7 @@ import { QRCodeCanvas } from 'qrcode.react';
 import { Scanner } from '@yudiel/react-qr-scanner';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, Legend } from 'recharts';
 import EnterpriseConsole from './components/EnterpriseConsole';
+import MarketingManualView from './components/MarketingManualView';
 import OperationalManualView from './components/OperationalManualView';
 import LayoutBuilderModal from './components/LayoutBuilderModal';
 import MakerDetailModal from './components/makers/MakerDetailModal';
@@ -9731,7 +9732,7 @@ function App() {
     }
   }, [view]);
 
-  const showSimpleHome = isSimpleMobileMode && view !== 'detail' && view !== 'manual';
+  const showSimpleHome = isSimpleMobileMode && view !== 'detail' && view !== 'manual' && view !== 'marketingManual';
 
   if (view === 'loading') return <div className="min-h-screen flex items-center justify-center bg-slate-50"><div className="text-center"><Loader className="animate-spin text-blue-600 mb-2 mx-auto" size={40} /><p className="text-slate-500 font-bold">Connecting to Database...</p></div></div>;
   if (view === 'not_found') return <div className="min-h-screen flex items-center justify-center bg-slate-50 text-slate-500">プロジェクトが見つかりません。URLを確認してください。</div>;
@@ -9842,6 +9843,7 @@ function App() {
           <button onClick={() => { navigateTo('enterprise'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'enterprise' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-slate-300'}`}><Building2 size={20} /> 企業管理コンソール</button>
           <button onClick={() => { navigateToManual('preparation'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'manual' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-slate-300'}`}><BookOpen size={20} /> 運用マニュアル</button>
           <button onClick={() => { navigateTo('analysis'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'analysis' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-slate-300'}`}><BarChart3 size={20} /> 実績分析</button>
+          <button onClick={() => { navigateTo('marketingManual'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${view === 'marketingManual' ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-slate-300'}`}><Target size={20} /> 集客マニュアル</button>
 
           <a
             href="https://scrape-kaientai-s.netlify.app/"
@@ -9891,6 +9893,7 @@ function App() {
               {view === 'create' && <CreateExhibitionForm data={newExhibition} setData={setNewExhibition} onCancel={() => navigateTo('dashboard')} onSubmit={handleCreate} />}
               {view === 'enterprise' && <EnterpriseConsole masterMakers={masterMakers} setMasterMakers={setMasterMakers} db={db} appId={appId} />}
               {view === 'manual' && <OperationalManualView initialTab={manualInitialTab} />}
+              {view === 'marketingManual' && <MarketingManualView />}
               {view === 'analysis' && <PerformanceAnalysisView exhibitions={exhibitions || []} />}
               {view === 'detail' && selectedExhibition && <ExhibitionDetail exhibition={selectedExhibition} onBack={() => navigateTo('dashboard')} onNavigate={navigateTo} updateVisitorCount={updateVisitorCount} updateExhibitionData={updateExhibitionData} batchUpdateExhibitionData={batchUpdateExhibitionData} masterMakers={masterMakers} initialTab={exhibitionTabs[selectedExhibition.id]} onTabChange={(tab) => setExhibitionTabs(prev => ({ ...prev, [selectedExhibition.id]: tab }))} storage={storage} allExhibitions={exhibitions || []} allowedTabs={isSimpleMobileMode ? ['main', 'schedule', 'entrance', 'lectures', 'files'] : null} initialEntranceMode={exhibitionEntranceModes[selectedExhibition.id] || 'dashboard'} />}
             </>

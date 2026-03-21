@@ -1178,16 +1178,32 @@ function VisitorFormEditor({ config }) {
   );
 }
 
+const JAPANESE_WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
+const LECTURE_THEME_MAX_LENGTH = 30;
+const LECTURE_SUMMARY_MAX_LENGTH = 100;
+
+const countCharacters = (value = '') => String(value ?? '').length;
+
+const formatDateWithWeekday = (dateStr) => {
+  const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return dateStr;
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const weekday = JAPANESE_WEEKDAYS[date.getDay()] || '';
+  return `${year}/${month}/${day}（${weekday}）`;
+};
+
 const formatExhibitionDateText = (dates = []) => {
   if (!Array.isArray(dates) || dates.length === 0) return '日程未設定';
   return dates
-    .map((dateStr) => {
-      const date = new Date(dateStr);
-      if (Number.isNaN(date.getTime())) return dateStr;
-      return date.toLocaleDateString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit' });
-    })
+    .map((dateStr) => formatDateWithWeekday(dateStr))
     .join(' / ');
 };
+
+const isLegacyLengthValueUnchanged = (originalValue, currentValue, maxLength) => (
+  countCharacters(originalValue) > maxLength && String(originalValue ?? '') === String(currentValue ?? '')
+);
 
 const formatExhibitionTimeText = (openTime, closeTime) => {
   if (openTime && closeTime) return `${openTime} - ${closeTime}`;
@@ -4242,9 +4258,11 @@ function TabMainBoard({ exhibition, updateMainData, updateBatch, tasks, onNaviga
         place: exhibition.place || '',
         prefecture: exhibition.prefecture || '',
         venueAddress: exhibition.venueAddress || '',
+        venueFloor: exhibition.venueFloor || '',
         openTime: exhibition.openTime || '10:00',
         closeTime: exhibition.closeTime || '17:00',
         concept: exhibition.concept || '',
+        exhibitionManagerName: exhibition.exhibitionManagerName || '',
         targetVisitors: exhibition.targetVisitors || 0,
         targetMakers: exhibition.targetMakers || 0,
         targetProfit: exhibition.targetProfit || 0,
@@ -4279,6 +4297,8 @@ function TabMainBoard({ exhibition, updateMainData, updateBatch, tasks, onNaviga
   const profitGap = finalBalance - targetProfitValue;
   const profitAchievementRate = targetProfitValue > 0 ? (finalBalance / targetProfitValue) * 100 : 0;
   const confirmedBoothTotal = confirmedMakers.reduce((sum, maker) => sum + extractNum(maker.boothCount), 0);
+  const venueFloorText = String(exhibition.venueFloor || '').trim();
+  const exhibitionManagerName = String(exhibition.exhibitionManagerName || '').trim();
 
   // Urgent Tasks (Due within 7 days and not done)
   const today = new Date();
@@ -4354,6 +4374,7 @@ function TabMainBoard({ exhibition, updateMainData, updateBatch, tasks, onNaviga
     const errors = [];
     if (!editData.title.trim()) errors.push('展示会タイトルは必須です');
     if (!editData.dates || editData.dates.length === 0) errors.push('開催日を1日以上追加してください');
+    if (!String(editData.exhibitionManagerName || '').trim()) errors.push('展示会責任者を入力してください');
     if (!editData.targetVisitors || editData.targetVisitors <= 0) errors.push('集客目標を入力してください');
     if (!editData.targetMakers || editData.targetMakers <= 0) errors.push('招致メーカー目標を入力してください');
     if (!editData.targetProfit || editData.targetProfit <= 0) errors.push('目標利益額を入力してください');
@@ -4508,6 +4529,14 @@ function TabMainBoard({ exhibition, updateMainData, updateBatch, tasks, onNaviga
                   <span className="text-xs text-slate-400 block">住所</span>
                   <span className="text-slate-700">{exhibition.venueAddress || '未設定'}</span>
                 </div>
+                <div>
+                  <span className="text-xs text-slate-400 block">使用フロア</span>
+                  <span className="text-slate-700">{venueFloorText || '未設定'}</span>
+                </div>
+                <div>
+                  <span className="text-xs text-slate-400 block">展示会責任者</span>
+                  <span className="font-bold text-slate-800">{exhibitionManagerName || '未設定'}</span>
+                </div>
                 <div className="flex gap-8">
                   <div>
                     <span className="text-xs text-slate-400 block">開場</span>
@@ -4650,6 +4679,19 @@ function TabMainBoard({ exhibition, updateMainData, updateBatch, tasks, onNaviga
                 <div>
                   <label className="block text-sm font-medium text-slate-600 mb-1">会場住所</label>
                   <input type="text" value={editData.venueAddress || ''} onChange={e => setEditData({ ...editData, venueAddress: e.target.value })} className="w-full p-3 border border-slate-200 rounded-lg" />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">使用フロア</label>
+                  <input type="text" value={editData.venueFloor || ''} onChange={e => setEditData({ ...editData, venueFloor: e.target.value })} className="w-full p-3 border border-slate-200 rounded-lg" />
+                  <p className="mt-1 text-xs text-slate-400">※展示会場のフロア名や階数などを記載する</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">展示会責任者 <span className="text-red-500">*</span></label>
+                  <input type="text" value={editData.exhibitionManagerName || ''} onChange={e => setEditData({ ...editData, exhibitionManagerName: e.target.value })} className="w-full p-3 border border-slate-200 rounded-lg" />
+                  <p className="mt-1 text-xs text-slate-400">※フルネームで記載</p>
                 </div>
               </div>
 
@@ -5108,6 +5150,15 @@ function TabLectures({ lectures, updateMainData, updateBatch, staff, scheduleDat
     // ステータス
     status: 'planning'
   });
+  const editingLecture = isEditing ? (lectures || []).find((lecture) => lecture.id === isEditing) : null;
+  const themeLength = countCharacters(newData.theme);
+  const summaryLength = countCharacters(newData.summary);
+  const isLegacyThemeUnchanged =
+    !!editingLecture && isLegacyLengthValueUnchanged(editingLecture.theme, newData.theme, LECTURE_THEME_MAX_LENGTH);
+  const isLegacySummaryUnchanged =
+    !!editingLecture && isLegacyLengthValueUnchanged(editingLecture.summary, newData.summary, LECTURE_SUMMARY_MAX_LENGTH);
+  const isThemeOverLimit = themeLength > LECTURE_THEME_MAX_LENGTH && !isLegacyThemeUnchanged;
+  const isSummaryOverLimit = summaryLength > LECTURE_SUMMARY_MAX_LENGTH && !isLegacySummaryUnchanged;
 
   const STATUS_LABELS = {
     'planning': { label: '調整中', color: 'bg-slate-100 text-slate-600' },
@@ -5158,6 +5209,14 @@ function TabLectures({ lectures, updateMainData, updateBatch, staff, scheduleDat
   const handleSave = () => {
     if (!newData.name || !newData.theme || !newData.summary || !newData.flyerText) {
       alert('講師名、テーマ、講演内容概略、チラシ用文言は必須です');
+      return;
+    }
+    if (isThemeOverLimit) {
+      alert(`テーマは${LECTURE_THEME_MAX_LENGTH}文字以内で入力してください`);
+      return;
+    }
+    if (isSummaryOverLimit) {
+      alert(`講演内容概略は${LECTURE_SUMMARY_MAX_LENGTH}文字以内で入力してください`);
       return;
     }
     if (!newData.startTime || !newData.endTime || !newData.venue) {
@@ -5270,8 +5329,42 @@ function TabLectures({ lectures, updateMainData, updateBatch, staff, scheduleDat
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div><label className="block text-xs font-bold text-slate-500 mb-1">講師名 <span className="text-red-500">*</span></label><input type="text" value={newData.name} className="w-full border border-slate-300 rounded-lg p-3 focus:ring-2 focus:ring-purple-500 outline-none" placeholder="例：山田 太郎 先生" onChange={e => setNewData({ ...newData, name: e.target.value })} /></div>
               <div><label className="block text-xs font-bold text-slate-500 mb-1">写真URL（任意）</label><input type="url" value={newData.photoUrl} className="w-full border border-slate-300 rounded-lg p-3 focus:ring-2 focus:ring-purple-500 outline-none" placeholder="https://..." onChange={e => setNewData({ ...newData, photoUrl: e.target.value })} /></div>
-              <div className="md:col-span-2"><label className="block text-xs font-bold text-slate-500 mb-1">テーマ <span className="text-red-500">*</span></label><input type="text" value={newData.theme} className="w-full border border-slate-300 rounded-lg p-3 focus:ring-2 focus:ring-purple-500 outline-none" placeholder="講演タイトル" onChange={e => setNewData({ ...newData, theme: e.target.value })} /></div>
-              <div className="md:col-span-2"><label className="block text-xs font-bold text-slate-500 mb-1">講演内容概略 <span className="text-red-500">*</span></label><textarea value={newData.summary} className="w-full border border-slate-300 rounded-lg p-3 focus:ring-2 focus:ring-purple-500 outline-none" rows="3" placeholder="講演の概要を入力" onChange={e => setNewData({ ...newData, summary: e.target.value })} /></div>
+              <div className="md:col-span-2">
+                <label className="block text-xs font-bold text-slate-500 mb-1">テーマ <span className="text-red-500">*</span></label>
+                <input
+                  type="text"
+                  value={newData.theme}
+                  className={`w-full border rounded-lg p-3 focus:ring-2 focus:ring-purple-500 outline-none ${isThemeOverLimit ? 'border-red-300 bg-red-50' : 'border-slate-300'}`}
+                  placeholder="講演タイトル"
+                  onChange={e => setNewData({ ...newData, theme: e.target.value })}
+                />
+                <div className="mt-1 flex items-center justify-between text-xs">
+                  <span className={isLegacyThemeUnchanged ? 'text-amber-600' : 'text-slate-400'}>
+                    {isLegacyThemeUnchanged ? '既存データのため未変更ならこのまま保存できます' : '30文字以内で入力してください'}
+                  </span>
+                  <span className={isThemeOverLimit ? 'font-bold text-red-600' : isLegacyThemeUnchanged ? 'font-bold text-amber-600' : 'text-slate-500'}>
+                    {themeLength}/{LECTURE_THEME_MAX_LENGTH}
+                  </span>
+                </div>
+              </div>
+              <div className="md:col-span-2">
+                <label className="block text-xs font-bold text-slate-500 mb-1">講演内容概略 <span className="text-red-500">*</span></label>
+                <textarea
+                  value={newData.summary}
+                  className={`w-full border rounded-lg p-3 focus:ring-2 focus:ring-purple-500 outline-none ${isSummaryOverLimit ? 'border-red-300 bg-red-50' : 'border-slate-300'}`}
+                  rows="3"
+                  placeholder="講演の概要を入力"
+                  onChange={e => setNewData({ ...newData, summary: e.target.value })}
+                />
+                <div className="mt-1 flex items-center justify-between text-xs">
+                  <span className={isLegacySummaryUnchanged ? 'text-amber-600' : 'text-slate-400'}>
+                    {isLegacySummaryUnchanged ? '既存データのため未変更ならこのまま保存できます' : '100文字以内で入力してください'}
+                  </span>
+                  <span className={isSummaryOverLimit ? 'font-bold text-red-600' : isLegacySummaryUnchanged ? 'font-bold text-amber-600' : 'text-slate-500'}>
+                    {summaryLength}/{LECTURE_SUMMARY_MAX_LENGTH}
+                  </span>
+                </div>
+              </div>
               <div className="md:col-span-2"><label className="block text-xs font-bold text-slate-500 mb-1">チラシ用文言 <span className="text-red-500">*</span></label><textarea value={newData.flyerText} className="w-full border border-slate-300 rounded-lg p-3 focus:ring-2 focus:ring-purple-500 outline-none" rows="2" placeholder="チラシに掲載する文言" onChange={e => setNewData({ ...newData, flyerText: e.target.value })} /></div>
             </div>
           </div>
@@ -6115,14 +6208,6 @@ const ExhibitionCard = ({ exhibition, status, onAction, onScan }) => {
     if (onAction) onAction();
   };
 
-  const formatDates = (dates) => {
-    if (!dates || dates.length === 0) return '日程未定';
-    return dates.map(d => {
-      const date = new Date(d);
-      return `${date.getMonth() + 1}/${date.getDate()}`;
-    }).join(', ');
-  };
-
   // 残り日数計算
   const getDaysLeft = () => {
     const deadline = exhibition.formConfig?.settings?.deadline;
@@ -6136,6 +6221,8 @@ const ExhibitionCard = ({ exhibition, status, onAction, onScan }) => {
 
   const daysLeft = getDaysLeft();
   const isUrgent = daysLeft !== null && daysLeft <= 3;
+  const exhibitionManagerName = String(exhibition.exhibitionManagerName || '').trim();
+  const venueFloorText = String(exhibition.venueFloor || '').trim();
 
   return (
     <div
@@ -6184,7 +6271,7 @@ const ExhibitionCard = ({ exhibition, status, onAction, onScan }) => {
       <div className="bg-white p-4 space-y-2">
         <div className="flex items-center gap-2 text-sm text-slate-600">
           <Calendar size={14} className="text-blue-500" />
-          <span className="font-medium">{formatDates(exhibition.dates)}</span>
+          <span className="font-medium">{formatExhibitionDateText(exhibition.dates)}</span>
         </div>
         {status === 'invited' && exhibition.formConfig?.settings?.deadline && (
           <div className={`flex items-center gap-2 text-sm ${isUrgent ? 'text-red-600 font-bold' : 'text-slate-600'}`}>
@@ -6196,6 +6283,18 @@ const ExhibitionCard = ({ exhibition, status, onAction, onScan }) => {
           <MapPin size={14} className="text-emerald-500" />
           <span className="truncate">{exhibition.place || exhibition.venueAddress || '会場未定'}</span>
         </div>
+        {venueFloorText && (
+          <div className="flex items-center gap-2 text-sm text-slate-600">
+            <Building2 size={14} className="text-violet-500" />
+            <span className="truncate">使用フロア: {venueFloorText}</span>
+          </div>
+        )}
+        {exhibitionManagerName && (
+          <div className="flex items-center gap-2 text-sm text-slate-600">
+            <User size={14} className="text-amber-500" />
+            <span className="truncate">展示会責任者: {exhibitionManagerName}</span>
+          </div>
+        )}
 
         {/* Action Hint */}
         <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
@@ -6810,7 +6909,7 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
                   <div className="absolute bottom-4 left-6 text-white z-10 w-2/3">
                     <h2 className="text-xl md:text-2xl font-bold drop-shadow-md leading-tight">{selectedExhibition.title}</h2>
                     <div className="flex flex-wrap items-center gap-3 mt-2 text-slate-300 text-xs md:text-sm">
-                      <span className="flex items-center gap-1 bg-black/30 px-2 py-0.5 rounded backdrop-blur-sm"><Calendar size={12} /> {selectedExhibition.dates?.join(', ')}</span>
+                      <span className="flex items-center gap-1 bg-black/30 px-2 py-0.5 rounded backdrop-blur-sm"><Calendar size={12} /> {formatExhibitionDateText(selectedExhibition.dates)}</span>
                       <span className="flex items-center gap-1 bg-black/30 px-2 py-0.5 rounded backdrop-blur-sm"><MapPin size={12} /> {selectedExhibition.venueAddress || selectedExhibition.place}</span>
                     </div>
                   </div>
@@ -6843,6 +6942,18 @@ function MakerPortal({ maker, exhibitions, onScan, onResponseSubmit, markMessage
                       <span className="block text-xs font-bold text-slate-400 mb-1">開場時間</span>
                       {selectedExhibition.openTime} - {selectedExhibition.closeTime}
                     </div>
+                    {String(selectedExhibition.venueFloor || '').trim() && (
+                      <div className="bg-white p-3 rounded-lg border border-slate-100">
+                        <span className="block text-xs font-bold text-slate-400 mb-1">使用フロア</span>
+                        {selectedExhibition.venueFloor}
+                      </div>
+                    )}
+                    {String(selectedExhibition.exhibitionManagerName || '').trim() && (
+                      <div className="bg-white p-3 rounded-lg border border-slate-100">
+                        <span className="block text-xs font-bold text-slate-400 mb-1">展示会責任者</span>
+                        {selectedExhibition.exhibitionManagerName}
+                      </div>
+                    )}
                   </div>
                   {(selectedExhibition.formConfig?.section1?.description || selectedExhibition.description) && (
                     <div className="bg-white p-4 rounded-lg border border-slate-100">
@@ -8228,9 +8339,10 @@ function DashboardView({ exhibitions, onCreateClick, onCardClick, onDeleteClick,
               return sum + (parsed > 0 ? parsed : 1);
             }, 0);
 
-            const eventDateStr = ex.dates && ex.dates.length > 0 ? ex.dates[0] : null;
+            const eventDateText = formatExhibitionDateText(ex.dates);
             const countdown = getDaysUntil(ex.dates);
             const isPast = countdown?.diff < 0 && !countdown?.isPast;
+            const exhibitionManagerName = String(ex.exhibitionManagerName || '').trim();
 
             if (viewMode === 'list') {
               return (
@@ -8240,7 +8352,8 @@ function DashboardView({ exhibitions, onCreateClick, onCardClick, onDeleteClick,
                   </div>
                   <div className="flex-1">
                     <h3 className="font-bold text-slate-800">{ex.title}</h3>
-                    <p className="text-xs text-slate-500">{eventDateStr} @ {ex.place}</p>
+                    <p className="text-xs text-slate-500">{eventDateText} @ {ex.place}</p>
+                    <p className="text-xs text-slate-400 mt-1">展示会責任者: {exhibitionManagerName || '未設定'}</p>
                   </div>
                   <div className="flex gap-4 text-sm text-slate-600">
                     <div className="text-center"><span className="block font-bold">{registeredCount}</span><span className="text-xs text-slate-400">集客</span></div>
@@ -8319,7 +8432,7 @@ function DashboardView({ exhibitions, onCreateClick, onCardClick, onDeleteClick,
                   {/* Date & Tags */}
                   <div className="flex flex-wrap items-center gap-2 mb-2">
                     <span className="flex items-center gap-1 text-blue-600 font-bold text-sm">
-                      <Calendar size={14} /> {eventDateStr || '日程未定'}
+                      <Calendar size={14} /> {eventDateText}
                     </span>
                     {ex.preDates?.length > 0 && <span className="text-[10px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded font-bold">前日搬入あり</span>}
                     <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded font-bold flex items-center gap-1"><Building2 size={10} /> {makerCount}社参加</span>
@@ -8329,6 +8442,9 @@ function DashboardView({ exhibitions, onCreateClick, onCardClick, onDeleteClick,
                         <Mic size={10} /> 講演会あり
                       </span>
                     )}
+                  </div>
+                  <div className="text-xs text-slate-500 -mt-1">
+                    展示会責任者: <span className="font-medium text-slate-700">{exhibitionManagerName || '未設定'}</span>
                   </div>
 
                   {/* Status Metrics */}
@@ -8447,6 +8563,7 @@ function CreateExhibitionForm({ data, setData, onCancel, onSubmit }) {
     const errors = [];
     if (!data.title.trim()) errors.push('展示会タイトルは必須です');
     if (!data.dates || data.dates.length === 0) errors.push('開催日を1日以上追加してください');
+    if (!String(data.exhibitionManagerName || '').trim()) errors.push('展示会責任者を入力してください');
     if (!data.targetVisitors || data.targetVisitors <= 0) errors.push('集客目標を入力してください');
     if (!data.targetMakers || data.targetMakers <= 0) errors.push('招致メーカー目標を入力してください');
     if (!data.targetProfit || data.targetProfit <= 0) errors.push('目標利益額を入力してください');
@@ -8482,6 +8599,22 @@ function CreateExhibitionForm({ data, setData, onCancel, onSubmit }) {
         <section><h3 className="text-lg font-bold text-slate-800 border-b pb-2 mb-4 flex items-center gap-2"><FileText className="text-blue-600" /> 基本情報</h3><div className="grid grid-cols-1 md:grid-cols-2 gap-6"><div className="col-span-2"><RequiredLabel>展示会タイトル</RequiredLabel><input type="text" name="title" value={data.title} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="例：2026 未来技術展" /></div><div><RequiredLabel>開催日 (複数可)</RequiredLabel><div className="flex gap-2 mb-2"><input type="date" value={tempDate} onChange={e => setTempDate(e.target.value)} className="flex-1 p-2 border border-slate-200 rounded-lg" /><button onClick={() => addDate('main')} className="bg-blue-100 text-blue-600 p-2 rounded-lg hover:bg-blue-200"><Plus size={20} /></button></div><div className="flex flex-wrap gap-2">{data.dates.map((d, i) => (<span key={i} className="bg-blue-50 text-blue-700 px-2 py-1 rounded text-sm flex items-center gap-1">{d} <button onClick={() => removeDate('main', i)}><X size={12} /></button></span>))}</div></div><div><label className="block text-sm font-medium text-slate-600 mb-1">事前準備日 (複数可)</label><div className="flex gap-2 mb-2"><input type="date" value={tempPreDate} onChange={e => setTempPreDate(e.target.value)} className="flex-1 p-2 border border-slate-200 rounded-lg" /><button onClick={() => addDate('pre')} className="bg-amber-100 text-amber-600 p-2 rounded-lg hover:bg-amber-200"><Plus size={20} /></button></div><div className="flex flex-wrap gap-2">{data.preDates.map((d, i) => (<span key={i} className="bg-amber-50 text-amber-700 px-2 py-1 rounded text-sm flex items-center gap-1">{d} <button onClick={() => removeDate('pre', i)}><X size={12} /></button></span>))}</div></div></div></section>
 
         <section><h3 className="text-lg font-bold text-slate-800 border-b pb-2 mb-4 flex items-center gap-2"><MapPin className="text-blue-600" /> エリア・会場・Web</h3><div className="grid grid-cols-1 md:grid-cols-2 gap-6"><div><label className="block text-sm font-medium text-slate-600 mb-1">エリア選択</label><select name="prefecture" value={data.prefecture} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg bg-white"><option value="">都道府県を選択...</option>{PREFECTURES.map(group => (<optgroup key={group.region} label={group.region}>{group.prefs.map(p => <option key={p} value={p}>{p}</option>)}</optgroup>))}</select></div><div><label className="block text-sm font-medium text-slate-600 mb-1">会場名（予定）</label><input type="text" name="place" value={data.place} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" placeholder="例：福岡国際センター" /></div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1">会場住所</label><input type="text" name="venueAddress" value={data.venueAddress} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" placeholder="例：福岡県福岡市博多区石城町２?１" /></div><div><label className="block text-sm font-medium text-slate-600 mb-1">開場時間</label><input type="time" name="openTime" value={data.openTime} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" /></div><div><label className="block text-sm font-medium text-slate-600 mb-1">閉場時間</label><input type="time" name="closeTime" value={data.closeTime} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" /></div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1">展示会場URL</label><div className="flex gap-2"><input type="text" name="venueUrl" value={data.venueUrl} onChange={handleChange} className="flex-1 p-3 border border-slate-200 rounded-lg" placeholder="https://..." /><button onClick={simulateFetchImage} disabled={!data.venueUrl || isFetchingImg} className="bg-slate-800 text-white px-4 rounded-lg text-sm font-bold hover:bg-slate-700 disabled:opacity-50 flex items-center gap-2 whitespace-nowrap">{isFetchingImg ? <RefreshCw className="animate-spin" size={16} /> : <LinkIcon size={16} />} 画像を取得</button></div>{data.imageUrl && (<div className="mt-2 p-2 border border-slate-200 rounded-lg bg-slate-50 flex items-center gap-4"><img src={data.imageUrl} alt="Preview" className="w-20 h-14 object-cover rounded" /><span className="text-xs text-green-600 font-bold">? 画像を取得しました</span></div>)}</div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1 flex items-center gap-2"><Map size={16} /> GoogleマップURL</label><input type="text" name="googleMapsUrl" value={data.googleMapsUrl || ''} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" placeholder="https://maps.google.com/..." /></div><div className="col-span-2"><label className="block text-sm font-medium text-slate-600 mb-1">コンセプト</label><textarea name="concept" value={data.concept} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" rows="3" placeholder="展示会のテーマや狙いを記入" /></div></div></section>
+
+        <section>
+          <h3 className="text-lg font-bold text-slate-800 border-b pb-2 mb-4 flex items-center gap-2"><Settings className="text-blue-600" /> プロジェクト設定</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <RequiredLabel>展示会責任者</RequiredLabel>
+              <input type="text" name="exhibitionManagerName" value={data.exhibitionManagerName || ''} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="例：山田 太郎" />
+              <p className="mt-1 text-xs text-slate-400">※フルネームで記載</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-600 mb-1">使用フロア</label>
+              <input type="text" name="venueFloor" value={data.venueFloor || ''} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="例：3F 展示ホールA" />
+              <p className="mt-1 text-xs text-slate-400">※展示会場のフロア名や階数などを記載する</p>
+            </div>
+          </div>
+        </section>
 
         <section><h3 className="text-lg font-bold text-slate-800 border-b pb-2 mb-4 flex items-center gap-2"><Target className="text-blue-600" /> 目標設定・チーム</h3><div className="grid grid-cols-1 md:grid-cols-3 gap-6"><div><RequiredLabel>集客目標 (人)</RequiredLabel><input type="number" name="targetVisitors" value={data.targetVisitors} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" /></div><div><RequiredLabel>招致メーカー目標 (社)</RequiredLabel><input type="number" name="targetMakers" value={data.targetMakers} onChange={handleChange} className="w-full p-3 border border-slate-200 rounded-lg" /></div><div><RequiredLabel>目標利益額 (円)</RequiredLabel><input type="number" name="targetProfit" value={data.targetProfit} onChange={handleChange} className="w-full p-3 border border-blue-300 bg-blue-50 rounded-lg font-bold text-blue-800" placeholder="1000000" /></div><div className="col-span-1 md:col-span-3"><RequiredLabel>運営スタッフ</RequiredLabel><div className="flex gap-2 mb-2"><input type="text" value={staffName} onChange={e => setStaffName(e.target.value)} className="flex-1 p-3 border border-slate-200 rounded-lg" placeholder="スタッフ名" /><button onClick={addStaff} className="bg-slate-800 text-white px-4 rounded-lg"><Plus /></button></div><div className="flex flex-wrap gap-2">{data.staff && data.staff.split(',').filter(s => s).map((s, i) => (<span key={i} className="bg-slate-100 text-slate-700 px-3 py-1 rounded-full flex items-center gap-2 text-sm">{s.trim()} <button onClick={() => removeStaff(s.trim())}><X size={14} /></button></span>))}</div></div></div></section>
 
@@ -8586,8 +8719,7 @@ function ExhibitionDetail({
             <div className="flex flex-col items-start gap-1">
               {exhibition.dates && exhibition.dates.length > 0 && (
                 <span className="bg-blue-100 text-blue-700 px-3 py-1 rounded-lg font-bold text-sm flex items-center gap-2">
-                  <Calendar size={14} /> {exhibition.dates[0]}
-                  {exhibition.dates.length > 1 && <span className="text-blue-500">(+{exhibition.dates.length - 1}日)</span>}
+                  <Calendar size={14} /> {formatExhibitionDateText(exhibition.dates)}
                 </span>
               )}
               {exhibition.preDates && exhibition.preDates.length > 0 && (
@@ -8702,7 +8834,7 @@ function MobileEventSimpleView({
   onOpenAction,
 }) {
   const hasExhibitions = Array.isArray(exhibitions) && exhibitions.length > 0;
-  const datesText = (selectedExhibition?.dates || []).join(' / ') || '未設定';
+  const datesText = formatExhibitionDateText(selectedExhibition?.dates);
   const venueText = selectedExhibition?.place || selectedExhibition?.venueAddress || '未設定';
   const staffText = selectedExhibition?.staff || '未設定';
   const checkedInVisitors = (selectedExhibition?.visitors || []).filter(
@@ -8783,7 +8915,7 @@ function App() {
   const [view, setView] = useState('loading');
   const [exhibitions, setExhibitions] = useState(null);
   const [selectedExhibition, setSelectedExhibition] = useState(null);
-  const [newExhibition, setNewExhibition] = useState({ title: '', dates: [], preDates: [], place: '', prefecture: '', venueAddress: '', openTime: '10:00', closeTime: '17:00', concept: '', targetVisitors: 0, targetMakers: 0, targetProfit: 0, venueUrl: '', googleMapsUrl: '', imageUrl: '', staff: '' });
+  const [newExhibition, setNewExhibition] = useState({ title: '', dates: [], preDates: [], place: '', prefecture: '', venueAddress: '', venueFloor: '', openTime: '10:00', closeTime: '17:00', concept: '', exhibitionManagerName: '', targetVisitors: 0, targetMakers: 0, targetProfit: 0, venueUrl: '', googleMapsUrl: '', imageUrl: '', staff: '' });
   const [exhibitionTabs, setExhibitionTabs] = useState({}); // { [exhibitionId]: 'activeTabName' }
   const { user, db, storage, appId } = useFirebaseInit();
   const [urlMode, setUrlMode] = useState('dashboard');
@@ -9179,7 +9311,7 @@ function App() {
       await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'exhibitions', id), newProject);
       console.log('[DEBUG] Creation success');
       setView('dashboard');
-      setNewExhibition({ title: '', dates: [], preDates: [], place: '', prefecture: '', venueAddress: '', openTime: '10:00', closeTime: '17:00', concept: '', targetVisitors: 0, targetMakers: 0, targetProfit: 0, venueUrl: '', imageUrl: '', staff: '' });
+      setNewExhibition({ title: '', dates: [], preDates: [], place: '', prefecture: '', venueAddress: '', venueFloor: '', openTime: '10:00', closeTime: '17:00', concept: '', exhibitionManagerName: '', targetVisitors: 0, targetMakers: 0, targetProfit: 0, venueUrl: '', googleMapsUrl: '', imageUrl: '', staff: '' });
 
     } catch (e) {
       console.error('[DEBUG] Creation error:', e);

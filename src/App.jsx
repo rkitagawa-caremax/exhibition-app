@@ -35,7 +35,7 @@ import {
   buildMakerStrategyReport,
   buildOverallExhibitionStats,
   buildRevenueSimulation,
-  buildTotalVisitors,
+  buildTotalVisitors as buildTotalRegisteredVisitors,
   buildVisitorForecast,
   buildVisitorCheckinHeatmap,
   buildVisitorAttributes,
@@ -69,7 +69,7 @@ const PREFECTURES = [
 
 const EQUIPMENT_OPTIONS = ["長机", "椅子", "プロジェクター", "マイク", "マイクスタンド", "スクリーン", "演台", "パーテーション"];
 const MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1hnZdkquaybY-bBSAevnW2BOLn83OdITzNvt-hmZkmVI/edit?gid=0#gid=0";
-const BRAND_NAME = "Kaientai-X 2.1";
+const BRAND_NAME = "Kaientai-X 2.2";
 const BRAND_ICON_PATH = "/icon.png";
 
 const BrandIcon = ({ size = 24, className = "", alt = BRAND_NAME }) => (
@@ -2993,6 +2993,7 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
   const flyerPdfSaveTimerRef = useRef(null);
 
   const makers = exhibition.makers || [];
+  const isNewMakerReceptionClosed = exhibition.newMakerReceptionClosed === true;
   const formConfig = normalizeMakerFormConfig(exhibition.formConfig);
   const [isSendingDocs, setIsSendingDocs] = useState(false);
   const normalizeCode = (rawCode) => String(rawCode || '').trim();
@@ -3302,6 +3303,15 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
     }
   };
 
+  const handleToggleNewMakerReceptionClosed = () => {
+    const nextValue = !isNewMakerReceptionClosed;
+    const confirmationMessage = nextValue
+      ? '新規出展受付を終了として表示しますか？\nダッシュボードと基本情報タブに「新規出展受付終了」と表示されます。'
+      : '新規出展受付終了の表示を解除しますか？';
+    if (!window.confirm(confirmationMessage)) return;
+    updateMainData('newMakerReceptionClosed', nextValue);
+  };
+
   // Invoice download handlers are provided by src/features/invoice/useInvoiceDownloads.js
 
   const handleSaveMakerData = (newData) => {
@@ -3433,10 +3443,20 @@ function TabMakers({ exhibition, setMakers, updateMainData, masterMakers, onNavi
             <Download size={18} /> リスト出力
           </button>
           <button
+            onClick={handleToggleNewMakerReceptionClosed}
+            className={`flex-1 md:flex-none flex items-center gap-2 px-6 py-3 rounded-lg font-bold border hover:-translate-y-0.5 transition-all ${
+              isNewMakerReceptionClosed
+                ? 'bg-rose-600 text-white border-rose-600 hover:bg-rose-700'
+                : 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100'
+            }`}
+          >
+            <AlertCircle size={18} /> {isNewMakerReceptionClosed ? '新規出展受付終了中' : '新規出展受付終了'}
+          </button>
+          <button
             onClick={handleCloseReception}
             className="flex-1 md:flex-none flex items-center gap-2 bg-red-50 text-red-600 border border-red-200 px-6 py-3 rounded-lg font-bold hover:bg-red-100 hover:-translate-y-0.5 transition-all"
           >
-            <XCircle size={18} /> 受付締切
+            <XCircle size={18} /> 自動辞退処理
           </button>
         </div>
       </div>
@@ -4299,6 +4319,7 @@ function TabMainBoard({ exhibition, updateMainData, updateBatch, tasks, onNaviga
   const confirmedBoothTotal = confirmedMakers.reduce((sum, maker) => sum + extractNum(maker.boothCount), 0);
   const venueFloorText = String(exhibition.venueFloor || '').trim();
   const exhibitionManagerName = String(exhibition.exhibitionManagerName || '').trim();
+  const isNewMakerReceptionClosed = exhibition.newMakerReceptionClosed === true;
 
   // Urgent Tasks (Due within 7 days and not done)
   const today = new Date();
@@ -4432,6 +4453,16 @@ function TabMainBoard({ exhibition, updateMainData, updateBatch, tasks, onNaviga
           <Settings size={18} /> 設定変更
         </button>
       </div>
+
+      {isNewMakerReceptionClosed && (
+        <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 flex items-start gap-3">
+          <AlertCircle size={20} className="text-rose-600 mt-0.5 shrink-0" />
+          <div>
+            <p className="font-bold text-rose-700">新規出展受付終了</p>
+            <p className="text-sm text-rose-600 mt-1">招待メーカータブで新規出展受付終了が設定されています。</p>
+          </div>
+        </div>
+      )}
 
       {/* 4 Status Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -7441,9 +7472,9 @@ function PerformanceAnalysisView({ exhibitions }) {
     return buildYearlyStats(exhibitions);
   }, [exhibitions]);
 
-  // 総来場者数
-  const totalVisitors = useMemo(() => {
-    return buildTotalVisitors(exhibitions);
+  // 事前登録者総数
+  const totalRegisteredVisitors = useMemo(() => {
+    return buildTotalRegisteredVisitors(exhibitions);
   }, [exhibitions]);
 
   // 来場済み数
@@ -7557,8 +7588,8 @@ function PerformanceAnalysisView({ exhibitions }) {
     const policy = `\n## 方針提案\n${report.policyRecommendations.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n`;
     const actions = `\n## 次回アクション\n${report.nextActions.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n`;
     const top = `\n## 出展回数上位企業\n${report.topParticipants.slice(0, 30).map((company, i) => `${i + 1}. ${company.name}${company.code ? ` (code:${company.code})` : ''} / 出展:${company.confirmed} / 招待:${company.invited} / 辞退率:${company.declineRate.toFixed(1)}% / 方針:${company.strategy}`).join('\n')}\n`;
-    const decline = `\n## 辞退率上位企業\n${report.highDecliners.slice(0, 30).map((company, i) => `${i + 1}. ${company.name}${company.code ? ` (code:${company.code})` : ''} / 招待:${company.invited} / 辞退:${company.declined} / 辞退率:${company.declineRate.toFixed(1)}% / 方針:${company.strategy}`).join('\n')}\n`;
-    const autoDecline = `\n## 要注意企業（未回答自動辞退率 高位）\n${watchlist.length > 0
+    const decline = `\n## 調整後辞退率上位企業\n${report.highDecliners.slice(0, 30).map((company, i) => `${i + 1}. ${company.name}${company.code ? ` (code:${company.code})` : ''} / 招待:${company.invited} / 辞退:${company.declined} / 調整後辞退率:${(company.adjustedDeclineRate || 0).toFixed(1)}% / 方針:${company.strategy}`).join('\n')}\n`;
+    const autoDecline = `\n## 要注意企業（未回答自動辞退率 高位10社）\n${watchlist.length > 0
       ? watchlist.map((company, i) => `${i + 1}. ${company.name}${company.code ? ` (code:${company.code})` : ''} / 招待:${company.invited} / 自動辞退:${company.autoDeclined || 0} / 自動辞退率:${company.autoDeclineRate.toFixed(1)}% / 方針:${company.strategy}`).join('\n')
       : '- 該当なし'}\n`;
     const body = `${header}${kpi}${segments}${summary}${policy}${actions}${top}${decline}${autoDecline}`;
@@ -7671,8 +7702,8 @@ function PerformanceAnalysisView({ exhibitions }) {
           <p className="text-3xl font-bold">¥{getYearlyStats.reduce((s, y) => s + y.profit, 0).toLocaleString()}</p>
         </div>
         <div className="bg-gradient-to-br from-emerald-500 to-emerald-600 text-white rounded-xl p-6 shadow-lg">
-          <p className="text-emerald-100 text-sm font-bold mb-1">総来場者数</p>
-          <p className="text-3xl font-bold">{totalVisitors.toLocaleString()}名</p>
+          <p className="text-emerald-100 text-sm font-bold mb-1">事前登録者総数</p>
+          <p className="text-3xl font-bold">{totalRegisteredVisitors.toLocaleString()}名</p>
         </div>
         <div className="bg-gradient-to-br from-amber-500 to-amber-600 text-white rounded-xl p-6 shadow-lg">
           <p className="text-amber-100 text-sm font-bold mb-1">来場済み</p>
@@ -7940,12 +7971,13 @@ function PerformanceAnalysisView({ exhibitions }) {
                 </div>
               </div>
               <div className="bg-white/80 rounded-lg border border-emerald-100 p-4">
-                <p className="text-sm font-bold text-slate-700 mb-3">辞退率 高位10社（招待2回以上）</p>
+                <p className="text-sm font-bold text-slate-700 mb-1">調整後辞退率 高位10社（招待2回以上）</p>
+                <p className="text-[11px] text-slate-500 mb-3">全体平均と招待回数を加味した調整後辞退率で順位付けしています。</p>
                 <div className="space-y-2">
                   {makerStrategyReport.highDecliners.slice(0, 10).map((company, idx) => (
                     <div key={company.key || idx} className="rounded-md border border-slate-100 bg-white p-2">
                       <p className="text-sm font-bold text-slate-800">{idx + 1}. {company.name}</p>
-                      <p className="text-xs text-slate-600 mt-0.5">招待:{company.invited}回 / 辞退:{company.declined}回 / 辞退率:{company.declineRate.toFixed(1)}%</p>
+                      <p className="text-xs text-slate-600 mt-0.5">招待:{company.invited}回 / 辞退:{company.declined}回 / 調整後辞退率:{(company.adjustedDeclineRate || 0).toFixed(1)}%</p>
                       <p className="text-xs text-emerald-700 mt-1">方針: {company.strategy}</p>
                     </div>
                   ))}
@@ -7953,9 +7985,9 @@ function PerformanceAnalysisView({ exhibitions }) {
                 </div>
               </div>
               <div className="bg-white/80 rounded-lg border border-amber-200 p-4">
-                <p className="text-sm font-bold text-amber-800 mb-3">要注意 受付締切時 自動辞退率 高位5社</p>
+                <p className="text-sm font-bold text-amber-800 mb-3">要注意 受付締切時 自動辞退率 高位10社</p>
                 <div className="space-y-2">
-                  {(makerStrategyReport.autoDeclineWatchlist || []).slice(0, 5).map((company, idx) => (
+                  {(makerStrategyReport.autoDeclineWatchlist || []).slice(0, 10).map((company, idx) => (
                     <div key={company.key || idx} className="rounded-md border border-amber-100 bg-white p-2">
                       <p className="text-sm font-bold text-slate-800">{idx + 1}. {company.name}</p>
                       <p className="text-xs text-slate-600 mt-0.5">
@@ -8083,9 +8115,10 @@ function PerformanceAnalysisView({ exhibitions }) {
       <div className="bg-white rounded-xl border p-6 shadow-sm">
         <h3 className="text-xl font-bold text-slate-800 mb-6 flex items-center gap-2">
           <UserX className="text-red-500" size={20} />
-          辞退割合が高い企業 TOP30
+          調整後辞退率が高い企業 TOP30
           <span className="text-xs font-normal text-slate-400 ml-2">※招待数3回以上の企業のみ</span>
         </h3>
+        <p className="text-xs text-slate-500 mb-4">全体平均と招待回数を加味した調整後辞退率でランキングしています。</p>
         {declineRanking.length === 0 ? (
           <p className="text-slate-400 text-center py-8">該当データがありません</p>
         ) : (
@@ -8097,7 +8130,7 @@ function PerformanceAnalysisView({ exhibitions }) {
                   <th className="text-left p-3 font-bold text-slate-600">企業名</th>
                   <th className="text-right p-3 font-bold text-slate-600">招待回数</th>
                   <th className="text-right p-3 font-bold text-slate-600">辞退回数</th>
-                  <th className="text-right p-3 font-bold text-slate-600">辞退率</th>
+                  <th className="text-right p-3 font-bold text-slate-600">調整後辞退率</th>
                 </tr>
               </thead>
               <tbody>
@@ -8343,6 +8376,7 @@ function DashboardView({ exhibitions, onCreateClick, onCardClick, onDeleteClick,
             const countdown = getDaysUntil(ex.dates);
             const isPast = countdown?.diff < 0 && !countdown?.isPast;
             const exhibitionManagerName = String(ex.exhibitionManagerName || '').trim();
+            const isNewMakerReceptionClosed = ex.newMakerReceptionClosed === true;
 
             if (viewMode === 'list') {
               return (
@@ -8353,6 +8387,7 @@ function DashboardView({ exhibitions, onCreateClick, onCardClick, onDeleteClick,
                   <div className="flex-1">
                     <h3 className="font-bold text-slate-800">{ex.title}</h3>
                     <p className="text-xs text-slate-500">{eventDateText} @ {ex.place}</p>
+                    {isNewMakerReceptionClosed && <p className="text-[11px] text-rose-600 font-bold mt-1">新規出展受付終了</p>}
                     <p className="text-xs text-slate-400 mt-1">展示会責任者: {exhibitionManagerName || '未設定'}</p>
                   </div>
                   <div className="flex gap-4 text-sm text-slate-600">
@@ -8434,6 +8469,7 @@ function DashboardView({ exhibitions, onCreateClick, onCardClick, onDeleteClick,
                     <span className="flex items-center gap-1 text-blue-600 font-bold text-sm">
                       <Calendar size={14} /> {eventDateText}
                     </span>
+                    {isNewMakerReceptionClosed && <span className="text-[10px] bg-rose-100 text-rose-700 px-2 py-0.5 rounded font-bold">新規出展受付終了</span>}
                     {ex.preDates?.length > 0 && <span className="text-[10px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded font-bold">前日搬入あり</span>}
                     <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded font-bold flex items-center gap-1"><Building2 size={10} /> {makerCount}社参加</span>
                     {/* 講演会ありラベル */}
@@ -8915,7 +8951,7 @@ function App() {
   const [view, setView] = useState('loading');
   const [exhibitions, setExhibitions] = useState(null);
   const [selectedExhibition, setSelectedExhibition] = useState(null);
-  const [newExhibition, setNewExhibition] = useState({ title: '', dates: [], preDates: [], place: '', prefecture: '', venueAddress: '', venueFloor: '', openTime: '10:00', closeTime: '17:00', concept: '', exhibitionManagerName: '', targetVisitors: 0, targetMakers: 0, targetProfit: 0, venueUrl: '', googleMapsUrl: '', imageUrl: '', staff: '' });
+  const [newExhibition, setNewExhibition] = useState({ title: '', dates: [], preDates: [], place: '', prefecture: '', venueAddress: '', venueFloor: '', openTime: '10:00', closeTime: '17:00', concept: '', exhibitionManagerName: '', newMakerReceptionClosed: false, targetVisitors: 0, targetMakers: 0, targetProfit: 0, venueUrl: '', googleMapsUrl: '', imageUrl: '', staff: '' });
   const [exhibitionTabs, setExhibitionTabs] = useState({}); // { [exhibitionId]: 'activeTabName' }
   const { user, db, storage, appId } = useFirebaseInit();
   const [urlMode, setUrlMode] = useState('dashboard');
@@ -9311,7 +9347,7 @@ function App() {
       await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'exhibitions', id), newProject);
       console.log('[DEBUG] Creation success');
       setView('dashboard');
-      setNewExhibition({ title: '', dates: [], preDates: [], place: '', prefecture: '', venueAddress: '', venueFloor: '', openTime: '10:00', closeTime: '17:00', concept: '', exhibitionManagerName: '', targetVisitors: 0, targetMakers: 0, targetProfit: 0, venueUrl: '', googleMapsUrl: '', imageUrl: '', staff: '' });
+      setNewExhibition({ title: '', dates: [], preDates: [], place: '', prefecture: '', venueAddress: '', venueFloor: '', openTime: '10:00', closeTime: '17:00', concept: '', exhibitionManagerName: '', newMakerReceptionClosed: false, targetVisitors: 0, targetMakers: 0, targetProfit: 0, venueUrl: '', googleMapsUrl: '', imageUrl: '', staff: '' });
 
     } catch (e) {
       console.error('[DEBUG] Creation error:', e);

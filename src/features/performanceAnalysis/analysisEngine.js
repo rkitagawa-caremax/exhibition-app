@@ -529,7 +529,7 @@ export const buildCompanyPerformanceStats = (exhibitions) => {
     });
   });
 
-  return Array.from(statsByCompany.values()).map((company) => {
+  const companyRows = Array.from(statsByCompany.values()).map((company) => {
     const invited = company.invitedExhibitions.size;
     const confirmed = company.confirmedExhibitions.size;
     const declined = company.declinedExhibitions.size;
@@ -550,6 +550,28 @@ export const buildCompanyPerformanceStats = (exhibitions) => {
       autoDeclineRate
     };
   });
+
+  const totalInvited = companyRows.reduce((sum, company) => sum + company.invited, 0);
+  const totalDeclined = companyRows.reduce((sum, company) => sum + company.declined, 0);
+  const companyCount = Math.max(companyRows.length, 1);
+  const globalDeclineRate = totalInvited > 0 ? (totalDeclined / totalInvited) : 0;
+  const smoothingInvites = totalInvited > 0 ? Math.max(3, totalInvited / companyCount) : 3;
+
+  return companyRows.map((company) => {
+    const adjustedDeclineRate = company.invited > 0
+      ? Number(((
+        (company.declined + (globalDeclineRate * smoothingInvites))
+        / (company.invited + smoothingInvites)
+      ) * 100).toFixed(1))
+      : 0;
+
+    return {
+      ...company,
+      adjustedDeclineRate,
+      adjustedDeclineRateLabel: adjustedDeclineRate.toFixed(1),
+      declineSmoothingInvites: Number(smoothingInvites.toFixed(1))
+    };
+  });
 };
 
 export const buildCompanyRanking = (companyPerformanceStats) => {
@@ -568,14 +590,21 @@ export const buildCompanyRanking = (companyPerformanceStats) => {
 export const buildDeclineRanking = (companyPerformanceStats) => {
   return [...(companyPerformanceStats || [])]
     .filter((company) => company.invited >= 3)
-    .sort((a, b) => b.declineRate - a.declineRate || b.declined - a.declined || b.invited - a.invited || a.name.localeCompare(b.name, 'ja'))
+    .sort((a, b) => (
+      (b.adjustedDeclineRate || 0) - (a.adjustedDeclineRate || 0)
+      || b.declined - a.declined
+      || b.invited - a.invited
+      || b.declineRate - a.declineRate
+      || a.name.localeCompare(b.name, 'ja')
+    ))
     .slice(0, 30)
     .map((company) => ({
       name: company.name,
       code: company.code,
       invited: company.invited,
       declined: company.declined,
-      rate: company.declineRate.toFixed(1)
+      rate: (company.adjustedDeclineRate || 0).toFixed(1),
+      rawRate: company.declineRate.toFixed(1)
     }));
 };
 
@@ -865,7 +894,13 @@ export const buildMakerStrategyReport = ({ companyPerformanceStats, generatedAt 
 
   const highDecliners = [...companies]
     .filter((company) => company.invited >= 2)
-    .sort((a, b) => b.declineRate - a.declineRate || b.declined - a.declined || b.invited - a.invited || a.name.localeCompare(b.name, 'ja'))
+    .sort((a, b) => (
+      (b.adjustedDeclineRate || 0) - (a.adjustedDeclineRate || 0)
+      || b.declined - a.declined
+      || b.invited - a.invited
+      || b.declineRate - a.declineRate
+      || a.name.localeCompare(b.name, 'ja')
+    ))
     .slice(0, 30)
     .map((company) => ({
       ...company,
@@ -881,7 +916,7 @@ export const buildMakerStrategyReport = ({ companyPerformanceStats, generatedAt 
       || b.declineRate - a.declineRate
       || a.name.localeCompare(b.name, 'ja')
     ))
-    .slice(0, 5)
+    .slice(0, 10)
     .map((company) => ({
       ...company,
       strategy: strategyLabel(company)
